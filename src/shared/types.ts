@@ -58,6 +58,7 @@ export interface GeneratedQuery {
 export interface ChatTurnResponse {
   message: ChatMessage;
   generatedQuery?: GeneratedQuery;
+  queryResult?: QueryResult;
 }
 
 export interface ProviderSettings {

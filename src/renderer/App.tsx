@@ -172,7 +172,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         setQuery(response.generatedQuery.query);
         setValidation(response.generatedQuery.validation);
       }
-      setStatus('Response ready');
+      if (response.queryResult) {
+        setResult(response.queryResult);
+        setStatus(`Returned ${response.queryResult.rowCount} rows in ${response.queryResult.elapsedMs} ms`);
+      } else {
+        setStatus('Response ready');
+      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Chat failed.');
     } finally {
@@ -380,7 +385,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
               </table>
             </div>
           ) : (
-            <div className="empty-state">Run a generated query to see rows here.</div>
+            <div className="empty-state">Ask a data question to see rows here.</div>
           )}
         </section>
 

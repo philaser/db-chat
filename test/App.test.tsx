@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from '../src/renderer/App';
 import type { DbChatApi } from '../src/shared/types';
@@ -23,7 +23,7 @@ function makeApi(): DbChatApi {
       message: {
         id: 'assistant-1',
         role: 'assistant' as const,
-        content: 'Try this query.',
+        content: 'I found Ada in the users table.',
         createdAt: new Date().toISOString()
       },
       generatedQuery: {
@@ -34,6 +34,12 @@ function makeApi(): DbChatApi {
           reason: 'Read-only query allowed by SAFE mode.',
           normalizedQuery: 'select name from users;'
         }
+      },
+      queryResult: {
+        columns: ['name'],
+        rows: [{ name: 'Ada' }],
+        rowCount: 1,
+        elapsedMs: 1
       }
     })),
     loadSettings: vi.fn(async () => ({
@@ -56,7 +62,7 @@ function makeApi(): DbChatApi {
 }
 
 describe('App', () => {
-  it('places generated SQL in the query pane and renders result rows', async () => {
+  it('places generated SQL in the query pane and renders automatic result rows', async () => {
     const api = makeApi();
     render(<App api={api} />);
 
@@ -67,12 +73,12 @@ describe('App', () => {
 
     const editor = await screen.findByDisplayValue('select name from users;');
     expect(editor).toBeInTheDocument();
+    expect(await screen.findByText('Ada')).toBeInTheDocument();
+    expect(within(screen.getByLabelText('Chat')).queryByText(/select name from users;/)).not.toBeInTheDocument();
     expect(api.sendChat).toHaveBeenCalledWith(expect.arrayContaining([
       expect.objectContaining({ role: 'user', content: 'show users' })
     ]));
-
-    fireEvent.click(screen.getByText('Run Safe Query'));
-    await waitFor(() => expect(screen.getByText('Ada')).toBeInTheDocument());
+    expect(api.executeQuery).not.toHaveBeenCalled();
   });
 
   it('shows blocked validation for unsafe SQL', async () => {

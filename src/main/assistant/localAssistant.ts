@@ -1,4 +1,4 @@
-import type { DatabaseSchema, GeneratedQuery } from '../../shared/types.js';
+import type { DatabaseSchema, GeneratedQuery, QueryResult } from '../../shared/types.js';
 import { validateSqliteReadOnlyQuery } from '../connectors/sqliteValidation.js';
 
 function firstTable(schema: DatabaseSchema | null): string | null {
@@ -18,6 +18,31 @@ export function buildSystemPrompt(schemaContext: string): string {
 export function extractSqlBlock(content: string): string | null {
   const match = content.match(/```sql\s*([\s\S]*?)```/i);
   return match?.[1]?.trim() ?? null;
+}
+
+export function removeSqlBlocks(content: string): string {
+  return content
+    .replace(/```sql\s*[\s\S]*?```/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export function summarizeQueryResult(result: QueryResult): string {
+  if (result.rowCount === 0) {
+    return `I ran the safe read-only query and it returned no rows in ${result.elapsedMs} ms.`;
+  }
+
+  const previewRows = result.rows.slice(0, 5).map((row) => {
+    return result.columns.map((column) => `${column}: ${String(row[column] ?? '')}`).join(', ');
+  });
+  const moreRows = result.rowCount > previewRows.length ? `\n\nShowing ${previewRows.length} of ${result.rowCount} returned rows in the data panel.` : '';
+
+  return [
+    `I ran the safe read-only query and it returned ${result.rowCount} row${result.rowCount === 1 ? '' : 's'} in ${result.elapsedMs} ms.`,
+    '',
+    previewRows.join('\n'),
+    moreRows
+  ].join('\n').trim();
 }
 
 export function buildLocalAssistantResponse(prompt: string, schema: DatabaseSchema | null): { content: string; query?: GeneratedQuery } {
@@ -45,7 +70,7 @@ export function buildLocalAssistantResponse(prompt: string, schema: DatabaseSche
   const validation = validateSqliteReadOnlyQuery(query, 'safe');
 
   return {
-    content: `I drafted a safe read-only SQLite query for the current database.\n\n\`\`\`sql\n${query}\n\`\`\``,
+    content: 'I can answer that by running a safe read-only query against the connected database.',
     query: {
       query,
       explanation: 'Local fallback query generated from the connected schema.',
