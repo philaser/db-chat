@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/renderer/App';
 import type { DbChatApi } from '../src/shared/types';
 
@@ -62,6 +62,10 @@ function makeApi(): DbChatApi {
 }
 
 describe('App', () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+
   it('places generated SQL in the query pane and renders automatic result rows', async () => {
     const api = makeApi();
     render(<App api={api} />);
@@ -79,6 +83,59 @@ describe('App', () => {
       expect.objectContaining({ role: 'user', content: 'show users' })
     ]));
     expect(api.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it('renders markdown in chat messages', async () => {
+    const api = makeApi();
+    vi.mocked(api.sendChat).mockResolvedValueOnce({
+      message: {
+        id: 'assistant-markdown',
+        role: 'assistant' as const,
+        content: '**Users**\n\n- `Ada`\n- Grace',
+        createdAt: new Date().toISOString()
+      }
+    });
+    render(<App api={api} />);
+
+    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
+      target: { value: 'summarize users' }
+    });
+    fireEvent.click(screen.getByLabelText('Send message'));
+
+    expect((await screen.findByText('Users')).tagName).toBe('STRONG');
+    expect(screen.getByText('Ada').tagName).toBe('CODE');
+    expect(screen.getByText('Grace')).toBeInTheDocument();
+  });
+
+  it('shows a generating indicator while waiting for an answer and scrolls to new messages', async () => {
+    const api = makeApi();
+    let resolveChat: (value: Awaited<ReturnType<DbChatApi['sendChat']>>) => void = () => undefined;
+    vi.mocked(api.sendChat).mockReturnValueOnce(new Promise((resolve) => {
+      resolveChat = resolve;
+    }));
+    render(<App api={api} />);
+
+    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
+      target: { value: 'show users' }
+    });
+    fireEvent.click(screen.getByLabelText('Send message'));
+
+    expect(await screen.findByLabelText('Generating answer')).toBeInTheDocument();
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+
+    resolveChat({
+      message: {
+        id: 'assistant-done',
+        role: 'assistant' as const,
+        content: 'Done.',
+        createdAt: new Date().toISOString()
+      }
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText('Generating answer')).not.toBeInTheDocument();
+      expect(screen.getByText('Done.')).toBeInTheDocument();
+    });
   });
 
   it('shows blocked validation for unsafe SQL', async () => {

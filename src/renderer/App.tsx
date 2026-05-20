@@ -1,5 +1,7 @@
 import { CheckCircle2, Copy, Database, KeyRound, Loader2, Play, Send, Settings, ShieldCheck } from 'lucide-react';
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type {
   ChatMessage,
   ConnectionConfig,
@@ -47,6 +49,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [apiKey, setApiKey] = useState('');
   const [status, setStatus] = useState('Ready');
   const [busy, setBusy] = useState(false);
+  const [answerGenerating, setAnswerGenerating] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!api) {
@@ -108,6 +112,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     return () => window.clearTimeout(timeout);
   }, [api, query]);
 
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages, answerGenerating]);
+
   const schemaSummary = useMemo(() => {
     if (!schema) {
       return 'No database connected';
@@ -160,6 +168,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setMessages((current) => [...current, userMessage]);
     setPrompt('');
     setBusy(true);
+    setAnswerGenerating(true);
     setStatus('Thinking...');
     try {
       const chatHistory: ModelChatMessage[] = nextMessages.map((message) => ({
@@ -181,6 +190,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Chat failed.');
     } finally {
+      setAnswerGenerating(false);
       setBusy(false);
     }
   }
@@ -348,9 +358,16 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           <div className="messages">
             {messages.map((message) => (
               <article className={`message ${message.role}`} key={message.id}>
-                <div>{message.content}</div>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
               </article>
             ))}
+            {answerGenerating && (
+              <article className="message assistant generating" aria-live="polite" aria-label="Generating answer">
+                <Loader2 className="message-spinner" size={16} aria-hidden="true" />
+                <span>Generating answer</span>
+              </article>
+            )}
+            <div ref={messagesEndRef} />
           </div>
           <form className="composer" onSubmit={(event) => void sendChat(event)}>
             <textarea
