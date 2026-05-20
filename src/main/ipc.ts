@@ -1,6 +1,13 @@
 import { BrowserWindow, dialog } from 'electron';
 import path from 'node:path';
-import type { ConnectionConfig, DatabaseConnector, DatabaseSchema, ModelProviderKind, PersistedSettings } from '../shared/types.js';
+import type {
+  ConnectionConfig,
+  DatabaseConnector,
+  DatabaseSchema,
+  ModelChatMessage,
+  ModelProviderKind,
+  PersistedSettings
+} from '../shared/types.js';
 import type { OpenDialogOptions } from 'electron';
 import { SQLiteConnector } from './connectors/SQLiteConnector.js';
 import { buildLocalAssistantResponse, buildSystemPrompt, extractSqlBlock } from './assistant/localAssistant.js';
@@ -57,10 +64,14 @@ export class IpcController {
     return this.schema;
   }
 
-  async sendChat(prompt: string) {
+  async sendChat(messages: ModelChatMessage[]) {
     const settings = this.store.loadSettings();
     const apiKey = this.store.getApiKey(settings.provider);
     const schemaContext = this.connector ? await this.connector.getContextForPrompt() : 'No database is connected.';
+    const chatHistory = messages
+      .filter((message) => message.role === 'user' || message.role === 'assistant')
+      .slice(-16);
+    const prompt = [...chatHistory].reverse().find((message) => message.role === 'user')?.content ?? '';
 
     if (!apiKey) {
       const local = buildLocalAssistantResponse(prompt, this.schema);
@@ -78,7 +89,7 @@ export class IpcController {
     const provider = modelProviders[settings.provider];
     const content = await provider.sendChat([
       { role: 'system', content: buildSystemPrompt(schemaContext) },
-      { role: 'user', content: prompt }
+      ...chatHistory
     ], {
       model: settings.model || provider.defaultModel,
       apiKey,

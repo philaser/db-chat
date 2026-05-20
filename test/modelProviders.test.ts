@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { normalizeApiKey } from '../src/main/model/apiKeys';
-import { buildOpenAIRequest, buildOpenRouterRequest } from '../src/main/model/providers';
+import { buildOpenAIRequest, buildOpenRouterRequest, openRouterProvider } from '../src/main/model/providers';
 
 const messages = [{ role: 'user' as const, content: 'hello' }];
 
@@ -26,5 +26,38 @@ describe('model provider request shaping', () => {
 
   it('rejects rich text or emoji characters in API keys', () => {
     expect(() => normalizeApiKey('sk-test-🔑')).toThrow(/unsupported characters/i);
+  });
+
+  it('loads OpenRouter models from the provider catalog', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        data: [
+          { id: 'deepseek/deepseek-chat', name: 'DeepSeek Chat' },
+          { id: 'openai/gpt-4.1-mini', name: 'OpenAI GPT-4.1 Mini' }
+        ]
+      })
+    })));
+
+    await expect(openRouterProvider.listModels(' key ')).resolves.toEqual([
+      { id: 'deepseek/deepseek-chat', name: 'DeepSeek Chat' },
+      { id: 'openai/gpt-4.1-mini', name: 'OpenAI GPT-4.1 Mini' }
+    ]);
+    expect(fetch).toHaveBeenCalledWith('https://openrouter.ai/api/v1/models', {
+      headers: {
+        Authorization: 'Bearer key',
+        'Content-Type': 'application/json'
+      }
+    });
+  });
+
+  it('falls back when OpenRouter model loading fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 500
+    })));
+
+    const models = await openRouterProvider.listModels();
+    expect(models.map((model) => model.id)).toContain('openai/gpt-4.1-mini');
   });
 });

@@ -4,6 +4,7 @@ import type {
   ChatMessage,
   ConnectionConfig,
   DatabaseSchema,
+  ModelChatMessage,
   ModelInfo,
   ModelProviderKind,
   PersistedSettings,
@@ -41,6 +42,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelSearch, setModelSearch] = useState(settings.model);
   const [settingsStatus, setSettingsStatus] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [status, setStatus] = useState('Ready');
@@ -71,6 +73,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         if (nextModels.length && !nextModels.some((model) => model.id === settings.model)) {
           const nextSettings = { ...settings, model: nextModels[0].id };
           setSettings((current) => ({ ...current, model: nextModels[0].id }));
+          setModelSearch(nextModels[0].id);
           void api.saveSettings(nextSettings);
         }
       })
@@ -87,6 +90,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       active = false;
     };
   }, [api, settings.provider]);
+
+  useEffect(() => {
+    setModelSearch(settings.model);
+  }, [settings.model]);
 
   useEffect(() => {
     if (!api || !query) {
@@ -107,6 +114,14 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     }
     return `${schema.tables.length} table${schema.tables.length === 1 ? '' : 's'} connected`;
   }, [schema]);
+
+  const filteredModels = useMemo(() => {
+    const query = modelSearch.trim().toLowerCase();
+    if (!query) {
+      return models;
+    }
+    return models.filter((model) => `${model.id} ${model.name}`.toLowerCase().includes(query));
+  }, [modelSearch, models]);
 
   async function connectSqlite() {
     if (!api) {
@@ -141,12 +156,17 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     if (!api || !prompt.trim()) return;
 
     const userMessage = nowMessage('user', prompt.trim());
+    const nextMessages = [...messages, userMessage];
     setMessages((current) => [...current, userMessage]);
     setPrompt('');
     setBusy(true);
     setStatus('Thinking...');
     try {
-      const response = await api.sendChat(userMessage.content);
+      const chatHistory: ModelChatMessage[] = nextMessages.map((message) => ({
+        role: message.role,
+        content: message.content
+      }));
+      const response = await api.sendChat(chatHistory);
       setMessages((current) => [...current, response.message]);
       if (response.generatedQuery) {
         setQuery(response.generatedQuery.query);
@@ -185,6 +205,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     const fallbackModel = provider === 'openrouter' ? 'openai/gpt-4.1-mini' : 'gpt-4.1-mini';
     const nextSettings = { ...settings, provider, model: fallbackModel };
     setSettings((current) => ({ ...current, provider, model: fallbackModel, hasApiKey: false }));
+    setModelSearch(fallbackModel);
     setSettingsStatus('Loading models...');
     await api?.saveSettings(nextSettings);
     const loadedSettings = await api?.loadSettings();
@@ -197,6 +218,15 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     const nextSettings = { ...settings, model };
     await saveSettings(nextSettings);
     setSettingsStatus('Model saved.');
+  }
+
+  async function changeModelSearch(value: string) {
+    setModelSearch(value);
+    const match = models.find((model) => model.id === value || model.name === value);
+    if (match && match.id !== settings.model) {
+      await changeModel(match.id);
+      setModelSearch(match.id);
+    }
   }
 
   async function saveApiKey() {
@@ -266,20 +296,19 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             <label>
               <span>Model</span>
               <div className="model-select-wrap">
-                <select
-                  value={settings.model}
-                  onChange={(event) => void changeModel(event.target.value)}
+                <input
+                  value={modelSearch}
+                  onChange={(event) => void changeModelSearch(event.target.value)}
+                  list="model-options"
                   disabled={modelsLoading || !models.length}
                   aria-label="Model name"
-                >
-                  {models.length ? (
-                    models.map((model) => (
-                      <option value={model.id} key={model.id}>{model.name}</option>
-                    ))
-                  ) : (
-                    <option value={settings.model}>{settings.model}</option>
-                  )}
-                </select>
+                  placeholder={modelsLoading ? 'Loading models...' : 'Search models'}
+                />
+                <datalist id="model-options">
+                  {filteredModels.map((model) => (
+                    <option value={model.id} key={model.id}>{model.name}</option>
+                  ))}
+                </datalist>
                 {modelsLoading && <Loader2 className="spin" size={16} aria-label="Loading models" />}
               </div>
             </label>

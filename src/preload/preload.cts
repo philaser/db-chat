@@ -1,6 +1,7 @@
 import type {
   ConnectionConfig,
   DbChatApi,
+  ModelChatMessage,
   ModelProviderKind,
   PersistedSettings,
   QueryExecutionMode
@@ -14,7 +15,7 @@ const api: DbChatApi = {
   getSchema: () => ipcRenderer.invoke('dbchat:get-schema'),
   validateQuery: (query: string, mode: QueryExecutionMode) => ipcRenderer.invoke('dbchat:validate-query', query, mode),
   executeQuery: (query: string) => ipcRenderer.invoke('dbchat:execute-query', query),
-  sendChat: (prompt: string) => ipcRenderer.invoke('dbchat:send-chat', prompt),
+  sendChat: (messages: ModelChatMessage[]) => ipcRenderer.invoke('dbchat:send-chat', messages),
   loadSettings: () => ipcRenderer.invoke('dbchat:load-settings'),
   saveSettings: (settings: PersistedSettings) => ipcRenderer.invoke('dbchat:save-settings', settings),
   saveApiKey: (provider: ModelProviderKind, apiKey: string) => ipcRenderer.invoke('dbchat:save-api-key', provider, apiKey),

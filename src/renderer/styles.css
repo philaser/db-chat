@@ -177,7 +177,7 @@ button:disabled {
   position: relative;
 }
 
-.model-select-wrap select {
+.model-select-wrap input {
   padding-right: 34px;
 }
 
