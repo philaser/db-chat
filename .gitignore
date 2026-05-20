@@ -1,0 +1,7 @@
+node_modules
+dist-renderer
+dist-electron
+.vite
+coverage
+*.log
+.DS_Store
