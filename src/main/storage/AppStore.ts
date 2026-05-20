@@ -1,12 +1,20 @@
 import { app, safeStorage } from 'electron';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import type { ModelProviderKind, PersistedSettings } from '../../shared/types.js';
+import type {
+  ConnectionConfig,
+  ConnectionHistoryItem,
+  ModelProviderKind,
+  PersistedChatSession,
+  PersistedSettings
+} from '../../shared/types.js';
 import { normalizeApiKey } from '../model/apiKeys.js';
 
 interface StoreData {
   settings: PersistedSettings;
   encryptedApiKeys: Partial<Record<ModelProviderKind, string>>;
+  connections: ConnectionHistoryItem[];
+  chatSessions: PersistedChatSession[];
 }
 
 const DEFAULT_SETTINGS: PersistedSettings = {
@@ -52,18 +60,74 @@ export class AppStore {
     return Boolean(this.read().encryptedApiKeys[provider]);
   }
 
+  listConnections(): ConnectionHistoryItem[] {
+    return this.read().connections;
+  }
+
+  saveConnection(config: ConnectionConfig): ConnectionHistoryItem {
+    const data = this.read();
+    const saved = this.normalizeConnection({
+      ...config,
+      lastConnectedAt: new Date().toISOString()
+    });
+    const connections = [
+      saved,
+      ...data.connections.filter((connection) => connection.id !== saved.id && connection.databasePath !== saved.databasePath)
+    ].slice(0, 20);
+    this.write({ ...data, connections });
+    return saved;
+  }
+
+  deleteConnection(id: string): void {
+    const data = this.read();
+    this.write({
+      ...data,
+      connections: data.connections.filter((connection) => connection.id !== id),
+      chatSessions: data.chatSessions.map((session) => (
+        session.connection?.id === id ? { ...session, connection: undefined } : session
+      ))
+    });
+  }
+
+  listChatSessions(): PersistedChatSession[] {
+    return this.read().chatSessions;
+  }
+
+  saveChatSession(session: PersistedChatSession): PersistedChatSession {
+    const data = this.read();
+    const saved = this.normalizeChatSession(session);
+    const chatSessions = [
+      saved,
+      ...data.chatSessions.filter((item) => item.id !== saved.id)
+    ].slice(0, 50);
+    this.write({ ...data, chatSessions });
+    return saved;
+  }
+
+  deleteChatSession(id: string): void {
+    const data = this.read();
+    this.write({
+      ...data,
+      chatSessions: data.chatSessions.filter((session) => session.id !== id)
+    });
+  }
+
   private read(): StoreData {
     try {
       const raw = readFileSync(this.filePath, 'utf8');
       const parsed = JSON.parse(raw) as Partial<StoreData>;
       return {
         settings: this.normalizeSettings({ ...DEFAULT_SETTINGS, ...parsed.settings }),
-        encryptedApiKeys: parsed.encryptedApiKeys ?? {}
+        encryptedApiKeys: parsed.encryptedApiKeys ?? {},
+        connections: (parsed.connections ?? []).map((connection) => this.normalizeConnection(connection)).filter(Boolean),
+        chatSessions: (parsed.chatSessions ?? []).map((session) => this.normalizeChatSession(session)).filter(Boolean)
       };
     } catch {
       return {
         settings: DEFAULT_SETTINGS,
-        encryptedApiKeys: {}
+        encryptedApiKeys: {},
+        connections: [],
+        chatSessions: []
       };
     }
   }
@@ -78,6 +142,38 @@ export class AppStore {
       provider: settings.provider,
       model: settings.model,
       safeMode: settings.safeMode
+    };
+  }
+
+  private normalizeConnection(connection: Partial<ConnectionHistoryItem>): ConnectionHistoryItem {
+    const createdAt = connection.createdAt ?? new Date().toISOString();
+    return {
+      id: connection.id || crypto.randomUUID(),
+      kind: connection.kind === 'sqlite' ? 'sqlite' : 'sqlite',
+      label: connection.label || 'SQLite database',
+      databasePath: connection.databasePath,
+      createdAt,
+      lastConnectedAt: connection.lastConnectedAt ?? createdAt
+    };
+  }
+
+  private normalizeChatSession(session: Partial<PersistedChatSession>): PersistedChatSession {
+    const createdAt = session.createdAt ?? new Date().toISOString();
+    const messages = (session.messages ?? []).filter((message) => (
+      message && (message.role === 'user' || message.role === 'assistant' || message.role === 'system') && typeof message.content === 'string'
+    ));
+    return {
+      id: session.id || crypto.randomUUID(),
+      title: session.title?.trim() || 'Untitled chat',
+      messages,
+      connection: session.connection ? this.normalizeConnection({
+        ...session.connection,
+        lastConnectedAt: session.connection.createdAt
+      }) : undefined,
+      query: session.query,
+      result: session.result,
+      createdAt,
+      updatedAt: session.updatedAt ?? createdAt
     };
   }
 

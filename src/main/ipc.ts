@@ -2,11 +2,13 @@ import { BrowserWindow, dialog } from 'electron';
 import path from 'node:path';
 import type {
   ConnectionConfig,
+  ConnectionHistoryItem,
   DatabaseConnector,
   DatabaseSchema,
   ModelChatMessage,
   ModelProvider,
   ModelProviderKind,
+  PersistedChatSession,
   PersistedSettings,
   QueryResult
 } from '../shared/types.js';
@@ -66,6 +68,7 @@ export class IpcController {
     await connector.connect(config);
     this.connector = connector;
     this.schema = await connector.introspect();
+    this.store.saveConnection(config);
     return this.schema;
   }
 
@@ -198,6 +201,26 @@ export class IpcController {
 
   async listModels(provider: ModelProviderKind) {
     return modelProviders[provider].listModels(this.store.getApiKey(provider) ?? undefined);
+  }
+
+  listChatSessions(): PersistedChatSession[] {
+    return this.store.listChatSessions();
+  }
+
+  saveChatSession(session: PersistedChatSession): PersistedChatSession {
+    return this.store.saveChatSession(session);
+  }
+
+  deleteChatSession(id: string): void {
+    this.store.deleteChatSession(id);
+  }
+
+  listConnections(): ConnectionHistoryItem[] {
+    return this.store.listConnections();
+  }
+
+  deleteConnection(id: string): void {
+    this.store.deleteConnection(id);
   }
 
   requireConnector(): DatabaseConnector {

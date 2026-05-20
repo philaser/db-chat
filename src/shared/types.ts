@@ -61,6 +61,21 @@ export interface ChatTurnResponse {
   queryResult?: QueryResult;
 }
 
+export interface ConnectionHistoryItem extends ConnectionConfig {
+  lastConnectedAt: string;
+}
+
+export interface PersistedChatSession {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  connection?: ConnectionConfig;
+  query?: string;
+  result?: QueryResult;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ProviderSettings {
   provider: ModelProviderKind;
   model: string;
@@ -116,4 +131,9 @@ export interface DbChatApi {
   saveSettings(settings: PersistedSettings): Promise<void>;
   saveApiKey(provider: ModelProviderKind, apiKey: string): Promise<void>;
   listModels(provider: ModelProviderKind): Promise<ModelInfo[]>;
+  listChatSessions(): Promise<PersistedChatSession[]>;
+  saveChatSession(session: PersistedChatSession): Promise<PersistedChatSession>;
+  deleteChatSession(id: string): Promise<void>;
+  listConnections(): Promise<ConnectionHistoryItem[]>;
+  deleteConnection(id: string): Promise<void>;
 }

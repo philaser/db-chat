@@ -19,7 +19,12 @@ const api: DbChatApi = {
   loadSettings: () => ipcRenderer.invoke('dbchat:load-settings'),
   saveSettings: (settings: PersistedSettings) => ipcRenderer.invoke('dbchat:save-settings', settings),
   saveApiKey: (provider: ModelProviderKind, apiKey: string) => ipcRenderer.invoke('dbchat:save-api-key', provider, apiKey),
-  listModels: (provider: ModelProviderKind) => ipcRenderer.invoke('dbchat:list-models', provider)
+  listModels: (provider: ModelProviderKind) => ipcRenderer.invoke('dbchat:list-models', provider),
+  listChatSessions: () => ipcRenderer.invoke('dbchat:list-chat-sessions'),
+  saveChatSession: (session) => ipcRenderer.invoke('dbchat:save-chat-session', session),
+  deleteChatSession: (id: string) => ipcRenderer.invoke('dbchat:delete-chat-session', id),
+  listConnections: () => ipcRenderer.invoke('dbchat:list-connections'),
+  deleteConnection: (id: string) => ipcRenderer.invoke('dbchat:delete-connection', id)
 };
 
 contextBridge.exposeInMainWorld('dbchat', api);
