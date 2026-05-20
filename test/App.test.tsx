@@ -46,7 +46,10 @@ function makeApi(): DbChatApi {
     saveApiKey: vi.fn(),
     listModels: vi.fn(async (provider: 'openrouter' | 'openai') => (
       provider === 'openrouter'
-        ? [{ id: 'openai/gpt-4.1-mini', name: 'OpenAI GPT-4.1 Mini' }]
+        ? [
+          { id: 'openai/gpt-4.1-mini', name: 'OpenAI GPT-4.1 Mini' },
+          { id: 'deepseek/deepseek-chat-v3.1', name: 'DeepSeek V3.1' }
+        ]
         : [{ id: 'gpt-4.1-mini', name: 'GPT-4.1 Mini' }]
     ))
   };
@@ -64,6 +67,9 @@ describe('App', () => {
 
     const editor = await screen.findByDisplayValue('select name from users;');
     expect(editor).toBeInTheDocument();
+    expect(api.sendChat).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ role: 'user', content: 'show users' })
+    ]));
 
     fireEvent.click(screen.getByText('Run Safe Query'));
     await waitFor(() => expect(screen.getByText('Ada')).toBeInTheDocument());
@@ -87,7 +93,7 @@ describe('App', () => {
     render(<App api={api} />);
 
     fireEvent.click(screen.getByLabelText('Open settings'));
-    expect(await screen.findByText('OpenAI GPT-4.1 Mini')).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('openai/gpt-4.1-mini')).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('API key'), {
       target: { value: 'test-key' }
@@ -97,6 +103,29 @@ describe('App', () => {
     await waitFor(() => {
       expect(api.saveApiKey).toHaveBeenCalledWith('openrouter', 'test-key');
       expect(screen.getByText('API key saved successfully.')).toBeInTheDocument();
+    });
+  });
+
+  it('filters and saves models from the searchable model field', async () => {
+    const api = makeApi();
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByLabelText('Open settings'));
+    const modelInput = await screen.findByLabelText('Model name');
+    fireEvent.change(modelInput, {
+      target: { value: 'deep' }
+    });
+
+    expect(screen.getByText('DeepSeek V3.1')).toBeInTheDocument();
+
+    fireEvent.change(modelInput, {
+      target: { value: 'deepseek/deepseek-chat-v3.1' }
+    });
+
+    await waitFor(() => {
+      expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({
+        model: 'deepseek/deepseek-chat-v3.1'
+      }));
     });
   });
 });

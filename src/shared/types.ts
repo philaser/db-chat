@@ -110,7 +110,7 @@ export interface DbChatApi {
   getSchema(): Promise<DatabaseSchema | null>;
   validateQuery(query: string, mode: QueryExecutionMode): Promise<QueryValidationResult>;
   executeQuery(query: string): Promise<QueryResult>;
-  sendChat(prompt: string): Promise<ChatTurnResponse>;
+  sendChat(messages: ModelChatMessage[]): Promise<ChatTurnResponse>;
   loadSettings(): Promise<PersistedSettings & { hasApiKey: boolean }>;
   saveSettings(settings: PersistedSettings): Promise<void>;
   saveApiKey(provider: ModelProviderKind, apiKey: string): Promise<void>;
