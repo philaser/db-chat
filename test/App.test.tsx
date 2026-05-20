@@ -57,16 +57,23 @@ function makeApi(): DbChatApi {
           { id: 'deepseek/deepseek-chat-v3.1', name: 'DeepSeek V3.1' }
         ]
         : [{ id: 'gpt-4.1-mini', name: 'GPT-4.1 Mini' }]
-    ))
+    )),
+    listChatSessions: vi.fn(async () => []),
+    saveChatSession: vi.fn(async (session) => session),
+    deleteChatSession: vi.fn(),
+    listConnections: vi.fn(async () => []),
+    deleteConnection: vi.fn()
   };
 }
 
 describe('App', () => {
   beforeEach(() => {
     Element.prototype.scrollIntoView = vi.fn();
+    window.localStorage.clear();
+    document.documentElement.removeAttribute('data-theme');
   });
 
-  it('places generated SQL in the query pane and renders automatic result rows', async () => {
+  it('places generated SQL in the query inspector and renders automatic result rows', async () => {
     const api = makeApi();
     render(<App api={api} />);
 
@@ -75,13 +82,22 @@ describe('App', () => {
     });
     fireEvent.click(screen.getByLabelText('Send message'));
 
-    const editor = await screen.findByDisplayValue('select name from users;');
-    expect(editor).toBeInTheDocument();
+    expect(await screen.findByLabelText('Data results')).toBeInTheDocument();
     expect(await screen.findByText('Ada')).toBeInTheDocument();
     expect(within(screen.getByLabelText('Chat')).queryByText(/select name from users;/)).not.toBeInTheDocument();
+
+    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('button', { name: 'Query' }));
+    expect(await screen.findByDisplayValue('select name from users;')).toBeInTheDocument();
     expect(api.sendChat).toHaveBeenCalledWith(expect.arrayContaining([
       expect.objectContaining({ role: 'user', content: 'show users' })
     ]));
+    await waitFor(() => {
+      expect(api.saveChatSession).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'show users',
+        query: 'select name from users;',
+        result: expect.objectContaining({ rowCount: 1 })
+      }));
+    });
     expect(api.executeQuery).not.toHaveBeenCalled();
   });
 
@@ -142,6 +158,7 @@ describe('App', () => {
     const api = makeApi();
     render(<App api={api} />);
 
+    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('button', { name: 'Query' }));
     fireEvent.change(screen.getByPlaceholderText('Generated SQL will appear here.'), {
       target: { value: 'drop table users;' }
     });
@@ -149,6 +166,116 @@ describe('App', () => {
     await waitFor(() => {
       expect(screen.getByText('SAFE mode blocks statements that can change database state.')).toBeInTheDocument();
     });
+  });
+
+  it('switches theme modes and persists the selection', () => {
+    const api = makeApi();
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dark' }));
+    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(window.localStorage.getItem('dbchat:theme')).toBe('dark');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    expect(document.documentElement.dataset.theme).toBe('light');
+    expect(window.localStorage.getItem('dbchat:theme')).toBe('light');
+  });
+
+  it('uses DB-focused starter prompts to populate the composer', () => {
+    const api = makeApi();
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Summarize this database/i }));
+
+    expect(screen.getByPlaceholderText('Ask about the connected database...')).toHaveValue(
+      'Summarize the connected database and suggest the most useful questions to ask next.'
+    );
+  });
+
+  it('lets the inspector switch tabs and selects results after a manual safe query', async () => {
+    const api = makeApi();
+    render(<App api={api} />);
+
+    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('button', { name: 'Query' }));
+    fireEvent.change(screen.getByPlaceholderText('Generated SQL will appear here.'), {
+      target: { value: 'select name from users;' }
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Read-only query allowed by SAFE mode.')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run Safe Query' }));
+
+    expect(await screen.findByLabelText('Data results')).toBeInTheDocument();
+    expect(await screen.findByText('Ada')).toBeInTheDocument();
+    expect(api.executeQuery).toHaveBeenCalledWith('select name from users;');
+  });
+
+  it('loads chat and connection histories, restores sessions, and deletes history items', async () => {
+    const api = makeApi();
+    const connection = {
+      id: 'connection-1',
+      kind: 'sqlite' as const,
+      label: 'customers.db',
+      databasePath: '/tmp/customers.db',
+      createdAt: '2026-05-01T00:00:00.000Z'
+    };
+    const sessions = [{
+      id: 'session-1',
+      title: 'Top customers',
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user' as const,
+          content: 'show top customers',
+          createdAt: '2026-05-02T00:00:00.000Z'
+        },
+        {
+          id: 'assistant-history',
+          role: 'assistant' as const,
+          content: 'Ada is the top customer.',
+          createdAt: '2026-05-02T00:00:01.000Z'
+        }
+      ],
+      connection,
+      query: 'select name from customers;',
+      result: {
+        columns: ['name'],
+        rows: [{ name: 'Ada' }],
+        rowCount: 1,
+        elapsedMs: 2
+      },
+      createdAt: '2026-05-02T00:00:00.000Z',
+      updatedAt: '2026-05-02T00:00:01.000Z'
+    }];
+    const connections = [{
+      ...connection,
+      lastConnectedAt: '2026-05-03T00:00:00.000Z'
+    }];
+    vi.mocked(api.listChatSessions).mockImplementation(async () => sessions);
+    vi.mocked(api.listConnections).mockImplementation(async () => connections);
+    vi.mocked(api.connect).mockResolvedValue({
+      kind: 'sqlite',
+      label: 'customers.db',
+      tables: [{ name: 'customers', columns: [] }]
+    });
+
+    render(<App api={api} />);
+
+    expect(await screen.findByText('Top customers')).toBeInTheDocument();
+    expect(await screen.findByText('customers.db')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Top customers'));
+
+    expect(await screen.findByText('Ada is the top customer.')).toBeInTheDocument();
+    expect(api.connect).toHaveBeenCalledWith(connection);
+
+    fireEvent.click(screen.getByLabelText('Delete chat Top customers'));
+    expect(api.deleteChatSession).toHaveBeenCalledWith('session-1');
+
+    fireEvent.click(screen.getByLabelText('Delete connection customers.db'));
+    expect(api.deleteConnection).toHaveBeenCalledWith('connection-1');
   });
 
   it('loads models in settings and confirms API key save', async () => {

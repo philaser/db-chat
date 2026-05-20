@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AppStore } from './storage/AppStore.js';
 import { IpcController } from './ipc.js';
-import type { ConnectionConfig, ModelProviderKind, PersistedSettings, QueryExecutionMode } from '../shared/types.js';
+import type { ConnectionConfig, ModelProviderKind, PersistedChatSession, PersistedSettings, QueryExecutionMode } from '../shared/types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.VITE_DEV_SERVER_URL || !app.isPackaged;
@@ -49,6 +49,11 @@ function registerIpc(): void {
   ipcMain.handle('dbchat:save-settings', (_event, settings: PersistedSettings) => controller.saveSettings(settings));
   ipcMain.handle('dbchat:save-api-key', (_event, provider: ModelProviderKind, apiKey: string) => controller.saveApiKey(provider, apiKey));
   ipcMain.handle('dbchat:list-models', (_event, provider: ModelProviderKind) => controller.listModels(provider));
+  ipcMain.handle('dbchat:list-chat-sessions', () => controller.listChatSessions());
+  ipcMain.handle('dbchat:save-chat-session', (_event, session: PersistedChatSession) => controller.saveChatSession(session));
+  ipcMain.handle('dbchat:delete-chat-session', (_event, id: string) => controller.deleteChatSession(id));
+  ipcMain.handle('dbchat:list-connections', () => controller.listConnections());
+  ipcMain.handle('dbchat:delete-connection', (_event, id: string) => controller.deleteConnection(id));
 }
 
 void app.whenReady().then(() => {
