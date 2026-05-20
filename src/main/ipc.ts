@@ -14,6 +14,7 @@ import type { OpenDialogOptions } from 'electron';
 import { SQLiteConnector } from './connectors/SQLiteConnector.js';
 import {
   buildLocalAssistantResponse,
+  buildResultAnalysisPrompt,
   buildSystemPrompt,
   extractSqlBlock,
   removeSqlBlocks,
@@ -154,12 +155,7 @@ export class IpcController {
       const content = await provider.sendChat([
         {
           role: 'system',
-          content: [
-            'You are DB Chat, an assistant that helps users understand data returned from their connected database.',
-            'A safe read-only SQLite query has already been executed for the user.',
-            'Answer conversationally using the query result. Do not include SQL or fenced code blocks.',
-            'If the result is partial, say that you are using the returned preview.'
-          ].join('\n')
+          content: buildResultAnalysisPrompt()
         },
         ...chatHistory,
         {
