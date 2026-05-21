@@ -181,6 +181,31 @@ describe('App', () => {
     expect(window.localStorage.getItem('dbchat:theme')).toBe('light');
   });
 
+  it('collapses sidebars and resizes open panels from the keyboard', () => {
+    const api = makeApi();
+    render(<App api={api} />);
+
+    const shell = screen.getByRole('main');
+    const chat = screen.getByLabelText('Chat');
+    expect(within(chat).queryByLabelText('Collapse workspace sidebar')).not.toBeInTheDocument();
+    expect(within(chat).queryByLabelText('Collapse inspector sidebar')).not.toBeInTheDocument();
+
+    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize workspace sidebar' }), {
+      key: 'ArrowRight'
+    });
+    expect(shell.style.getPropertyValue('--left-panel-width')).toBe('300px');
+
+    fireEvent.click(screen.getByLabelText('Collapse workspace sidebar'));
+    expect(screen.queryByLabelText('Database workspace')).not.toBeInTheDocument();
+    expect(screen.queryByRole('separator', { name: 'Resize workspace sidebar' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Expand workspace sidebar')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('Collapse inspector sidebar'));
+    expect(screen.queryByLabelText('Inspector')).not.toBeInTheDocument();
+    expect(screen.queryByRole('separator', { name: 'Resize inspector sidebar' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Expand inspector sidebar')).toBeInTheDocument();
+  });
+
   it('uses DB-focused starter prompts to populate the composer', () => {
     const api = makeApi();
     render(<App api={api} />);
