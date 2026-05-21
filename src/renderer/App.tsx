@@ -590,8 +590,15 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           {result ? (
             <>
               <div className="result-summary">
-                <strong>{result.rowCount}</strong>
-                <span>{result.rowCount === 1 ? 'row' : 'rows'} returned in {result.elapsedMs} ms</span>
+                <div className="result-metric">
+                  <strong>{result.rowCount}</strong>
+                  <span>{result.rowCount === 1 ? 'row' : 'rows'}</span>
+                </div>
+                <div className="result-metric">
+                  <strong>{result.columns.length}</strong>
+                  <span>{result.columns.length === 1 ? 'column' : 'columns'}</span>
+                </div>
+                <p>Returned in {result.elapsedMs} ms</p>
               </div>
               <div className="table-wrap">
                 <table>
@@ -631,7 +638,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             spellCheck={false}
           />
           <div className={`validation ${validation?.safe ? 'safe' : 'blocked'}`}>
-            {validation ? validation.reason : 'SAFE mode validation will appear here.'}
+            <ShieldCheck size={16} />
+            <span>{validation ? validation.reason : 'SAFE mode validation will appear here.'}</span>
           </div>
           <div className="query-actions">
             <button type="button" onClick={() => void navigator.clipboard.writeText(query)} disabled={!query.trim()}>
@@ -691,18 +699,19 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           </div>
         </div>
 
-        <label className="search-field">
-          <Search size={16} />
-          <input type="search" placeholder="Search tables" aria-label="Search tables" disabled={!schema} />
-        </label>
-
         <section className="connection-card" aria-label="Connection status">
-          <div>
+          <div className="connection-kicker">
             <span className={connection ? 'status-dot connected' : 'status-dot'} />
-            <p>{connection ? 'Connected' : 'Not connected'}</p>
+            <p>
+              {connection
+                ? `Live ${connection.kind === 'elasticsearch' ? 'Elasticsearch' : 'SQLite'} connection`
+                : 'No active connection'}
+            </p>
           </div>
-          <strong>{connection ? connection.label : 'Choose a database'}</strong>
-          <span>{schemaSummary}</span>
+          <div className="connection-copy">
+            <strong>{connection ? connection.label : 'Choose a database'}</strong>
+            <span>{schemaSummary}</span>
+          </div>
           <div className="connection-actions">
             <button type="button" className="secondary-button" onClick={connectSqlite} disabled={busy || !api}>
               <Database size={16} />
@@ -945,9 +954,19 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
       <section className="chat-pane" aria-label="Chat">
         <header className="chat-header">
-          <div>
+          <div className="chat-heading">
             <p>AI data workspace</p>
             <h2>Ask your database anything</h2>
+            <div className="workspace-context">
+              <span>
+                <Database size={14} />
+                {connection ? connection.label : 'No database connected'}
+              </span>
+              <span className={settings.safeMode ? 'safe' : 'warning'}>
+                <ShieldCheck size={14} />
+                {settings.safeMode ? 'Safe reads on' : 'SAFE mode off'}
+              </span>
+            </div>
           </div>
           <div className="chat-status" title={status}>
             <Sparkles size={16} />
@@ -959,7 +978,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           {hasOnlyWelcomeMessage && (
             <section className="welcome-panel" aria-label="Starter prompts">
               <div>
-                <h3>Welcome to DB Chat</h3>
+                <span className="welcome-kicker">DB Chat</span>
+                <h3>Read the database like a conversation.</h3>
                 <p>Connect SQLite or Elasticsearch, ask a question, and DB Chat will run safe read-only analysis for you.</p>
               </div>
               <div className="starter-grid">
@@ -994,7 +1014,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             rows={3}
           />
           <div className="composer-footer">
-            <span>{prompt.length} / 3,000</span>
+            <div className="composer-meta">
+              <span>{connection ? connection.label : 'SQLite connection needed'}</span>
+              <span>{prompt.length} / 3,000</span>
+            </div>
             <button type="submit" disabled={busy || !prompt.trim()} aria-label="Send message">
               <Send size={18} />
             </button>
@@ -1005,7 +1028,13 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       <aside className="inspector" aria-label="Inspector">
         <header className="inspector-header">
           <div>
-            <p>Inspector</p>
+            <p>
+              {activeInspector === 'results'
+                ? 'Executed output'
+                : activeInspector === 'query'
+                  ? 'Generated SQL'
+                  : 'Database map'}
+            </p>
             <h2>{activeInspector === 'results' ? 'Results' : activeInspector === 'query' ? 'Query' : 'Schema'}</h2>
           </div>
           <div className="inspector-tabs" role="tablist" aria-label="Inspector views">
