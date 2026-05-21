@@ -278,6 +278,113 @@ describe('App', () => {
     expect(api.deleteConnection).toHaveBeenCalledWith('connection-1');
   });
 
+  it('connects to Elasticsearch from the sidebar form', async () => {
+    const api = makeApi();
+    vi.mocked(api.connect).mockResolvedValue({
+      kind: 'elasticsearch',
+      label: 'localhost',
+      tables: [{ name: 'orders', columns: [{ name: 'customer', type: 'keyword', nullable: true, primaryKey: false }] }]
+    });
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Elasticsearch' }));
+    expect(within(screen.getByLabelText('Elasticsearch connection')).queryByText('API key')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Host'), {
+      target: { value: 'elastic.internal' }
+    });
+    fireEvent.change(screen.getByLabelText('Port'), {
+      target: { value: '9243' }
+    });
+    fireEvent.click(screen.getByLabelText('Remember password'));
+    fireEvent.click(within(screen.getByLabelText('Elasticsearch connection')).getByRole('button', { name: 'Connect' }));
+
+    await waitFor(() => {
+      expect(api.connect).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'elasticsearch',
+        label: 'elastic.internal:9243',
+        elasticsearchHost: 'elastic.internal',
+        elasticsearchPort: 9243,
+        elasticsearchUseSsl: false,
+        elasticsearchVerifyCerts: true,
+        elasticsearchRememberPassword: true
+      }));
+    });
+    expect(await screen.findByText('orders')).toBeInTheDocument();
+  });
+
+  it('reopens saved Elasticsearch history for password entry before reconnecting', async () => {
+    const api = makeApi();
+    vi.mocked(api.listConnections).mockResolvedValue([{
+      id: 'elastic-history',
+      kind: 'elasticsearch',
+      label: 'elastic.internal:9243',
+      elasticsearchHost: 'elastic.internal',
+      elasticsearchPort: 9243,
+      elasticsearchUseSsl: true,
+      elasticsearchVerifyCerts: false,
+      elasticsearchUsername: 'elastic-user',
+      createdAt: '2026-05-21T00:00:00.000Z',
+      lastConnectedAt: '2026-05-21T00:00:00.000Z'
+    }]);
+    render(<App api={api} />);
+
+    fireEvent.click(await screen.findByText('elastic.internal:9243'));
+
+    expect(await screen.findByText('Enter the password to reconnect elastic.internal:9243.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Host')).toHaveValue('elastic.internal');
+    expect(screen.getByLabelText('Port')).toHaveValue(9243);
+    expect(screen.getByLabelText('Username')).toHaveValue('elastic-user');
+    expect(screen.getByLabelText('Use HTTPS')).toBeChecked();
+    expect(screen.getByLabelText('Verify TLS certificates')).not.toBeChecked();
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+
+  it('reconnects Elasticsearch history directly when a password was remembered', async () => {
+    const api = makeApi();
+    const connection = {
+      id: 'elastic-remembered',
+      kind: 'elasticsearch' as const,
+      label: 'elastic.internal:9243',
+      elasticsearchHost: 'elastic.internal',
+      elasticsearchPort: 9243,
+      elasticsearchUseSsl: true,
+      elasticsearchVerifyCerts: true,
+      elasticsearchUsername: 'elastic-user',
+      elasticsearchRememberPassword: true,
+      elasticsearchHasSavedPassword: true,
+      createdAt: '2026-05-21T00:00:00.000Z',
+      lastConnectedAt: '2026-05-21T00:00:00.000Z'
+    };
+    vi.mocked(api.listConnections).mockResolvedValue([connection]);
+    vi.mocked(api.connect).mockResolvedValue({
+      kind: 'elasticsearch',
+      label: connection.label,
+      tables: []
+    });
+    render(<App api={api} />);
+
+    fireEvent.click(await screen.findByText('elastic.internal:9243'));
+
+    await waitFor(() => {
+      expect(api.connect).toHaveBeenCalledWith(connection);
+    });
+    expect(screen.queryByLabelText('Elasticsearch connection')).not.toBeInTheDocument();
+  });
+
+  it('shows the useful part of Elasticsearch IPC connection errors', async () => {
+    const api = makeApi();
+    vi.mocked(api.connect).mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'dbchat:connect': Error: Could not reach Elasticsearch at https://elastic.internal:9243: self-signed certificate"
+    ));
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Elasticsearch' }));
+    fireEvent.click(within(screen.getByLabelText('Elasticsearch connection')).getByRole('button', { name: 'Connect' }));
+
+    expect(await screen.findByText(/Could not reach Elasticsearch at https:\/\/elastic.internal:9243: self-signed certificate/)).toBeInTheDocument();
+    expect(screen.queryByText(/Error invoking remote method/)).not.toBeInTheDocument();
+  });
+
   it('loads models in settings and confirms API key save', async () => {
     const api = makeApi();
     render(<App api={api} />);

@@ -298,7 +298,12 @@ button:disabled {
 .connection-card {
   display: grid;
   gap: 10px;
+  min-width: 0;
   padding: 14px;
+}
+
+.connection-card > * {
+  min-width: 0;
 }
 
 .connection-card > div {
@@ -317,6 +322,71 @@ button:disabled {
 .connection-card span:not(.status-dot) {
   color: var(--muted);
   font-size: 13px;
+}
+
+.connection-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+}
+
+.connection-actions button {
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 9px;
+}
+
+.elasticsearch-form {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  padding-top: 10px;
+}
+
+.elasticsearch-form label {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 5px;
+  min-width: 0;
+}
+
+.elasticsearch-form input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  height: 34px;
+  min-width: 0;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.elasticsearch-form input:focus {
+  border-color: color-mix(in srgb, var(--primary) 60%, var(--border));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 14%, transparent);
+  outline: none;
+}
+
+.elasticsearch-form .elasticsearch-checkbox {
+  align-items: center;
+  color: var(--text);
+  display: flex;
+  font-weight: 600;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.elasticsearch-form .elasticsearch-checkbox input {
+  accent-color: var(--primary);
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  width: 16px;
 }
 
 .status-dot {
@@ -355,6 +425,12 @@ button:disabled {
   justify-content: flex-start;
   position: relative;
   width: 100%;
+}
+
+.settings-button {
+  height: auto;
+  min-height: 42px;
+  padding-block: 8px;
 }
 
 .sidebar-nav button.active,
@@ -733,7 +809,7 @@ button:disabled {
   display: inline-flex;
   font-size: 13px;
   gap: 8px;
-  max-width: 260px;
+  max-width: min(440px, 48vw);
   padding: 8px 12px;
   transition:
     background-color var(--motion-medium) var(--ease-premium),
@@ -746,9 +822,8 @@ button:disabled {
 }
 
 .chat-status span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .messages {

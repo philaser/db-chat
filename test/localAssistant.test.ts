@@ -23,6 +23,20 @@ const schema: DatabaseSchema = {
   ]
 };
 
+const elasticsearchSchema: DatabaseSchema = {
+  kind: 'elasticsearch',
+  label: 'local-es',
+  tables: [
+    {
+      name: 'orders',
+      columns: [
+        { name: 'customer', type: 'keyword', nullable: true, primaryKey: false },
+        { name: 'total', type: 'double', nullable: true, primaryKey: false }
+      ]
+    }
+  ]
+};
+
 describe('local assistant prompt shaping', () => {
   it('guides provider models toward conversational, safe, complex data analysis', () => {
     const prompt = buildSystemPrompt('orders(id, created_at, customer_id, total)');
@@ -43,6 +57,14 @@ describe('local assistant prompt shaping', () => {
     expect(prompt).toContain('Do not include SQL, query text, fenced code blocks, JSON, or implementation details');
   });
 
+  it('guides provider models toward safe Elasticsearch searches when connected to Elasticsearch', () => {
+    const prompt = buildSystemPrompt('Elasticsearch index orders: customer keyword, total double', 'elasticsearch');
+
+    expect(prompt).toContain('safe Elasticsearch search request');
+    expect(prompt).toContain('include exactly one fenced ```json block');
+    expect(prompt).toContain('Never generate writes, deletes, updates');
+  });
+
   it('gives schema questions a next-question ramp', () => {
     const response = buildLocalAssistantResponse('what tables are available?', schema);
 
@@ -59,5 +81,13 @@ describe('local assistant prompt shaping', () => {
     };
 
     expect(summarizeQueryResult(result)).toContain('A useful next step would be');
+  });
+
+  it('builds local fallback Elasticsearch searches', () => {
+    const response = buildLocalAssistantResponse('show orders', elasticsearchSchema);
+
+    expect(response.content).toContain('Elasticsearch cluster');
+    expect(response.query?.query).toContain('"index": "orders"');
+    expect(response.query?.validation.safe).toBe(true);
   });
 });

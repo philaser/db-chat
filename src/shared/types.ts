@@ -8,6 +8,16 @@ export interface ConnectionConfig {
   kind: DatabaseKind;
   label: string;
   databasePath?: string;
+  /** Kept for existing saved Elasticsearch connections created with URL input. */
+  elasticsearchUrl?: string;
+  elasticsearchHost?: string;
+  elasticsearchPort?: number;
+  elasticsearchUseSsl?: boolean;
+  elasticsearchVerifyCerts?: boolean;
+  elasticsearchUsername?: string;
+  elasticsearchPassword?: string;
+  elasticsearchRememberPassword?: boolean;
+  elasticsearchHasSavedPassword?: boolean;
   createdAt: string;
 }
 
