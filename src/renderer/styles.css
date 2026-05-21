@@ -129,9 +129,18 @@ button:disabled {
   box-shadow: var(--shadow);
   color: var(--text);
   display: grid;
-  grid-template-columns: 276px minmax(540px, 1fr) minmax(360px, 400px);
+  grid-template-columns: var(--left-panel-width, 276px) minmax(540px, 1fr) var(--right-panel-width, 380px);
   height: 100vh;
   overflow: hidden;
+  position: relative;
+  transition:
+    background-color var(--motion-slow) var(--ease-premium),
+    box-shadow var(--motion-slow) var(--ease-premium),
+    color var(--motion-slow) var(--ease-premium),
+    grid-template-columns var(--motion-medium) var(--ease-premium);
+}
+
+.app-shell.resizing-panels {
   transition:
     background-color var(--motion-slow) var(--ease-premium),
     box-shadow var(--motion-slow) var(--ease-premium),
@@ -151,7 +160,8 @@ button:disabled {
 }
 
 .sidebar,
-.inspector {
+.inspector,
+.panel-rail {
   background: var(--surface-2);
   min-height: 0;
   transition: background-color var(--motion-slow) var(--ease-premium);
@@ -163,6 +173,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  grid-column: 1;
   overflow: auto;
   padding: 20px 16px 16px;
 }
@@ -183,6 +194,7 @@ button:disabled {
   align-items: center;
   display: flex;
   gap: 12px;
+  min-width: 0;
 }
 
 .brand-mark {
@@ -238,6 +250,30 @@ button:disabled {
 .inspector-header p,
 .chat-header p {
   font-size: 12px;
+}
+
+.panel-collapse-button,
+.panel-rail-button {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0;
+  width: 34px;
+}
+
+.panel-collapse-button {
+  margin-left: auto;
+}
+
+.panel-collapse-button:hover:not(:disabled),
+.panel-collapse-button:focus-visible,
+.panel-rail-button:hover:not(:disabled),
+.panel-rail-button:focus-visible {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
 }
 
 .api-key-box:focus-within,
@@ -767,10 +803,76 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.panel-resize-handle {
+  cursor: col-resize;
+  inset-block: 0;
+  outline: none;
+  position: absolute;
+  touch-action: none;
+  width: 12px;
+  z-index: 5;
+}
+
+.panel-resize-handle.left {
+  left: calc(var(--left-panel-width) - 6px);
+}
+
+.panel-resize-handle.right {
+  right: calc(var(--right-panel-width) - 6px);
+}
+
+.panel-resize-handle::before {
+  background: color-mix(in srgb, var(--border-strong) 82%, transparent);
+  border-radius: 999px;
+  content: "";
+  inset: 24px 5px;
+  opacity: 0;
+  position: absolute;
+  transform: scaleY(0.86);
+  transition:
+    background-color var(--motion-fast) var(--ease-snappy),
+    box-shadow var(--motion-fast) var(--ease-snappy),
+    opacity var(--motion-fast) var(--ease-snappy),
+    transform var(--motion-fast) var(--ease-snappy);
+}
+
+.panel-resize-handle:hover::before,
+.panel-resize-handle:focus-visible::before,
+.app-shell.resizing-panels .panel-resize-handle::before {
+  background: var(--primary);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 15%, transparent);
+  opacity: 1;
+  transform: scaleY(1);
+}
+
+.panel-rail {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 9px;
+}
+
+.workspace-rail {
+  border-right: 1px solid var(--border);
+  grid-column: 1;
+}
+
+.inspector-rail {
+  border-left: 1px solid var(--border);
+  grid-column: 3;
+}
+
+.panel-rail-button {
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: 0 8px 22px rgba(27, 35, 53, 0.08);
+}
+
 .chat-pane {
   animation: riseIn 600ms var(--ease-premium) 140ms both;
   background: var(--surface);
   display: grid;
+  grid-column: 2;
   grid-template-rows: auto 1fr auto;
   min-height: 0;
   overflow: hidden;
@@ -1232,6 +1334,7 @@ button:disabled {
   animation: slideInRight 560ms var(--ease-premium) 120ms both;
   border-left: 1px solid var(--border);
   display: grid;
+  grid-column: 3;
   grid-template-rows: auto 1fr;
   overflow: hidden;
 }
@@ -1254,6 +1357,13 @@ button:disabled {
   display: grid;
   gap: 14px;
   padding: 18px 18px 14px;
+}
+
+.inspector-heading-row {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
 }
 
 .inspector-header h2 {

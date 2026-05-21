@@ -9,6 +9,10 @@ import {
   Loader2,
   MessageSquareText,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Play,
   Plus,
   Search,
@@ -21,7 +25,16 @@ import {
   TerminalSquare,
   Trash2
 } from 'lucide-react';
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  FormEvent,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type {
@@ -43,6 +56,25 @@ const themeStorageKey = 'dbchat:theme';
 
 type InspectorTab = 'results' | 'query' | 'schema';
 type ThemeMode = 'light' | 'dark';
+type ResizeSide = 'left' | 'right';
+type ResizeDrag = {
+  pointerId: number;
+  shellWidth: number;
+  side: ResizeSide;
+  startWidth: number;
+  startX: number;
+  staticPanelWidth: number;
+};
+
+const leftPanelDefaultWidth = 276;
+const leftPanelMinWidth = 224;
+const leftPanelMaxWidth = 420;
+const rightPanelDefaultWidth = 380;
+const rightPanelMinWidth = 300;
+const rightPanelMaxWidth = 520;
+const panelRailWidth = 54;
+const chatPaneMinWidth = 540;
+const keyboardResizeStep = 24;
 
 const starterPrompts = [
   {
@@ -133,6 +165,18 @@ function elasticsearchHistoryValues(config: ConnectionConfig) {
   }
 }
 
+function clampPanelWidth(width: number, minWidth: number, maxWidth: number): number {
+  return Math.min(maxWidth, Math.max(minWidth, width));
+}
+
+function getPanelMaxWidth(shellWidth: number, staticPanelWidth: number, minWidth: number, maxWidth: number): number {
+  if (!shellWidth) {
+    return maxWidth;
+  }
+
+  return Math.max(minWidth, Math.min(maxWidth, shellWidth - staticPanelWidth - chatPaneMinWidth));
+}
+
 export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [connection, setConnection] = useState<ConnectionConfig | null>(null);
   const [schema, setSchema] = useState<DatabaseSchema | null>(null);
@@ -169,6 +213,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [elasticsearchUsername, setElasticsearchUsername] = useState('');
   const [elasticsearchPassword, setElasticsearchPassword] = useState('');
   const [elasticsearchRememberPassword, setElasticsearchRememberPassword] = useState(false);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(leftPanelDefaultWidth);
+  const [rightPanelWidth, setRightPanelWidth] = useState(rightPanelDefaultWidth);
+  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
+  const [resizeDrag, setResizeDrag] = useState<ResizeDrag | null>(null);
+  const shellRef = useRef<HTMLElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -240,6 +290,62 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, answerGenerating]);
+
+  useEffect(() => {
+    if (!resizeDrag) {
+      return;
+    }
+
+    const drag = resizeDrag;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    function moveResize(event: PointerEvent) {
+      if (event.pointerId !== drag.pointerId) {
+        return;
+      }
+
+      const direction = drag.side === 'left' ? 1 : -1;
+      const delta = (event.clientX - drag.startX) * direction;
+      const maxWidth = getPanelMaxWidth(
+        drag.shellWidth,
+        drag.staticPanelWidth,
+        drag.side === 'left' ? leftPanelMinWidth : rightPanelMinWidth,
+        drag.side === 'left' ? leftPanelMaxWidth : rightPanelMaxWidth
+      );
+      const nextWidth = clampPanelWidth(
+        drag.startWidth + delta,
+        drag.side === 'left' ? leftPanelMinWidth : rightPanelMinWidth,
+        maxWidth
+      );
+
+      if (drag.side === 'left') {
+        setLeftPanelWidth(nextWidth);
+      } else {
+        setRightPanelWidth(nextWidth);
+      }
+    }
+
+    function finishResize(event: PointerEvent) {
+      if (event.pointerId === drag.pointerId) {
+        setResizeDrag(null);
+      }
+    }
+
+    window.addEventListener('pointermove', moveResize);
+    window.addEventListener('pointerup', finishResize);
+    window.addEventListener('pointercancel', finishResize);
+
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('pointermove', moveResize);
+      window.removeEventListener('pointerup', finishResize);
+      window.removeEventListener('pointercancel', finishResize);
+    };
+  }, [resizeDrag]);
 
   const schemaSummary = useMemo(() => {
     if (!schema) {
@@ -583,6 +689,54 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setPrompt(starterPrompt);
   }
 
+  function getShellWidth(): number {
+    return shellRef.current?.getBoundingClientRect().width ?? 0;
+  }
+
+  function beginPanelResize(side: ResizeSide, event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setResizeDrag({
+      pointerId: event.pointerId,
+      shellWidth: getShellWidth(),
+      side,
+      startWidth: side === 'left' ? leftPanelWidth : rightPanelWidth,
+      startX: event.clientX,
+      staticPanelWidth: side === 'left'
+        ? (rightPanelCollapsed ? panelRailWidth : rightPanelWidth)
+        : (leftPanelCollapsed ? panelRailWidth : leftPanelWidth)
+    });
+  }
+
+  function resizePanelWithKeyboard(side: ResizeSide, event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+      return;
+    }
+
+    event.preventDefault();
+    const handleDelta = event.key === 'ArrowRight' ? keyboardResizeStep : -keyboardResizeStep;
+    const widthDelta = side === 'left' ? handleDelta : -handleDelta;
+    const shellWidth = getShellWidth();
+
+    if (side === 'left') {
+      const maxWidth = getPanelMaxWidth(
+        shellWidth,
+        rightPanelCollapsed ? panelRailWidth : rightPanelWidth,
+        leftPanelMinWidth,
+        leftPanelMaxWidth
+      );
+      setLeftPanelWidth((current) => clampPanelWidth(current + widthDelta, leftPanelMinWidth, maxWidth));
+      return;
+    }
+
+    const maxWidth = getPanelMaxWidth(
+      shellWidth,
+      leftPanelCollapsed ? panelRailWidth : leftPanelWidth,
+      rightPanelMinWidth,
+      rightPanelMaxWidth
+    );
+    setRightPanelWidth((current) => clampPanelWidth(current + widthDelta, rightPanelMinWidth, maxWidth));
+  }
+
   function renderInspector() {
     if (activeInspector === 'results') {
       return (
@@ -688,16 +842,48 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     );
   }
 
+  const shellStyle = {
+    '--left-panel-width': `${leftPanelCollapsed ? panelRailWidth : leftPanelWidth}px`,
+    '--right-panel-width': `${rightPanelCollapsed ? panelRailWidth : rightPanelWidth}px`
+  } as CSSProperties;
+
   return (
-    <main className="app-shell" data-theme={theme}>
-      <aside className="sidebar" aria-label="Database workspace">
-        <div className="brand-row">
-          <div className="brand-mark" aria-hidden="true">DB</div>
-          <div>
-            <h1>DB Chat</h1>
-            <p>Chat with database data</p>
+    <main
+      className={`app-shell${resizeDrag ? ' resizing-panels' : ''}`}
+      data-theme={theme}
+      ref={shellRef}
+      style={shellStyle}
+    >
+      {leftPanelCollapsed ? (
+        <aside className="panel-rail workspace-rail" id="workspace-sidebar" aria-label="Collapsed workspace sidebar">
+          <button
+            aria-label="Expand workspace sidebar"
+            className="panel-rail-button"
+            onClick={() => setLeftPanelCollapsed(false)}
+            title="Expand workspace sidebar"
+            type="button"
+          >
+            <PanelLeftOpen size={18} />
+          </button>
+        </aside>
+      ) : (
+        <aside className="sidebar" id="workspace-sidebar" aria-label="Database workspace">
+          <div className="brand-row">
+            <div className="brand-mark" aria-hidden="true">DB</div>
+            <div>
+              <h1>DB Chat</h1>
+              <p>Chat with database data</p>
+            </div>
+            <button
+              aria-label="Collapse workspace sidebar"
+              className="panel-collapse-button"
+              onClick={() => setLeftPanelCollapsed(true)}
+              title="Collapse workspace sidebar"
+              type="button"
+            >
+              <PanelLeftClose size={18} />
+            </button>
           </div>
-        </div>
 
         <section className="connection-card" aria-label="Connection status">
           <div className="connection-kicker">
@@ -945,12 +1131,30 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           </section>
         )}
 
-        <div className="provider-card">
-          <span>{settings.provider}</span>
-          <strong>{settings.model}</strong>
-          <p>{settings.hasApiKey ? 'API key saved locally' : 'API key not saved'}</p>
-        </div>
-      </aside>
+          <div className="provider-card">
+            <span>{settings.provider}</span>
+            <strong>{settings.model}</strong>
+            <p>{settings.hasApiKey ? 'API key saved locally' : 'API key not saved'}</p>
+          </div>
+        </aside>
+      )}
+
+      {!leftPanelCollapsed && (
+        <div
+          aria-controls="workspace-sidebar"
+          aria-label="Resize workspace sidebar"
+          aria-orientation="vertical"
+          aria-valuemax={leftPanelMaxWidth}
+          aria-valuemin={leftPanelMinWidth}
+          aria-valuenow={Math.round(leftPanelWidth)}
+          className="panel-resize-handle left"
+          onDoubleClick={() => setLeftPanelWidth(leftPanelDefaultWidth)}
+          onKeyDown={(event) => resizePanelWithKeyboard('left', event)}
+          onPointerDown={(event) => beginPanelResize('left', event)}
+          role="separator"
+          tabIndex={0}
+        />
+      )}
 
       <section className="chat-pane" aria-label="Chat">
         <header className="chat-header">
@@ -1025,32 +1229,75 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         </form>
       </section>
 
-      <aside className="inspector" aria-label="Inspector">
-        <header className="inspector-header">
-          <div>
-            <p>
-              {activeInspector === 'results'
-                ? 'Executed output'
-                : activeInspector === 'query'
-                  ? 'Generated SQL'
-                  : 'Database map'}
-            </p>
-            <h2>{activeInspector === 'results' ? 'Results' : activeInspector === 'query' ? 'Query' : 'Schema'}</h2>
-          </div>
-          <div className="inspector-tabs" role="tablist" aria-label="Inspector views">
-            <button type="button" className={activeInspector === 'results' ? 'active' : ''} onClick={() => setActiveInspector('results')}>
-              Results
-            </button>
-            <button type="button" className={activeInspector === 'query' ? 'active' : ''} onClick={() => setActiveInspector('query')}>
-              Query
-            </button>
-            <button type="button" className={activeInspector === 'schema' ? 'active' : ''} onClick={() => setActiveInspector('schema')}>
-              Schema
-            </button>
-          </div>
-        </header>
-        {renderInspector()}
-      </aside>
+      {rightPanelCollapsed ? (
+        <aside className="panel-rail inspector-rail" id="inspector-sidebar" aria-label="Collapsed inspector sidebar">
+          <button
+            aria-label="Expand inspector sidebar"
+            className="panel-rail-button"
+            onClick={() => setRightPanelCollapsed(false)}
+            title="Expand inspector sidebar"
+            type="button"
+          >
+            <PanelRightOpen size={18} />
+          </button>
+        </aside>
+      ) : (
+        <aside className="inspector" id="inspector-sidebar" aria-label="Inspector">
+          <header className="inspector-header">
+            <div className="inspector-heading-row">
+              <div>
+                <p>
+                  {activeInspector === 'results'
+                    ? 'Executed output'
+                    : activeInspector === 'query'
+                      ? 'Generated SQL'
+                      : 'Database map'}
+                </p>
+                <h2>{activeInspector === 'results' ? 'Results' : activeInspector === 'query' ? 'Query' : 'Schema'}</h2>
+              </div>
+              <button
+                aria-label="Collapse inspector sidebar"
+                className="panel-collapse-button"
+                onClick={() => setRightPanelCollapsed(true)}
+                title="Collapse inspector sidebar"
+                type="button"
+              >
+                <PanelRightClose size={18} />
+              </button>
+            </div>
+            <div className="inspector-tabs" role="tablist" aria-label="Inspector views">
+              <button type="button" className={activeInspector === 'results' ? 'active' : ''} onClick={() => setActiveInspector('results')}>
+                Results
+              </button>
+              <button type="button" className={activeInspector === 'query' ? 'active' : ''} onClick={() => setActiveInspector('query')}>
+                Query
+              </button>
+              <button type="button" className={activeInspector === 'schema' ? 'active' : ''} onClick={() => setActiveInspector('schema')}>
+                Schema
+              </button>
+            </div>
+          </header>
+          {renderInspector()}
+        </aside>
+      )}
+
+      {!rightPanelCollapsed && (
+        <div
+          aria-controls="inspector-sidebar"
+          aria-label="Resize inspector sidebar"
+          aria-orientation="vertical"
+          aria-valuemax={rightPanelMaxWidth}
+          aria-valuemin={rightPanelMinWidth}
+          aria-valuenow={Math.round(rightPanelWidth)}
+          className="panel-resize-handle right"
+          onDoubleClick={() => setRightPanelWidth(rightPanelDefaultWidth)}
+          onKeyDown={(event) => resizePanelWithKeyboard('right', event)}
+          onPointerDown={(event) => beginPanelResize('right', event)}
+          role="separator"
+          tabIndex={0}
+        />
+      )}
+
     </main>
   );
 }
