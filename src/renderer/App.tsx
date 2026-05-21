@@ -63,7 +63,7 @@ const starterPrompts = [
   }
 ];
 
-const initialAssistantMessage = 'Connect a SQLite database to start asking questions about your data.';
+const initialAssistantMessage = 'Connect SQLite or Elasticsearch to start asking questions about your data.';
 
 function nowMessage(role: ChatMessage['role'], content: string): ChatMessage {
   return {
@@ -95,6 +95,44 @@ function formatHistoryDate(value: string): string {
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(value));
 }
 
+function errorStatus(error: unknown, fallback: string): string {
+  if (!(error instanceof Error) || !error.message) {
+    return fallback;
+  }
+
+  return error.message
+    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
+    .replace(/^Error:\s*/i, '');
+}
+
+function elasticsearchHistoryValues(config: ConnectionConfig) {
+  if (config.elasticsearchHost) {
+    return {
+      host: config.elasticsearchHost,
+      port: String(config.elasticsearchPort ?? 9200),
+      useSsl: config.elasticsearchUseSsl ?? false,
+      verifyCerts: config.elasticsearchVerifyCerts ?? true
+    };
+  }
+
+  try {
+    const url = new URL(config.elasticsearchUrl ?? '');
+    return {
+      host: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? '443' : '80'),
+      useSsl: url.protocol === 'https:',
+      verifyCerts: config.elasticsearchVerifyCerts ?? true
+    };
+  } catch {
+    return {
+      host: '',
+      port: '9200',
+      useSsl: false,
+      verifyCerts: true
+    };
+  }
+}
+
 export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [connection, setConnection] = useState<ConnectionConfig | null>(null);
   const [schema, setSchema] = useState<DatabaseSchema | null>(null);
@@ -123,6 +161,14 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [answerGenerating, setAnswerGenerating] = useState(false);
   const [activeInspector, setActiveInspector] = useState<InspectorTab>('schema');
   const [theme, setTheme] = useState<ThemeMode>(loadInitialTheme);
+  const [elasticsearchFormOpen, setElasticsearchFormOpen] = useState(false);
+  const [elasticsearchHost, setElasticsearchHost] = useState('localhost');
+  const [elasticsearchPort, setElasticsearchPort] = useState('9200');
+  const [elasticsearchUseSsl, setElasticsearchUseSsl] = useState(false);
+  const [elasticsearchVerifyCerts, setElasticsearchVerifyCerts] = useState(true);
+  const [elasticsearchUsername, setElasticsearchUsername] = useState('');
+  const [elasticsearchPassword, setElasticsearchPassword] = useState('');
+  const [elasticsearchRememberPassword, setElasticsearchRememberPassword] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -132,7 +178,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
   useEffect(() => {
     if (!api) {
-      setStatus('Desktop app bridge unavailable. Run DB Chat in Electron to connect SQLite databases.');
+      setStatus('Desktop app bridge unavailable. Run DB Chat in Electron to connect databases.');
       return;
     }
     void api.loadSettings().then(setSettings).catch(() => setStatus('Settings are using defaults.'));
@@ -199,7 +245,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     if (!schema) {
       return 'No database connected';
     }
-    return `${schema.tables.length} table${schema.tables.length === 1 ? '' : 's'} connected`;
+    const unit = schema.kind === 'elasticsearch'
+      ? (schema.tables.length === 1 ? 'index' : 'indices')
+      : (schema.tables.length === 1 ? 'table' : 'tables');
+    return `${schema.tables.length} ${unit} connected`;
   }, [schema]);
 
   const filteredModels = useMemo(() => {
@@ -282,7 +331,57 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       setStatus(`Connected to ${config.label}`);
       await refreshHistories();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Could not connect to database.');
+      setStatus(errorStatus(error, 'Could not connect to database.'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function connectElasticsearch(event?: FormEvent) {
+    event?.preventDefault();
+    if (!api) {
+      setStatus('Elasticsearch connections are available in the Electron desktop app.');
+      return;
+    }
+    if (!elasticsearchHost.trim()) {
+      setStatus('Enter an Elasticsearch host before connecting.');
+      return;
+    }
+    const port = Number(elasticsearchPort);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      setStatus('Enter an Elasticsearch port between 1 and 65535.');
+      return;
+    }
+
+    setBusy(true);
+    setStatus('Connecting to Elasticsearch...');
+    try {
+      const config: ConnectionConfig = {
+        id: crypto.randomUUID(),
+        kind: 'elasticsearch',
+        label: `${elasticsearchHost.trim()}:${port}`,
+        elasticsearchHost: elasticsearchHost.trim(),
+        elasticsearchPort: port,
+        elasticsearchUseSsl,
+        elasticsearchVerifyCerts,
+        elasticsearchUsername: elasticsearchUsername.trim() || undefined,
+        elasticsearchPassword: elasticsearchPassword || undefined,
+        elasticsearchRememberPassword,
+        createdAt: new Date().toISOString()
+      };
+      const nextSchema = await api.connect(config);
+      setConnection(config);
+      setSchema(nextSchema);
+      setActiveInspector('schema');
+      setElasticsearchFormOpen(false);
+      setMessages((current) => [
+        ...current,
+        nowMessage('assistant', `Connected to ${config.label}. I found ${nextSchema.tables.length} indices.`)
+      ]);
+      setStatus(`Connected to ${config.label}`);
+      await refreshHistories();
+    } catch (error) {
+      setStatus(errorStatus(error, 'Could not connect to Elasticsearch.'));
     } finally {
       setBusy(false);
     }
@@ -290,6 +389,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
   async function connectFromHistory(config: ConnectionConfig) {
     if (!api) return;
+    if (config.kind === 'elasticsearch' && !config.elasticsearchPassword && !config.elasticsearchHasSavedPassword) {
+      prepareElasticsearchReconnect(config, `Enter the password to reconnect ${config.label}.`);
+      return;
+    }
     setBusy(true);
     setStatus(`Connecting to ${config.label}...`);
     try {
@@ -300,7 +403,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       setStatus(`Connected to ${config.label}`);
       await refreshHistories();
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Could not connect to saved database.');
+      setStatus(errorStatus(error, 'Could not connect to saved database.'));
     } finally {
       setBusy(false);
     }
@@ -317,6 +420,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setStatus(`Opened ${session.title}`);
 
     if (session.connection) {
+      if (session.connection.kind === 'elasticsearch'
+        && !session.connection.elasticsearchPassword
+        && !session.connection.elasticsearchHasSavedPassword) {
+        prepareElasticsearchReconnect(session.connection, `Opened ${session.title}. Enter the password to reconnect ${session.connection.label}.`);
+        return;
+      }
       setBusy(true);
       try {
         const nextSchema = await api.connect(session.connection);
@@ -324,7 +433,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         setSchema(nextSchema);
         await refreshHistories();
       } catch (error) {
-        setStatus(error instanceof Error ? error.message : `Opened ${session.title}, but could not reconnect the database.`);
+        setStatus(errorStatus(error, `Opened ${session.title}, but could not reconnect the database.`));
       } finally {
         setBusy(false);
       }
@@ -346,6 +455,19 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     await api.deleteConnection(id);
     await refreshHistories();
     setStatus('Saved connection deleted');
+  }
+
+  function prepareElasticsearchReconnect(config: ConnectionConfig, nextStatus: string) {
+    const values = elasticsearchHistoryValues(config);
+    setElasticsearchHost(values.host);
+    setElasticsearchPort(values.port);
+    setElasticsearchUseSsl(values.useSsl);
+    setElasticsearchVerifyCerts(values.verifyCerts);
+    setElasticsearchUsername(config.elasticsearchUsername ?? '');
+    setElasticsearchPassword('');
+    setElasticsearchRememberPassword(Boolean(config.elasticsearchHasSavedPassword || config.elasticsearchRememberPassword));
+    setElasticsearchFormOpen(true);
+    setStatus(nextStatus);
   }
 
   async function sendChat(event: FormEvent) {
@@ -384,7 +506,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         result: response.queryResult ?? result ?? undefined
       });
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Chat failed.');
+      setStatus(errorStatus(error, 'Chat failed.'));
     } finally {
       setAnswerGenerating(false);
       setBusy(false);
@@ -402,7 +524,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       setStatus(`Returned ${nextResult.rowCount} rows in ${nextResult.elapsedMs} ms`);
       await persistChatSession(messages, { query, result: nextResult });
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Query failed.');
+      setStatus(errorStatus(error, 'Query failed.'));
     } finally {
       setBusy(false);
     }
@@ -505,7 +627,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             className="query-editor"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Generated SQL will appear here."
+            placeholder={connection?.kind === 'elasticsearch' ? 'Generated Elasticsearch JSON will appear here.' : 'Generated SQL will appear here.'}
             spellCheck={false}
           />
           <div className={`validation ${validation?.safe ? 'safe' : 'blocked'}`}>
@@ -532,7 +654,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             <div className="schema-summary">
               <Database size={18} />
               <div>
-                <strong>{connection?.label ?? 'SQLite database'}</strong>
+                <strong>{connection?.label ?? 'Database'}</strong>
                 <span>{schemaSummary}</span>
               </div>
             </div>
@@ -551,7 +673,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         ) : (
           <div className="empty-state">
             <Database size={22} />
-            <span>Connect a SQLite database to inspect its schema.</span>
+            <span>Connect SQLite or Elasticsearch to inspect its schema.</span>
           </div>
         )}
       </section>
@@ -565,7 +687,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           <div className="brand-mark" aria-hidden="true">DB</div>
           <div>
             <h1>DB Chat</h1>
-            <p>Chat with SQLite data</p>
+            <p>Chat with database data</p>
           </div>
         </div>
 
@@ -581,10 +703,71 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           </div>
           <strong>{connection ? connection.label : 'Choose a database'}</strong>
           <span>{schemaSummary}</span>
-          <button type="button" className="secondary-button" onClick={connectSqlite} disabled={busy || !api}>
-            <Database size={16} />
-            {connection ? 'Switch SQLite' : 'Connect SQLite'}
-          </button>
+          <div className="connection-actions">
+            <button type="button" className="secondary-button" onClick={connectSqlite} disabled={busy || !api}>
+              <Database size={16} />
+              SQLite
+            </button>
+            <button type="button" className="secondary-button" onClick={() => setElasticsearchFormOpen((current) => !current)} disabled={busy || !api}>
+              <Search size={16} />
+              Elasticsearch
+            </button>
+          </div>
+          {elasticsearchFormOpen && (
+            <form className="elasticsearch-form" aria-label="Elasticsearch connection" onSubmit={(event) => void connectElasticsearch(event)}>
+              <label>
+                <span>Host</span>
+                <input
+                  value={elasticsearchHost}
+                  onChange={(event) => setElasticsearchHost(event.target.value)}
+                  placeholder="localhost"
+                />
+              </label>
+              <label>
+                <span>Port</span>
+                <input
+                  value={elasticsearchPort}
+                  onChange={(event) => setElasticsearchPort(event.target.value)}
+                  inputMode="numeric"
+                  type="number"
+                  min={1}
+                  max={65535}
+                />
+              </label>
+              <label>
+                <span>Username</span>
+                <input value={elasticsearchUsername} onChange={(event) => setElasticsearchUsername(event.target.value)} />
+              </label>
+              <label>
+                <span>Password</span>
+                <input type="password" value={elasticsearchPassword} onChange={(event) => setElasticsearchPassword(event.target.value)} />
+              </label>
+              <label className="elasticsearch-checkbox">
+                <input type="checkbox" checked={elasticsearchUseSsl} onChange={(event) => setElasticsearchUseSsl(event.target.checked)} />
+                <span>Use HTTPS</span>
+              </label>
+              <label className="elasticsearch-checkbox">
+                <input
+                  type="checkbox"
+                  checked={elasticsearchVerifyCerts}
+                  onChange={(event) => setElasticsearchVerifyCerts(event.target.checked)}
+                  disabled={!elasticsearchUseSsl}
+                />
+                <span>Verify TLS certificates</span>
+              </label>
+              <label className="elasticsearch-checkbox">
+                <input
+                  type="checkbox"
+                  checked={elasticsearchRememberPassword}
+                  onChange={(event) => setElasticsearchRememberPassword(event.target.checked)}
+                />
+                <span>Remember password</span>
+              </label>
+              <button type="submit" className="primary-button" disabled={busy || !elasticsearchHost.trim() || !elasticsearchPort.trim()}>
+                Connect
+              </button>
+            </form>
+          )}
         </section>
 
         <nav className="sidebar-nav" aria-label="Workspace views">
@@ -766,7 +949,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             <p>AI data workspace</p>
             <h2>Ask your database anything</h2>
           </div>
-          <div className="chat-status">
+          <div className="chat-status" title={status}>
             <Sparkles size={16} />
             <span>{status}</span>
           </div>
@@ -777,7 +960,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             <section className="welcome-panel" aria-label="Starter prompts">
               <div>
                 <h3>Welcome to DB Chat</h3>
-                <p>Connect a SQLite database, ask a question, and DB Chat will run safe read-only analysis for you.</p>
+                <p>Connect SQLite or Elasticsearch, ask a question, and DB Chat will run safe read-only analysis for you.</p>
               </div>
               <div className="starter-grid">
                 {starterPrompts.map((starter) => (
