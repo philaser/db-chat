@@ -41,8 +41,8 @@ function registerIpc(): void {
   ipcMain.handle('dbchat:validate-query', (_event, query: string, mode: QueryExecutionMode) => {
     return controller.requireConnector().validateQuery(query, mode);
   });
-  ipcMain.handle('dbchat:execute-query', (_event, query: string) => {
-    return controller.requireConnector().executeQuery(query);
+  ipcMain.handle('dbchat:execute-query', (_event, query: string, mode: QueryExecutionMode) => {
+    return controller.requireConnector().executeQuery(query, mode);
   });
   ipcMain.handle('dbchat:send-chat', (_event, messages) => controller.sendChat(messages));
   ipcMain.handle('dbchat:load-settings', () => controller.loadSettings());

@@ -125,7 +125,7 @@ export interface DatabaseConnector {
   connect(config: ConnectionConfig): Promise<void>;
   introspect(): Promise<DatabaseSchema>;
   validateQuery(query: string, mode: QueryExecutionMode): QueryValidationResult;
-  executeQuery(query: string): Promise<QueryResult>;
+  executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult>;
   getContextForPrompt(): Promise<string>;
   close(): void;
 }
@@ -135,7 +135,7 @@ export interface DbChatApi {
   connect(config: ConnectionConfig): Promise<DatabaseSchema>;
   getSchema(): Promise<DatabaseSchema | null>;
   validateQuery(query: string, mode: QueryExecutionMode): Promise<QueryValidationResult>;
-  executeQuery(query: string): Promise<QueryResult>;
+  executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult>;
   sendChat(messages: ModelChatMessage[]): Promise<ChatTurnResponse>;
   loadSettings(): Promise<PersistedSettings & { hasApiKey: boolean }>;
   saveSettings(settings: PersistedSettings): Promise<void>;
