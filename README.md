@@ -19,6 +19,8 @@ npm run typecheck
 npm run build
 ```
 
+Run verification before opening a pull request.
+
 ## MVP Notes
 
 - SQLite opens database files in read-only mode.
