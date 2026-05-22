@@ -172,10 +172,12 @@ button:disabled {
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   grid-column: 1;
-  overflow: auto;
-  padding: 20px 16px 16px;
+  overflow: visible;
+  padding: 16px 10px;
+  position: relative;
+  z-index: 4;
 }
 
 @keyframes slideInLeft {
@@ -212,6 +214,118 @@ button:disabled {
     background-color var(--motion-medium) var(--ease-premium),
     color var(--motion-medium) var(--ease-premium),
     transform var(--motion-fast) var(--ease-snappy);
+}
+
+.workspace-rail-open .brand-mark {
+  height: 42px;
+  width: 42px;
+}
+
+.icon-rail {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rail-action {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  height: 44px;
+  padding: 0;
+  position: relative;
+  width: 44px;
+}
+
+.rail-tooltip {
+  background: var(--text);
+  border-radius: 7px;
+  box-shadow: 0 12px 30px rgba(26, 34, 48, 0.18);
+  color: var(--surface);
+  font-size: 12px;
+  font-weight: 750;
+  left: calc(100% + 11px);
+  line-height: 1;
+  opacity: 0;
+  padding: 9px 10px;
+  pointer-events: none;
+  position: absolute;
+  top: 50%;
+  transform: translate(-4px, -50%);
+  transition:
+    opacity var(--motion-fast) var(--ease-snappy),
+    transform var(--motion-fast) var(--ease-snappy);
+  visibility: hidden;
+  white-space: nowrap;
+  z-index: 9;
+}
+
+.rail-action:hover .rail-tooltip,
+.rail-action:focus-visible .rail-tooltip {
+  opacity: 1;
+  transform: translate(0, -50%);
+  visibility: visible;
+}
+
+.rail-action.active,
+.rail-action:hover,
+.rail-action:focus-visible {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.brand-action {
+  height: 46px;
+  margin-bottom: 5px;
+  width: 46px;
+}
+
+.recent-anchor {
+  position: relative;
+}
+
+.recent-flyout {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 18px 54px rgba(31, 42, 60, 0.18);
+  display: grid;
+  gap: 10px;
+  left: calc(100% + 12px);
+  min-width: 290px;
+  padding: 12px;
+  position: absolute;
+  top: -4px;
+  z-index: 8;
+}
+
+.recent-flyout .history-heading button {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  height: 28px;
+  padding: 0 8px;
+}
+
+.rail-status-dot,
+.rail-saved {
+  position: absolute;
+  right: 5px;
+  top: 5px;
+}
+
+.rail-status-dot {
+  background: var(--success);
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  height: 10px;
+  width: 10px;
+}
+
+.rail-saved {
+  color: var(--success);
 }
 
 .brand-row:hover .brand-mark {
@@ -813,10 +927,6 @@ button:disabled {
   z-index: 5;
 }
 
-.panel-resize-handle.left {
-  left: calc(var(--left-panel-width) - 6px);
-}
-
 .panel-resize-handle.right {
   right: calc(var(--right-panel-width) - 6px);
 }
@@ -850,11 +960,6 @@ button:disabled {
   display: flex;
   flex-direction: column;
   padding: 20px 9px;
-}
-
-.workspace-rail {
-  border-right: 1px solid var(--border);
-  grid-column: 1;
 }
 
 .inspector-rail {
@@ -920,7 +1025,8 @@ button:disabled {
   gap: 8px;
 }
 
-.workspace-context span {
+.workspace-context span,
+.workspace-context button {
   align-items: center;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -939,6 +1045,11 @@ button:disabled {
   white-space: nowrap;
 }
 
+.workspace-context button:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
 .workspace-context span.safe {
   background: var(--success-bg);
   border-color: color-mix(in srgb, var(--success) 32%, var(--border));
@@ -953,6 +1064,173 @@ button:disabled {
 
 .workspace-context svg {
   flex: 0 0 auto;
+}
+
+.connection-chip {
+  justify-content: flex-start;
+}
+
+.focus-view {
+  animation: riseIn 360ms var(--ease-premium) both;
+  align-content: start;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-2) 42%, var(--surface)), var(--surface));
+  display: grid;
+  gap: 24px;
+  min-height: 0;
+  overflow: auto;
+  padding: 32px clamp(24px, 4vw, 54px);
+}
+
+.focus-header {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  padding-bottom: 20px;
+}
+
+.focus-header p {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  margin: 0 0 6px;
+  text-transform: uppercase;
+}
+
+.focus-header h2 {
+  font-size: 30px;
+  line-height: 1.1;
+  margin: 0;
+}
+
+.focus-grid {
+  align-items: start;
+  display: grid;
+  gap: 18px;
+}
+
+.connections-view,
+.settings-view {
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+}
+
+.focus-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 18px;
+}
+
+.focus-panel.connection-status {
+  align-content: start;
+}
+
+.preferences-panel {
+  align-content: start;
+}
+
+.focus-panel .provider-card {
+  box-shadow: none;
+}
+
+.focus-status {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 13px;
+  gap: 8px;
+  justify-self: start;
+  max-width: min(560px, 100%);
+  min-height: 40px;
+  padding: 0 12px;
+}
+
+.focus-status span {
+  overflow-wrap: anywhere;
+}
+
+.logs-button {
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.logs-heading {
+  align-items: center;
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+}
+
+.logs-heading p {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  margin: 0 0 4px;
+  text-transform: uppercase;
+}
+
+.logs-heading h3 {
+  font-size: 20px;
+  margin: 0;
+}
+
+.logs-list {
+  display: grid;
+  gap: 9px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.log-entry {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.log-entry.error {
+  border-color: color-mix(in srgb, var(--danger) 34%, var(--border));
+}
+
+.log-entry div {
+  align-items: baseline;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.log-entry strong {
+  font-size: 13px;
+}
+
+.log-entry time {
+  color: var(--muted);
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.log-entry pre {
+  background: var(--code-bg);
+  border-radius: 7px;
+  color: var(--code-text);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
 }
 
 .chat-status {

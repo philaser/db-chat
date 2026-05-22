@@ -172,6 +172,7 @@ describe('App', () => {
     const api = makeApi();
     render(<App api={api} />);
 
+    fireEvent.click(screen.getByLabelText('Settings'));
     fireEvent.click(screen.getByRole('button', { name: 'Dark' }));
     expect(document.documentElement.dataset.theme).toBe('dark');
     expect(window.localStorage.getItem('dbchat:theme')).toBe('dark');
@@ -181,7 +182,7 @@ describe('App', () => {
     expect(window.localStorage.getItem('dbchat:theme')).toBe('light');
   });
 
-  it('collapses sidebars and resizes open panels from the keyboard', () => {
+  it('keeps the workspace rail fixed and collapses the resizable inspector', () => {
     const api = makeApi();
     render(<App api={api} />);
 
@@ -189,16 +190,14 @@ describe('App', () => {
     const chat = screen.getByLabelText('Chat');
     expect(within(chat).queryByLabelText('Collapse workspace sidebar')).not.toBeInTheDocument();
     expect(within(chat).queryByLabelText('Collapse inspector sidebar')).not.toBeInTheDocument();
-
-    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize workspace sidebar' }), {
-      key: 'ArrowRight'
-    });
-    expect(shell.style.getPropertyValue('--left-panel-width')).toBe('300px');
-
-    fireEvent.click(screen.getByLabelText('Collapse workspace sidebar'));
-    expect(screen.queryByLabelText('Database workspace')).not.toBeInTheDocument();
     expect(screen.queryByRole('separator', { name: 'Resize workspace sidebar' })).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Expand workspace sidebar')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Collapse workspace sidebar')).not.toBeInTheDocument();
+
+    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize inspector sidebar' }), {
+      key: 'ArrowLeft'
+    });
+    expect(shell.style.getPropertyValue('--left-panel-width')).toBe('74px');
+    expect(shell.style.getPropertyValue('--right-panel-width')).toBe('404px');
 
     fireEvent.click(screen.getByLabelText('Collapse inspector sidebar'));
     expect(screen.queryByLabelText('Inspector')).not.toBeInTheDocument();
@@ -288,22 +287,29 @@ describe('App', () => {
 
     render(<App api={api} />);
 
+    fireEvent.click(await screen.findByLabelText('Recent chats'));
     expect(await screen.findByText('Top customers')).toBeInTheDocument();
-    expect(await screen.findByText('customers.db')).toBeInTheDocument();
 
     fireEvent.click(screen.getByText('Top customers'));
 
     expect(await screen.findByText('Ada is the top customer.')).toBeInTheDocument();
     expect(api.connect).toHaveBeenCalledWith(connection);
 
+    fireEvent.click(screen.getByLabelText('Recent chats'));
+    fireEvent.click(screen.getByText('All history'));
     fireEvent.click(screen.getByLabelText('Delete chat Top customers'));
-    expect(api.deleteChatSession).toHaveBeenCalledWith('session-1');
+    await waitFor(() => {
+      expect(api.deleteChatSession).toHaveBeenCalledWith('session-1');
+      expect(screen.getByText('Chat deleted')).toBeInTheDocument();
+    });
 
-    fireEvent.click(screen.getByLabelText('Delete connection customers.db'));
+    fireEvent.click(screen.getByLabelText('Connections'));
+    expect((await screen.findAllByText('customers.db')).length).toBeGreaterThan(0);
+    fireEvent.click(await screen.findByLabelText('Delete connection customers.db'));
     expect(api.deleteConnection).toHaveBeenCalledWith('connection-1');
   });
 
-  it('connects to Elasticsearch from the sidebar form', async () => {
+  it('connects to Elasticsearch from the connections view', async () => {
     const api = makeApi();
     vi.mocked(api.connect).mockResolvedValue({
       kind: 'elasticsearch',
@@ -312,6 +318,7 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
+    fireEvent.click(screen.getByLabelText('Connections'));
     fireEvent.click(screen.getByRole('button', { name: 'Elasticsearch' }));
     expect(within(screen.getByLabelText('Elasticsearch connection')).queryByText('API key')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Host'), {
@@ -353,6 +360,7 @@ describe('App', () => {
     }]);
     render(<App api={api} />);
 
+    fireEvent.click(screen.getByLabelText('Connections'));
     fireEvent.click(await screen.findByText('elastic.internal:9243'));
 
     expect(await screen.findByText('Enter the password to reconnect elastic.internal:9243.')).toBeInTheDocument();
@@ -388,6 +396,7 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
+    fireEvent.click(screen.getByLabelText('Connections'));
     fireEvent.click(await screen.findByText('elastic.internal:9243'));
 
     await waitFor(() => {
@@ -396,25 +405,33 @@ describe('App', () => {
     expect(screen.queryByLabelText('Elasticsearch connection')).not.toBeInTheDocument();
   });
 
-  it('shows the useful part of Elasticsearch IPC connection errors', async () => {
+  it('shows safe connection errors and keeps diagnostic detail in logs', async () => {
     const api = makeApi();
     vi.mocked(api.connect).mockRejectedValueOnce(new Error(
       "Error invoking remote method 'dbchat:connect': Error: Could not reach Elasticsearch at https://elastic.internal:9243: self-signed certificate"
     ));
     render(<App api={api} />);
 
+    fireEvent.click(screen.getByLabelText('Connections'));
     fireEvent.click(screen.getByRole('button', { name: 'Elasticsearch' }));
     fireEvent.click(within(screen.getByLabelText('Elasticsearch connection')).getByRole('button', { name: 'Connect' }));
 
-    expect(await screen.findByText(/Could not reach Elasticsearch at https:\/\/elastic.internal:9243: self-signed certificate/)).toBeInTheDocument();
+    expect(await screen.findByText('Could not connect to Elasticsearch.')).toBeInTheDocument();
+    expect(screen.queryByText(/Could not reach Elasticsearch at https:\/\/elastic.internal:9243: self-signed certificate/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Error invoking remote method/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('Settings'));
+    fireEvent.click(screen.getByRole('button', { name: 'View logs' }));
+
+    expect(await screen.findByText(/Could not reach Elasticsearch at https:\/\/elastic.internal:9243: self-signed certificate/)).toBeInTheDocument();
+    expect(screen.getByText(/Error invoking remote method/)).toBeInTheDocument();
   });
 
   it('loads models in settings and confirms API key save', async () => {
     const api = makeApi();
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Open settings'));
+    fireEvent.click(screen.getByLabelText('Settings'));
     expect(await screen.findByDisplayValue('openai/gpt-4.1-mini')).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('API key'), {
@@ -432,7 +449,7 @@ describe('App', () => {
     const api = makeApi();
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Open settings'));
+    fireEvent.click(screen.getByLabelText('Settings'));
     const modelInput = await screen.findByLabelText('Model name');
     fireEvent.change(modelInput, {
       target: { value: 'deep' }

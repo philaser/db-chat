@@ -5,12 +5,10 @@ import {
   Copy,
   Database,
   KeyRound,
-  LayoutDashboard,
+  List,
   Loader2,
   MessageSquareText,
   Moon,
-  PanelLeftClose,
-  PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
   Play,
@@ -22,7 +20,6 @@ import {
   Sparkles,
   Sun,
   Table2,
-  TerminalSquare,
   Trash2
 } from 'lucide-react';
 import {
@@ -55,8 +52,17 @@ const fallbackApi = typeof window !== 'undefined' ? window.dbchat : undefined;
 const themeStorageKey = 'dbchat:theme';
 
 type InspectorTab = 'results' | 'query' | 'schema';
+type AppView = 'workspace' | 'connections' | 'history' | 'settings';
 type ThemeMode = 'light' | 'dark';
-type ResizeSide = 'left' | 'right';
+type ResizeSide = 'right';
+type LogLevel = 'info' | 'error';
+type AppLogEntry = {
+  id: string;
+  level: LogLevel;
+  message: string;
+  detail?: string;
+  timestamp: string;
+};
 type ResizeDrag = {
   pointerId: number;
   shellWidth: number;
@@ -66,9 +72,7 @@ type ResizeDrag = {
   staticPanelWidth: number;
 };
 
-const leftPanelDefaultWidth = 276;
-const leftPanelMinWidth = 224;
-const leftPanelMaxWidth = 420;
+const leftPanelWidth = 74;
 const rightPanelDefaultWidth = 380;
 const rightPanelMinWidth = 300;
 const rightPanelMaxWidth = 520;
@@ -127,14 +131,12 @@ function formatHistoryDate(value: string): string {
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(value));
 }
 
-function errorStatus(error: unknown, fallback: string): string {
+function logDetail(error: unknown): string | undefined {
   if (!(error instanceof Error) || !error.message) {
-    return fallback;
+    return undefined;
   }
 
-  return error.message
-    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
-    .replace(/^Error:\s*/i, '');
+  return error.message;
 }
 
 function elasticsearchHistoryValues(config: ConnectionConfig) {
@@ -194,7 +196,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     safeMode: true,
     hasApiKey: false
   });
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [activeView, setActiveView] = useState<AppView>('workspace');
+  const [recentChatsOpen, setRecentChatsOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [logs, setLogs] = useState<AppLogEntry[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelSearch, setModelSearch] = useState(settings.model);
@@ -213,13 +218,31 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [elasticsearchUsername, setElasticsearchUsername] = useState('');
   const [elasticsearchPassword, setElasticsearchPassword] = useState('');
   const [elasticsearchRememberPassword, setElasticsearchRememberPassword] = useState(false);
-  const [leftPanelWidth, setLeftPanelWidth] = useState(leftPanelDefaultWidth);
   const [rightPanelWidth, setRightPanelWidth] = useState(rightPanelDefaultWidth);
-  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [resizeDrag, setResizeDrag] = useState<ResizeDrag | null>(null);
   const shellRef = useRef<HTMLElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  function appendLog(level: LogLevel, message: string, detail?: string) {
+    setLogs((current) => [{
+      id: crypto.randomUUID(),
+      level,
+      message,
+      detail,
+      timestamp: new Date().toISOString()
+    }, ...current].slice(0, 150));
+  }
+
+  function updateStatus(message: string) {
+    setStatus(message);
+    appendLog('info', message);
+  }
+
+  function reportError(message: string, error: unknown) {
+    setStatus(message);
+    appendLog('error', message, logDetail(error));
+  }
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -228,10 +251,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
   useEffect(() => {
     if (!api) {
-      setStatus('Desktop app bridge unavailable. Run DB Chat in Electron to connect databases.');
+      updateStatus('Desktop app bridge unavailable. Run DB Chat in Electron to connect databases.');
       return;
     }
-    void api.loadSettings().then(setSettings).catch(() => setStatus('Settings are using defaults.'));
+    void api.loadSettings().then(setSettings).catch((error) => reportError('Settings could not be loaded. Defaults are in use.', error));
     void refreshHistories(api);
   }, [api]);
 
@@ -259,7 +282,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       .catch((error: Error) => {
         if (!active) return;
         setModels([]);
-        setSettingsStatus(error.message || 'Could not load models.');
+        setSettingsStatus('Models could not be loaded.');
+        appendLog('error', 'Models could not be loaded.', logDetail(error));
       })
       .finally(() => {
         if (active) setModelsLoading(false);
@@ -307,25 +331,21 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         return;
       }
 
-      const direction = drag.side === 'left' ? 1 : -1;
+      const direction = -1;
       const delta = (event.clientX - drag.startX) * direction;
       const maxWidth = getPanelMaxWidth(
         drag.shellWidth,
         drag.staticPanelWidth,
-        drag.side === 'left' ? leftPanelMinWidth : rightPanelMinWidth,
-        drag.side === 'left' ? leftPanelMaxWidth : rightPanelMaxWidth
+        rightPanelMinWidth,
+        rightPanelMaxWidth
       );
       const nextWidth = clampPanelWidth(
         drag.startWidth + delta,
-        drag.side === 'left' ? leftPanelMinWidth : rightPanelMinWidth,
+        rightPanelMinWidth,
         maxWidth
       );
 
-      if (drag.side === 'left') {
-        setLeftPanelWidth(nextWidth);
-      } else {
-        setRightPanelWidth(nextWidth);
-      }
+      setRightPanelWidth(nextWidth);
     }
 
     function finishResize(event: PointerEvent) {
@@ -410,34 +430,42 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setValidation(null);
     setResult(null);
     setActiveInspector('schema');
-    setStatus('Ready for a new chat');
+    setActiveView('workspace');
+    setRecentChatsOpen(false);
+    updateStatus('Ready for a new chat');
+  }
+
+  function openView(view: AppView) {
+    setActiveView(view);
+    setRecentChatsOpen(false);
   }
 
   async function connectSqlite() {
     if (!api) {
-      setStatus('SQLite connections are available in the Electron desktop app.');
+      updateStatus('SQLite connections are available in the Electron desktop app.');
       return;
     }
     setBusy(true);
-    setStatus('Opening SQLite file picker...');
+    updateStatus('Opening SQLite file picker...');
     try {
       const config = await api.chooseSqliteFile();
       if (!config) {
-        setStatus('Connection canceled.');
+        updateStatus('Connection canceled.');
         return;
       }
       const nextSchema = await api.connect(config);
       setConnection(config);
       setSchema(nextSchema);
       setActiveInspector('schema');
+      setActiveView('workspace');
       setMessages((current) => [
         ...current,
         nowMessage('assistant', `Connected to ${config.label}. I found ${nextSchema.tables.length} tables.`)
       ]);
-      setStatus(`Connected to ${config.label}`);
+      updateStatus(`Connected to ${config.label}`);
       await refreshHistories();
     } catch (error) {
-      setStatus(errorStatus(error, 'Could not connect to database.'));
+      reportError('Could not connect to the database.', error);
     } finally {
       setBusy(false);
     }
@@ -446,21 +474,21 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   async function connectElasticsearch(event?: FormEvent) {
     event?.preventDefault();
     if (!api) {
-      setStatus('Elasticsearch connections are available in the Electron desktop app.');
+      updateStatus('Elasticsearch connections are available in the Electron desktop app.');
       return;
     }
     if (!elasticsearchHost.trim()) {
-      setStatus('Enter an Elasticsearch host before connecting.');
+      updateStatus('Enter an Elasticsearch host before connecting.');
       return;
     }
     const port = Number(elasticsearchPort);
     if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-      setStatus('Enter an Elasticsearch port between 1 and 65535.');
+      updateStatus('Enter an Elasticsearch port between 1 and 65535.');
       return;
     }
 
     setBusy(true);
-    setStatus('Connecting to Elasticsearch...');
+    updateStatus('Connecting to Elasticsearch...');
     try {
       const config: ConnectionConfig = {
         id: crypto.randomUUID(),
@@ -479,15 +507,16 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       setConnection(config);
       setSchema(nextSchema);
       setActiveInspector('schema');
+      setActiveView('workspace');
       setElasticsearchFormOpen(false);
       setMessages((current) => [
         ...current,
         nowMessage('assistant', `Connected to ${config.label}. I found ${nextSchema.tables.length} indices.`)
       ]);
-      setStatus(`Connected to ${config.label}`);
+      updateStatus(`Connected to ${config.label}`);
       await refreshHistories();
     } catch (error) {
-      setStatus(errorStatus(error, 'Could not connect to Elasticsearch.'));
+      reportError('Could not connect to Elasticsearch.', error);
     } finally {
       setBusy(false);
     }
@@ -500,16 +529,17 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       return;
     }
     setBusy(true);
-    setStatus(`Connecting to ${config.label}...`);
+    updateStatus(`Connecting to ${config.label}...`);
     try {
       const nextSchema = await api.connect(config);
       setConnection(config);
       setSchema(nextSchema);
       setActiveInspector('schema');
-      setStatus(`Connected to ${config.label}`);
+      setActiveView('workspace');
+      updateStatus(`Connected to ${config.label}`);
       await refreshHistories();
     } catch (error) {
-      setStatus(errorStatus(error, 'Could not connect to saved database.'));
+      reportError('Could not connect to the saved database.', error);
     } finally {
       setBusy(false);
     }
@@ -523,7 +553,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setQuery(session.query ?? '');
     setResult(session.result ?? null);
     setActiveInspector(session.result ? 'results' : session.query ? 'query' : 'schema');
-    setStatus(`Opened ${session.title}`);
+    setActiveView('workspace');
+    setRecentChatsOpen(false);
+    updateStatus(`Opened ${session.title}`);
 
     if (session.connection) {
       if (session.connection.kind === 'elasticsearch'
@@ -539,7 +571,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         setSchema(nextSchema);
         await refreshHistories();
       } catch (error) {
-        setStatus(errorStatus(error, `Opened ${session.title}, but could not reconnect the database.`));
+        reportError(`Opened ${session.title}, but could not reconnect the database.`, error);
       } finally {
         setBusy(false);
       }
@@ -553,14 +585,14 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       resetChat();
     }
     await refreshHistories();
-    setStatus('Chat deleted');
+    updateStatus('Chat deleted');
   }
 
   async function deleteConnection(id: string) {
     if (!api) return;
     await api.deleteConnection(id);
     await refreshHistories();
-    setStatus('Saved connection deleted');
+    updateStatus('Saved connection deleted');
   }
 
   function prepareElasticsearchReconnect(config: ConnectionConfig, nextStatus: string) {
@@ -573,7 +605,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setElasticsearchPassword('');
     setElasticsearchRememberPassword(Boolean(config.elasticsearchHasSavedPassword || config.elasticsearchRememberPassword));
     setElasticsearchFormOpen(true);
-    setStatus(nextStatus);
+    updateStatus(nextStatus);
   }
 
   async function sendChat(event: FormEvent) {
@@ -586,7 +618,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setPrompt('');
     setBusy(true);
     setAnswerGenerating(true);
-    setStatus('Thinking...');
+    updateStatus('Thinking...');
     try {
       const chatHistory: ModelChatMessage[] = nextMessages.map((message) => ({
         role: message.role,
@@ -603,16 +635,16 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       if (response.queryResult) {
         setResult(response.queryResult);
         setActiveInspector('results');
-        setStatus(`Returned ${response.queryResult.rowCount} rows in ${response.queryResult.elapsedMs} ms`);
+        updateStatus(`Returned ${response.queryResult.rowCount} rows in ${response.queryResult.elapsedMs} ms`);
       } else {
-        setStatus('Response ready');
+        updateStatus('Response ready');
       }
       await persistChatSession(finalMessages, {
         query: response.generatedQuery?.query ?? query,
         result: response.queryResult ?? result ?? undefined
       });
     } catch (error) {
-      setStatus(errorStatus(error, 'Chat failed.'));
+      reportError('The chat request failed.', error);
     } finally {
       setAnswerGenerating(false);
       setBusy(false);
@@ -622,15 +654,15 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   async function runQuery() {
     if (!api || !query.trim()) return;
     setBusy(true);
-    setStatus('Running safe query...');
+    updateStatus('Running safe query...');
     try {
       const nextResult = await api.executeQuery(query);
       setResult(nextResult);
       setActiveInspector('results');
-      setStatus(`Returned ${nextResult.rowCount} rows in ${nextResult.elapsedMs} ms`);
+      updateStatus(`Returned ${nextResult.rowCount} rows in ${nextResult.elapsedMs} ms`);
       await persistChatSession(messages, { query, result: nextResult });
     } catch (error) {
-      setStatus(errorStatus(error, 'Query failed.'));
+      reportError('The query could not be run.', error);
     } finally {
       setBusy(false);
     }
@@ -677,11 +709,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       setSettings((current) => ({ ...current, hasApiKey: true }));
       setApiKey('');
       setSettingsStatus('API key saved successfully.');
-      setStatus(`${settings.provider} API key saved locally.`);
+      updateStatus(`${settings.provider} API key saved locally.`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not save API key.';
-      setSettingsStatus(message);
-      setStatus(message);
+      setSettingsStatus('API key could not be saved.');
+      reportError('API key could not be saved.', error);
     }
   }
 
@@ -699,11 +730,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       pointerId: event.pointerId,
       shellWidth: getShellWidth(),
       side,
-      startWidth: side === 'left' ? leftPanelWidth : rightPanelWidth,
+      startWidth: rightPanelWidth,
       startX: event.clientX,
-      staticPanelWidth: side === 'left'
-        ? (rightPanelCollapsed ? panelRailWidth : rightPanelWidth)
-        : (leftPanelCollapsed ? panelRailWidth : leftPanelWidth)
+      staticPanelWidth: leftPanelWidth
     });
   }
 
@@ -714,23 +743,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
     event.preventDefault();
     const handleDelta = event.key === 'ArrowRight' ? keyboardResizeStep : -keyboardResizeStep;
-    const widthDelta = side === 'left' ? handleDelta : -handleDelta;
+    const widthDelta = -handleDelta;
     const shellWidth = getShellWidth();
-
-    if (side === 'left') {
-      const maxWidth = getPanelMaxWidth(
-        shellWidth,
-        rightPanelCollapsed ? panelRailWidth : rightPanelWidth,
-        leftPanelMinWidth,
-        leftPanelMaxWidth
-      );
-      setLeftPanelWidth((current) => clampPanelWidth(current + widthDelta, leftPanelMinWidth, maxWidth));
-      return;
-    }
 
     const maxWidth = getPanelMaxWidth(
       shellWidth,
-      leftPanelCollapsed ? panelRailWidth : leftPanelWidth,
+      leftPanelWidth,
       rightPanelMinWidth,
       rightPanelMaxWidth
     );
@@ -842,8 +860,327 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     );
   }
 
+  function renderElasticsearchForm() {
+    if (!elasticsearchFormOpen) {
+      return null;
+    }
+
+    return (
+      <form className="elasticsearch-form" aria-label="Elasticsearch connection" onSubmit={(event) => void connectElasticsearch(event)}>
+        <label>
+          <span>Host</span>
+          <input
+            value={elasticsearchHost}
+            onChange={(event) => setElasticsearchHost(event.target.value)}
+            placeholder="localhost"
+          />
+        </label>
+        <label>
+          <span>Port</span>
+          <input
+            value={elasticsearchPort}
+            onChange={(event) => setElasticsearchPort(event.target.value)}
+            inputMode="numeric"
+            type="number"
+            min={1}
+            max={65535}
+          />
+        </label>
+        <label>
+          <span>Username</span>
+          <input value={elasticsearchUsername} onChange={(event) => setElasticsearchUsername(event.target.value)} />
+        </label>
+        <label>
+          <span>Password</span>
+          <input type="password" value={elasticsearchPassword} onChange={(event) => setElasticsearchPassword(event.target.value)} />
+        </label>
+        <label className="elasticsearch-checkbox">
+          <input type="checkbox" checked={elasticsearchUseSsl} onChange={(event) => setElasticsearchUseSsl(event.target.checked)} />
+          <span>Use HTTPS</span>
+        </label>
+        <label className="elasticsearch-checkbox">
+          <input
+            type="checkbox"
+            checked={elasticsearchVerifyCerts}
+            onChange={(event) => setElasticsearchVerifyCerts(event.target.checked)}
+            disabled={!elasticsearchUseSsl}
+          />
+          <span>Verify TLS certificates</span>
+        </label>
+        <label className="elasticsearch-checkbox">
+          <input
+            type="checkbox"
+            checked={elasticsearchRememberPassword}
+            onChange={(event) => setElasticsearchRememberPassword(event.target.checked)}
+          />
+          <span>Remember password</span>
+        </label>
+        <button type="submit" className="primary-button" disabled={busy || !elasticsearchHost.trim() || !elasticsearchPort.trim()}>
+          Connect
+        </button>
+      </form>
+    );
+  }
+
+  function renderSettingsControls() {
+    return (
+      <>
+        <div className="settings-grid">
+          <label>
+            <span>Provider</span>
+            <select
+              value={settings.provider}
+              onChange={(event) => void changeProvider(event.target.value as ModelProviderKind)}
+              aria-label="Model provider"
+            >
+              <option value="openrouter">OpenRouter</option>
+              <option value="openai">OpenAI</option>
+            </select>
+          </label>
+
+          <label>
+            <span>Model</span>
+            <div className="model-select-wrap">
+              <input
+                value={modelSearch}
+                onChange={(event) => void changeModelSearch(event.target.value)}
+                list="model-options"
+                disabled={modelsLoading || !models.length}
+                aria-label="Model name"
+                placeholder={modelsLoading ? 'Loading models...' : 'Search models'}
+              />
+              <datalist id="model-options">
+                {filteredModels.map((model) => (
+                  <option value={model.id} key={model.id}>{model.name}</option>
+                ))}
+              </datalist>
+              {modelsLoading && <Loader2 className="spin" size={16} aria-label="Loading models" />}
+            </div>
+          </label>
+
+          <label className="api-key-field">
+            <span>{settings.provider} API key</span>
+            <div className="api-key-box">
+              <KeyRound size={15} />
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+                placeholder={settings.hasApiKey ? 'API key saved' : 'Paste API key'}
+                aria-label="API key"
+              />
+              <button type="button" onClick={() => void saveApiKey()} disabled={!apiKey.trim()}>
+                Save
+              </button>
+            </div>
+          </label>
+        </div>
+        <div className={`settings-status ${settings.hasApiKey ? 'saved' : ''}`}>
+          {settings.hasApiKey && <CheckCircle2 size={15} />}
+          {settingsStatus || (settings.hasApiKey ? 'API key saved.' : 'Settings are stored locally.')}
+        </div>
+      </>
+    );
+  }
+
+  function renderChatHistory(limit?: number) {
+    const sessions = typeof limit === 'number' ? chatSessions.slice(0, limit) : chatSessions;
+    return (
+      <div className="history-list">
+        {sessions.length ? sessions.map((session) => (
+          <article className={`history-item ${activeChatId === session.id ? 'active' : ''}`} key={session.id}>
+            <button type="button" className="history-main" onClick={() => void openChatSession(session)}>
+              <MessageSquareText size={15} />
+              <span>
+                <strong>{session.title}</strong>
+                <small>{formatHistoryDate(session.updatedAt)}</small>
+              </span>
+            </button>
+            <button type="button" className="history-delete" onClick={() => void deleteChatSession(session.id)} aria-label={`Delete chat ${session.title}`}>
+              <Trash2 size={14} />
+            </button>
+          </article>
+        )) : (
+          <p className="history-empty">Saved chats will appear here.</p>
+        )}
+      </div>
+    );
+  }
+
+  function renderFocusedView() {
+    if (activeView === 'workspace') {
+      return null;
+    }
+
+    if (activeView === 'connections') {
+      return (
+        <section className="focus-view" aria-label="Connections">
+          <header className="focus-header">
+            <div>
+              <p>Database access</p>
+              <h2>Connections</h2>
+            </div>
+            <button type="button" onClick={() => openView('workspace')}>Back to chat</button>
+          </header>
+          <div className="focus-grid connections-view">
+            <section className="focus-panel" aria-label="Connection status">
+              <div className="connection-kicker">
+                <span className={connection ? 'status-dot connected' : 'status-dot'} />
+                <p>{connection ? 'Active connection' : 'No active connection'}</p>
+              </div>
+              <div className="connection-copy">
+                <strong>{connection ? connection.label : 'Choose a database'}</strong>
+                <span>{schemaSummary}</span>
+              </div>
+              <div className="connection-actions">
+                <button type="button" className="secondary-button" onClick={connectSqlite} disabled={busy || !api}>
+                  <Database size={16} />
+                  SQLite
+                </button>
+                <button type="button" className="secondary-button" onClick={() => setElasticsearchFormOpen((current) => !current)} disabled={busy || !api}>
+                  <Search size={16} />
+                  Elasticsearch
+                </button>
+              </div>
+              {renderElasticsearchForm()}
+            </section>
+            <section className="focus-panel history-section" aria-label="Connection history">
+              <div className="history-heading">
+                <span>Saved connections</span>
+                <Clock3 size={14} aria-hidden="true" />
+              </div>
+              <div className="history-list">
+                {savedConnections.length ? savedConnections.map((item) => (
+                  <article className="history-item" key={item.id}>
+                    <button type="button" className="history-main" onClick={() => void connectFromHistory(item)} disabled={busy}>
+                      <Database size={15} />
+                      <span>
+                        <strong>{item.label}</strong>
+                        <small>{formatHistoryDate(item.lastConnectedAt)}</small>
+                      </span>
+                    </button>
+                    <button type="button" className="history-delete" onClick={() => void deleteConnection(item.id)} aria-label={`Delete connection ${item.label}`}>
+                      <Trash2 size={14} />
+                    </button>
+                  </article>
+                )) : (
+                  <p className="history-empty">Connected databases will appear here.</p>
+                )}
+              </div>
+            </section>
+          </div>
+          <div className="focus-status" title={status}>
+            <Sparkles size={15} />
+            <span>{status}</span>
+          </div>
+        </section>
+      );
+    }
+
+    if (activeView === 'history') {
+      return (
+        <section className="focus-view" aria-label="Chat history">
+          <header className="focus-header">
+            <div>
+              <p>Saved conversations</p>
+              <h2>History</h2>
+            </div>
+            <button type="button" className="primary-button" onClick={resetChat}>
+              <Plus size={16} />
+              New chat
+            </button>
+          </header>
+          <section className="focus-panel history-section">{renderChatHistory()}</section>
+          <div className="focus-status" title={status}>
+            <Sparkles size={15} />
+            <span>{status}</span>
+          </div>
+        </section>
+      );
+    }
+
+    return (
+      <section className="focus-view" aria-label="Settings">
+        <header className="focus-header">
+          <div>
+            <p>Model and safety</p>
+            <h2>Settings</h2>
+          </div>
+          <button type="button" onClick={() => openView('workspace')}>Back to chat</button>
+        </header>
+        <div className="focus-grid settings-view">
+          <section className="focus-panel settings-panel">{renderSettingsControls()}</section>
+          <section className="focus-panel preferences-panel" aria-label="Workspace preferences">
+            <label className="safe-toggle">
+              <input
+                type="checkbox"
+                checked={settings.safeMode}
+                onChange={(event) => void saveSettings({ ...settings, safeMode: event.target.checked })}
+                aria-label="SAFE mode"
+              />
+              <ShieldCheck size={16} />
+              SAFE mode
+            </label>
+            <div className="theme-toggle" aria-label="Theme">
+              <button type="button" className={theme === 'light' ? 'active' : ''} onClick={() => setTheme('light')}>
+                <Sun size={16} />
+                Light
+              </button>
+              <button type="button" className={theme === 'dark' ? 'active' : ''} onClick={() => setTheme('dark')}>
+                <Moon size={16} />
+                Dark
+              </button>
+            </div>
+            <div className="provider-card">
+              <span>{settings.provider}</span>
+              <strong>{settings.model}</strong>
+              <p>{settings.hasApiKey ? 'API key saved locally' : 'API key not saved'}</p>
+            </div>
+            <button
+              aria-expanded={logsOpen}
+              className="logs-button"
+              onClick={() => setLogsOpen((current) => !current)}
+              type="button"
+            >
+              <List size={17} />
+              {logsOpen ? 'Hide logs' : 'View logs'}
+            </button>
+          </section>
+        </div>
+        {logsOpen && (
+          <section className="focus-panel logs-viewer" aria-label="Application logs">
+            <div className="logs-heading">
+              <div>
+                <p>Recent activity</p>
+                <h3>Logs</h3>
+              </div>
+              <button type="button" onClick={() => setLogs([])} disabled={!logs.length}>Clear</button>
+            </div>
+            <div className="logs-list">
+              {logs.length ? logs.map((entry) => (
+                <article className={`log-entry ${entry.level}`} key={entry.id}>
+                  <div>
+                    <strong>{entry.message}</strong>
+                    <time>{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time>
+                  </div>
+                  {entry.detail && <pre>{entry.detail}</pre>}
+                </article>
+              )) : (
+                <p className="history-empty">App activity and error details will appear here.</p>
+              )}
+            </div>
+          </section>
+        )}
+        <div className="focus-status" title={status}>
+          <Sparkles size={15} />
+          <span>{status}</span>
+        </div>
+      </section>
+    );
+  }
+
   const shellStyle = {
-    '--left-panel-width': `${leftPanelCollapsed ? panelRailWidth : leftPanelWidth}px`,
+    '--left-panel-width': `${leftPanelWidth}px`,
     '--right-panel-width': `${rightPanelCollapsed ? panelRailWidth : rightPanelWidth}px`
   } as CSSProperties;
 
@@ -854,318 +1191,89 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       ref={shellRef}
       style={shellStyle}
     >
-      {leftPanelCollapsed ? (
-        <aside className="panel-rail workspace-rail" id="workspace-sidebar" aria-label="Collapsed workspace sidebar">
-          <button
-            aria-label="Expand workspace sidebar"
-            className="panel-rail-button"
-            onClick={() => setLeftPanelCollapsed(false)}
-            title="Expand workspace sidebar"
-            type="button"
-          >
-            <PanelLeftOpen size={18} />
-          </button>
-        </aside>
-      ) : (
-        <aside className="sidebar" id="workspace-sidebar" aria-label="Database workspace">
-          <div className="brand-row">
-            <div className="brand-mark" aria-hidden="true">DB</div>
-            <div>
-              <h1>DB Chat</h1>
-              <p>Chat with database data</p>
-            </div>
+      <aside className="sidebar workspace-rail-open" id="workspace-sidebar" aria-label="Database workspace">
+          <nav className="icon-rail" aria-label="Workspace destinations">
             <button
-              aria-label="Collapse workspace sidebar"
-              className="panel-collapse-button"
-              onClick={() => setLeftPanelCollapsed(true)}
-              title="Collapse workspace sidebar"
+              aria-label="Chat workspace"
+              className={`rail-action brand-action ${activeView === 'workspace' ? 'active' : ''}`}
+              onClick={() => openView('workspace')}
               type="button"
             >
-              <PanelLeftClose size={18} />
+              <span className="brand-mark" aria-hidden="true">DB</span>
+              <span className="rail-tooltip">Chat workspace</span>
             </button>
-          </div>
-
-        <section className="connection-card" aria-label="Connection status">
-          <div className="connection-kicker">
-            <span className={connection ? 'status-dot connected' : 'status-dot'} />
-            <p>
-              {connection
-                ? `Live ${connection.kind === 'elasticsearch' ? 'Elasticsearch' : 'SQLite'} connection`
-                : 'No active connection'}
-            </p>
-          </div>
-          <div className="connection-copy">
-            <strong>{connection ? connection.label : 'Choose a database'}</strong>
-            <span>{schemaSummary}</span>
-          </div>
-          <div className="connection-actions">
-            <button type="button" className="secondary-button" onClick={connectSqlite} disabled={busy || !api}>
-              <Database size={16} />
-              SQLite
+            <button aria-label="New chat" className="rail-action" onClick={resetChat} type="button">
+              <Plus size={19} />
+              <span className="rail-tooltip">New chat</span>
             </button>
-            <button type="button" className="secondary-button" onClick={() => setElasticsearchFormOpen((current) => !current)} disabled={busy || !api}>
-              <Search size={16} />
-              Elasticsearch
-            </button>
-          </div>
-          {elasticsearchFormOpen && (
-            <form className="elasticsearch-form" aria-label="Elasticsearch connection" onSubmit={(event) => void connectElasticsearch(event)}>
-              <label>
-                <span>Host</span>
-                <input
-                  value={elasticsearchHost}
-                  onChange={(event) => setElasticsearchHost(event.target.value)}
-                  placeholder="localhost"
-                />
-              </label>
-              <label>
-                <span>Port</span>
-                <input
-                  value={elasticsearchPort}
-                  onChange={(event) => setElasticsearchPort(event.target.value)}
-                  inputMode="numeric"
-                  type="number"
-                  min={1}
-                  max={65535}
-                />
-              </label>
-              <label>
-                <span>Username</span>
-                <input value={elasticsearchUsername} onChange={(event) => setElasticsearchUsername(event.target.value)} />
-              </label>
-              <label>
-                <span>Password</span>
-                <input type="password" value={elasticsearchPassword} onChange={(event) => setElasticsearchPassword(event.target.value)} />
-              </label>
-              <label className="elasticsearch-checkbox">
-                <input type="checkbox" checked={elasticsearchUseSsl} onChange={(event) => setElasticsearchUseSsl(event.target.checked)} />
-                <span>Use HTTPS</span>
-              </label>
-              <label className="elasticsearch-checkbox">
-                <input
-                  type="checkbox"
-                  checked={elasticsearchVerifyCerts}
-                  onChange={(event) => setElasticsearchVerifyCerts(event.target.checked)}
-                  disabled={!elasticsearchUseSsl}
-                />
-                <span>Verify TLS certificates</span>
-              </label>
-              <label className="elasticsearch-checkbox">
-                <input
-                  type="checkbox"
-                  checked={elasticsearchRememberPassword}
-                  onChange={(event) => setElasticsearchRememberPassword(event.target.checked)}
-                />
-                <span>Remember password</span>
-              </label>
-              <button type="submit" className="primary-button" disabled={busy || !elasticsearchHost.trim() || !elasticsearchPort.trim()}>
-                Connect
+            <div className="recent-anchor">
+              <button
+                aria-expanded={recentChatsOpen}
+                aria-label="Recent chats"
+                className={`rail-action ${activeView === 'history' || recentChatsOpen ? 'active' : ''}`}
+                onClick={() => {
+                  if (activeView !== 'workspace') {
+                    openView('history');
+                    return;
+                  }
+                  setRecentChatsOpen((current) => !current);
+                }}
+                type="button"
+              >
+                <Clock3 size={19} />
+                <span className="rail-tooltip">Recent chats</span>
               </button>
-            </form>
-          )}
-        </section>
-
-        <nav className="sidebar-nav" aria-label="Workspace views">
-          <button type="button" className="active">
-            <MessageSquareText size={17} />
-            Chat
-          </button>
-          <button type="button" className={activeInspector === 'results' ? 'active' : ''} onClick={() => setActiveInspector('results')}>
-            <Table2 size={17} />
-            Results
-          </button>
-          <button type="button" className={activeInspector === 'query' ? 'active' : ''} onClick={() => setActiveInspector('query')}>
-            <TerminalSquare size={17} />
-            Query
-          </button>
-          <button type="button" className={activeInspector === 'schema' ? 'active' : ''} onClick={() => setActiveInspector('schema')}>
-            <LayoutDashboard size={17} />
-            Schema
-          </button>
-        </nav>
-
-        <section className="history-section" aria-label="Chat history">
-          <div className="history-heading">
-            <span>Chat history</span>
-            <button type="button" onClick={resetChat} aria-label="New chat">
-              <Plus size={14} />
+              {activeView === 'workspace' && recentChatsOpen && (
+                <section className="recent-flyout" aria-label="Recent chats flyout">
+                  <div className="history-heading">
+                    <span>Recent chats</span>
+                    <button type="button" onClick={() => openView('history')}>All history</button>
+                  </div>
+                  {renderChatHistory(4)}
+                </section>
+              )}
+            </div>
+            <button
+              aria-label="Connections"
+              className={`rail-action ${activeView === 'connections' ? 'active' : ''}`}
+              onClick={() => openView('connections')}
+              type="button"
+            >
+              <Database size={19} />
+              {connection && <span className="rail-status-dot" aria-hidden="true" />}
+              <span className="rail-tooltip">Connections</span>
             </button>
-          </div>
-          <div className="history-list">
-            {chatSessions.length ? chatSessions.map((session) => (
-              <article className={`history-item ${activeChatId === session.id ? 'active' : ''}`} key={session.id}>
-                <button type="button" className="history-main" onClick={() => void openChatSession(session)}>
-                  <MessageSquareText size={15} />
-                  <span>
-                    <strong>{session.title}</strong>
-                    <small>{formatHistoryDate(session.updatedAt)}</small>
-                  </span>
-                </button>
-                <button type="button" className="history-delete" onClick={() => void deleteChatSession(session.id)} aria-label={`Delete chat ${session.title}`}>
-                  <Trash2 size={14} />
-                </button>
-              </article>
-            )) : (
-              <p className="history-empty">Saved chats will appear here.</p>
-            )}
-          </div>
-        </section>
-
-        <section className="history-section" aria-label="Connection history">
-          <div className="history-heading">
-            <span>Connect history</span>
-            <Clock3 size={14} aria-hidden="true" />
-          </div>
-          <div className="history-list">
-            {savedConnections.length ? savedConnections.map((item) => (
-              <article className="history-item" key={item.id}>
-                <button type="button" className="history-main" onClick={() => void connectFromHistory(item)} disabled={busy}>
-                  <Database size={15} />
-                  <span>
-                    <strong>{item.label}</strong>
-                    <small>{formatHistoryDate(item.lastConnectedAt)}</small>
-                  </span>
-                </button>
-                <button type="button" className="history-delete" onClick={() => void deleteConnection(item.id)} aria-label={`Delete connection ${item.label}`}>
-                  <Trash2 size={14} />
-                </button>
-              </article>
-            )) : (
-              <p className="history-empty">Connected databases will appear here.</p>
-            )}
-          </div>
-        </section>
-
-        <div className="sidebar-spacer" />
-
-        <label className="safe-toggle">
-          <input
-            type="checkbox"
-            checked={settings.safeMode}
-            onChange={(event) => void saveSettings({ ...settings, safeMode: event.target.checked })}
-            aria-label="SAFE mode"
-          />
-          <ShieldCheck size={16} />
-          SAFE mode
-        </label>
-
-        <div className="theme-toggle" aria-label="Theme">
-          <button type="button" className={theme === 'light' ? 'active' : ''} onClick={() => setTheme('light')}>
-            <Sun size={16} />
-            Light
-          </button>
-          <button type="button" className={theme === 'dark' ? 'active' : ''} onClick={() => setTheme('dark')}>
-            <Moon size={16} />
-            Dark
-          </button>
-        </div>
-
-        <button
-          type="button"
-          className="settings-button"
-          onClick={() => setSettingsOpen((current) => !current)}
-          aria-expanded={settingsOpen}
-          aria-label="Open settings"
-        >
-          <Settings size={17} />
-          Settings
-          {settings.hasApiKey && <CheckCircle2 className="settings-saved-dot" size={14} aria-label="API key saved" />}
-        </button>
-
-        {settingsOpen && (
-          <section className="settings-panel" aria-label="Settings">
-            <div className="settings-grid">
-              <label>
-                <span>Provider</span>
-                <select
-                  value={settings.provider}
-                  onChange={(event) => void changeProvider(event.target.value as ModelProviderKind)}
-                  aria-label="Model provider"
-                >
-                  <option value="openrouter">OpenRouter</option>
-                  <option value="openai">OpenAI</option>
-                </select>
-              </label>
-
-              <label>
-                <span>Model</span>
-                <div className="model-select-wrap">
-                  <input
-                    value={modelSearch}
-                    onChange={(event) => void changeModelSearch(event.target.value)}
-                    list="model-options"
-                    disabled={modelsLoading || !models.length}
-                    aria-label="Model name"
-                    placeholder={modelsLoading ? 'Loading models...' : 'Search models'}
-                  />
-                  <datalist id="model-options">
-                    {filteredModels.map((model) => (
-                      <option value={model.id} key={model.id}>{model.name}</option>
-                    ))}
-                  </datalist>
-                  {modelsLoading && <Loader2 className="spin" size={16} aria-label="Loading models" />}
-                </div>
-              </label>
-
-              <label className="api-key-field">
-                <span>{settings.provider} API key</span>
-                <div className="api-key-box">
-                  <KeyRound size={15} />
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(event) => setApiKey(event.target.value)}
-                    placeholder={settings.hasApiKey ? 'API key saved' : 'Paste API key'}
-                    aria-label="API key"
-                  />
-                  <button type="button" onClick={() => void saveApiKey()} disabled={!apiKey.trim()}>
-                    Save
-                  </button>
-                </div>
-              </label>
-            </div>
-            <div className={`settings-status ${settings.hasApiKey ? 'saved' : ''}`}>
-              {settings.hasApiKey && <CheckCircle2 size={15} />}
-              {settingsStatus || (settings.hasApiKey ? 'API key saved.' : 'Settings are stored locally.')}
-            </div>
-          </section>
-        )}
-
-          <div className="provider-card">
-            <span>{settings.provider}</span>
-            <strong>{settings.model}</strong>
-            <p>{settings.hasApiKey ? 'API key saved locally' : 'API key not saved'}</p>
-          </div>
+            <button
+              aria-label="Settings"
+              className={`rail-action ${activeView === 'settings' ? 'active' : ''}`}
+              onClick={() => openView('settings')}
+              type="button"
+            >
+              <Settings size={19} />
+              {settings.hasApiKey && <CheckCircle2 className="rail-saved" size={12} aria-label="API key saved" />}
+              <span className="rail-tooltip">Settings</span>
+            </button>
+          </nav>
         </aside>
-      )}
 
-      {!leftPanelCollapsed && (
-        <div
-          aria-controls="workspace-sidebar"
-          aria-label="Resize workspace sidebar"
-          aria-orientation="vertical"
-          aria-valuemax={leftPanelMaxWidth}
-          aria-valuemin={leftPanelMinWidth}
-          aria-valuenow={Math.round(leftPanelWidth)}
-          className="panel-resize-handle left"
-          onDoubleClick={() => setLeftPanelWidth(leftPanelDefaultWidth)}
-          onKeyDown={(event) => resizePanelWithKeyboard('left', event)}
-          onPointerDown={(event) => beginPanelResize('left', event)}
-          role="separator"
-          tabIndex={0}
-        />
-      )}
-
-      <section className="chat-pane" aria-label="Chat">
+      <section className="chat-pane" aria-label={activeView === 'workspace' ? 'Chat' : 'Workspace view'}>
+        {renderFocusedView() ?? (
+          <>
         <header className="chat-header">
           <div className="chat-heading">
             <p>AI data workspace</p>
             <h2>Ask your database anything</h2>
             <div className="workspace-context">
-              <span>
+              <button
+                aria-label="Open connections"
+                className="connection-chip"
+                onClick={() => openView('connections')}
+                title="Open connections"
+                type="button"
+              >
                 <Database size={14} />
                 {connection ? connection.label : 'No database connected'}
-              </span>
+              </button>
               <span className={settings.safeMode ? 'safe' : 'warning'}>
                 <ShieldCheck size={14} />
                 {settings.safeMode ? 'Safe reads on' : 'SAFE mode off'}
@@ -1227,6 +1335,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             </button>
           </div>
         </form>
+          </>
+        )}
       </section>
 
       {rightPanelCollapsed ? (
