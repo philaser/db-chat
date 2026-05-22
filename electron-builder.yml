@@ -46,3 +46,4 @@ publish:
   provider: github
   owner: philaser
   repo: db-chat
+  releaseType: release
