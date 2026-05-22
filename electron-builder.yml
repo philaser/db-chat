@@ -1,0 +1,48 @@
+appId: com.philaser.dbchat
+productName: DB Chat
+directories:
+  output: release
+  buildResources: build
+npmRebuild: true
+asar: true
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+files:
+  - dist-electron/**
+  - dist-renderer/**
+  - package.json
+mac:
+  icon: build/icon.png
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+        - arm64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+linux:
+  icon: build/icon.png
+  category: Development
+  maintainer: DB Chat contributors
+  synopsis: Chat with database contents from a desktop workspace.
+  target:
+    - target: AppImage
+      arch:
+        - x64
+        - arm64
+    - target: deb
+      arch:
+        - x64
+        - arm64
+publish:
+  provider: github
+  owner: philaser
+  repo: db-chat

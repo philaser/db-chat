@@ -2,6 +2,7 @@
   "name": "db-chat",
   "version": "0.1.0",
   "description": "A desktop AI chat agent for databases.",
+  "author": "DB Chat contributors",
   "private": true,
   "type": "module",
   "main": "dist-electron/main/main.js",
@@ -13,21 +14,23 @@
     "rebuild:sqlite:electron": "npm rebuild better-sqlite3 --runtime=electron --target=$(node -p \"require('./node_modules/electron/package.json').version\") --dist-url=https://electronjs.org/headers",
     "rebuild:sqlite:node": "npm rebuild better-sqlite3",
     "build": "tsc -p tsconfig.electron.json && vite build",
+    "package": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac dmg",
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:linux": "npm run build && electron-builder --linux AppImage deb",
     "pretest": "npm run rebuild:sqlite:node",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^5.1.1",
     "better-sqlite3": "^12.4.6",
-    "electron": "^39.2.6",
     "lucide-react": "^0.561.0",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1",
-    "vite": "^7.2.7"
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",
@@ -36,9 +39,13 @@
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
     "concurrently": "^9.2.1",
+    "electron": "^39.2.6",
+    "electron-builder": "^26.8.1",
     "jsdom": "^27.3.0",
     "typescript": "^5.9.3",
+    "vite": "^7.2.7",
     "vitest": "^4.0.15",
     "wait-on": "^9.0.3"
   }

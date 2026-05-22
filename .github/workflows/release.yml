@@ -1,0 +1,100 @@
+name: Release binaries
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            runner: macos-15
+            platform: mac
+            arch: arm64
+          - name: macOS Intel
+            runner: macos-15-intel
+            platform: mac
+            arch: x64
+          - name: Windows x64
+            runner: windows-2025
+            platform: win
+            arch: x64
+          - name: Windows arm64
+            runner: windows-11-arm
+            platform: win
+            arch: arm64
+          - name: Linux x64
+            runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Use release tag as package version
+        shell: bash
+        run: |
+          RELEASE_TAG="${{ github.event.release.tag_name }}"
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag ${RELEASE_TAG} must match v<major>.<minor>.<patch>."
+            exit 1
+          fi
+          npm version "${RELEASE_TAG#v}" --no-git-tag-version --allow-same-version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Package macOS release
+        if: matrix.platform == 'mac'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.MAC_CSC_LINK != '' }}
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --mac dmg --${{ matrix.arch }} --publish always
+
+      - name: Package Windows release
+        if: matrix.platform == 'win'
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win nsis --${{ matrix.arch }} --publish always
+
+      - name: Package Linux release
+        if: matrix.platform == 'linux'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --linux AppImage deb --${{ matrix.arch }} --publish always
