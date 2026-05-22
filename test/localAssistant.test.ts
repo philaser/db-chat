@@ -65,6 +65,17 @@ describe('local assistant prompt shaping', () => {
     expect(prompt).toContain('Never generate writes, deletes, updates');
   });
 
+  it('allows validated data writes in prompts only when SAFE mode is off', () => {
+    const sqlitePrompt = buildSystemPrompt('orders(id, total)', 'sqlite', 'manual');
+    const elasticsearchPrompt = buildSystemPrompt('Elasticsearch index orders: customer keyword', 'elasticsearch', 'manual');
+
+    expect(sqlitePrompt).toContain('SAFE mode is off');
+    expect(sqlitePrompt).toContain('table row inserts, updates, deletes, or replaces');
+    expect(sqlitePrompt).toContain('Never generate schema changes');
+    expect(elasticsearchPrompt).toContain('document index, update, and delete requests');
+    expect(elasticsearchPrompt).toContain('Never generate index deletion');
+  });
+
   it('gives schema questions a next-question ramp', () => {
     const response = buildLocalAssistantResponse('what tables are available?', schema);
 

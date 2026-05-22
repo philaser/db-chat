@@ -10,6 +10,7 @@ import type {
   TableInfo
 } from '../../shared/types.js';
 import {
+  parseElasticsearchQuery,
   parseElasticsearchSearchQuery,
   validateElasticsearchReadOnlyQuery
 } from './elasticsearchValidation.js';
@@ -57,13 +58,21 @@ export class ElasticsearchConnector implements DatabaseConnector {
     return validateElasticsearchReadOnlyQuery(query, mode);
   }
 
-  async executeQuery(query: string): Promise<QueryResult> {
-    const validation = this.validateQuery(query, 'safe');
+  async executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult> {
+    const validation = this.validateQuery(query, mode);
     if (!validation.safe) {
       throw new Error(validation.reason);
     }
 
-    const parsed = parseElasticsearchSearchQuery(validation.normalizedQuery);
+    const parsed = parseElasticsearchQuery(validation.normalizedQuery, mode);
+    if ('operation' in parsed) {
+      return this.executeDocumentWrite(parsed);
+    }
+
+    return this.executeSearch(parsed);
+  }
+
+  private async executeSearch(parsed: ReturnType<typeof parseElasticsearchSearchQuery>): Promise<QueryResult> {
     const body = {
       size: 50,
       track_total_hits: true,
@@ -87,6 +96,41 @@ export class ElasticsearchConnector implements DatabaseConnector {
       columns,
       rows,
       rowCount: rows.length,
+      elapsedMs
+    };
+  }
+
+  private async executeDocumentWrite(parsed: Extract<ReturnType<typeof parseElasticsearchQuery>, { operation: string }>): Promise<QueryResult> {
+    const start = performance.now();
+    const response = parsed.operation === 'delete'
+      ? await this.request<ElasticsearchWriteResponse>(
+        `${encodeURIComponent(parsed.index)}/_doc/${encodeURIComponent(parsed.id ?? '')}`,
+        { method: 'DELETE' }
+      )
+      : parsed.operation === 'update'
+        ? await this.request<ElasticsearchWriteResponse>(
+          `${encodeURIComponent(parsed.index)}/_update/${encodeURIComponent(parsed.id ?? '')}`,
+          { method: 'POST', body: JSON.stringify(parsed.body) }
+        )
+        : await this.request<ElasticsearchWriteResponse>(
+          parsed.id
+            ? `${encodeURIComponent(parsed.index)}/_doc/${encodeURIComponent(parsed.id)}`
+            : `${encodeURIComponent(parsed.index)}/_doc`,
+          { method: parsed.id ? 'PUT' : 'POST', body: JSON.stringify(parsed.body) }
+        );
+    const elapsedMs = Math.round(performance.now() - start);
+    const row = {
+      operation: parsed.operation,
+      index: response._index ?? parsed.index,
+      id: response._id ?? parsed.id ?? '',
+      result: response.result ?? 'acknowledged',
+      version: response._version ?? ''
+    };
+
+    return {
+      columns: Object.keys(row),
+      rows: [row],
+      rowCount: 1,
       elapsedMs
     };
   }
@@ -266,6 +310,13 @@ interface ElasticsearchSearchResponse {
     }>;
   };
   aggregations?: Record<string, unknown>;
+}
+
+interface ElasticsearchWriteResponse {
+  _id?: string;
+  _index?: string;
+  _version?: number;
+  result?: string;
 }
 
 function flattenProperties(properties: Record<string, ElasticsearchProperty>, prefix = ''): ColumnInfo[] {

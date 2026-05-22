@@ -19,7 +19,7 @@ export class SQLiteConnector implements DatabaseConnector {
       throw new Error('SQLite connection requires a database file.');
     }
     this.close();
-    this.db = new Database(config.databasePath, { readonly: true, fileMustExist: true });
+    this.db = new Database(config.databasePath, { fileMustExist: true });
     this.config = config;
   }
 
@@ -59,17 +59,22 @@ export class SQLiteConnector implements DatabaseConnector {
     return validateSqliteReadOnlyQuery(query, mode);
   }
 
-  async executeQuery(query: string): Promise<QueryResult> {
+  async executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult> {
     const db = this.requireDb();
-    const validation = this.validateQuery(query, 'safe');
+    const validation = this.validateQuery(query, mode);
     if (!validation.safe) {
       throw new Error(validation.reason);
     }
 
     const start = performance.now();
-    const rows = db.prepare(validation.normalizedQuery).all() as Record<string, unknown>[];
+    const statement = db.prepare(validation.normalizedQuery);
+    const rows = statement.reader
+      ? statement.all() as Record<string, unknown>[]
+      : [writeResultRow(statement.run())];
     const elapsedMs = Math.round(performance.now() - start);
-    const columns = rows[0] ? Object.keys(rows[0]) : this.getColumnsForEmptyResult(validation.normalizedQuery);
+    const columns = rows[0]
+      ? Object.keys(rows[0])
+      : this.getColumnsForEmptyResult(validation.normalizedQuery);
 
     return {
       columns,
@@ -113,4 +118,11 @@ export class SQLiteConnector implements DatabaseConnector {
       return [];
     }
   }
+}
+
+function writeResultRow(result: Database.RunResult): Record<string, unknown> {
+  return {
+    changes: result.changes,
+    lastInsertRowid: String(result.lastInsertRowid)
+  };
 }

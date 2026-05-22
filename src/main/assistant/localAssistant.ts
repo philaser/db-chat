@@ -1,4 +1,4 @@
-import type { DatabaseSchema, GeneratedQuery, QueryResult } from '../../shared/types.js';
+import type { DatabaseSchema, GeneratedQuery, QueryExecutionMode, QueryResult } from '../../shared/types.js';
 import { validateElasticsearchReadOnlyQuery } from '../connectors/elasticsearchValidation.js';
 import { validateSqliteReadOnlyQuery } from '../connectors/sqliteValidation.js';
 
@@ -6,19 +6,36 @@ function firstTable(schema: DatabaseSchema | null): string | null {
   return schema?.tables[0]?.name ?? null;
 }
 
-export function buildSystemPrompt(schemaContext: string, kind: DatabaseSchema['kind'] = 'sqlite'): string {
+export function buildSystemPrompt(
+  schemaContext: string,
+  kind: DatabaseSchema['kind'] = 'sqlite',
+  mode: QueryExecutionMode = 'safe'
+): string {
+  const writesAllowed = mode === 'manual';
   const queryInstructions = kind === 'elasticsearch'
     ? [
-      'When the user asks a data question, infer the best safe Elasticsearch search request you can from the indices, mappings, and recent chat.',
-      'Generate only read-only Elasticsearch _search requests. Never generate writes, deletes, updates, ingest pipeline calls, scripts, runtime mappings, or unsafe endpoints.',
-      'When a query is useful, include exactly one fenced ```json block with this shape: {"index":"index-or-pattern","body":{"size":50,"query":{"match_all":{}}}}. Keep any user-facing explanation outside the block brief because the app will execute the search and then ask you to explain the returned data.',
+      writesAllowed
+        ? 'When the user asks to change Elasticsearch document data, infer the narrowest validated write request from the indices, mappings, and recent chat.'
+        : 'When the user asks a data question, infer the best safe Elasticsearch search request you can from the indices, mappings, and recent chat.',
+      writesAllowed
+        ? 'SAFE mode is off. You may generate document index, update, and delete requests only when the user explicitly asks to change document data. Never generate index deletion, mapping changes, security/user operations, ingest pipelines, scripts, runtime mappings, or arbitrary endpoints.'
+        : 'Generate only read-only Elasticsearch _search requests. Never generate writes, deletes, updates, ingest pipeline calls, scripts, runtime mappings, or unsafe endpoints.',
+      writesAllowed
+        ? 'When a request is useful, include exactly one fenced ```json block. Use {"index":"index-name","operation":"index","id":"optional-id","body":{"field":"value"}} to add a document, {"index":"index-name","operation":"update","id":"id","body":{"doc":{"field":"value"}}} to update document fields, {"index":"index-name","operation":"delete","id":"id"} to delete one document, or the read search shape {"index":"index-or-pattern","body":{"size":50,"query":{"match_all":{}}}}. Keep user-facing explanation brief because the app will execute the validated request and then ask you to explain the result.'
+        : 'When a query is useful, include exactly one fenced ```json block with this shape: {"index":"index-or-pattern","body":{"size":50,"query":{"match_all":{}}}}. Keep any user-facing explanation outside the block brief because the app will execute the search and then ask you to explain the returned data.',
       'Prefer searches or aggregations that answer the actual question over broad document dumps. Use size limits for previews and aggregations for counts, rankings, and breakdowns.'
     ]
     : [
-      'When the user asks a data question, infer the best safe SQLite analysis query you can from the schema and recent chat.',
-      'Generate only read-only SQLite. Never write, mutate, attach, detach, create, drop, update, insert, delete, or call unsafe pragmas/functions.',
+      writesAllowed
+        ? 'When the user asks to change SQLite table data, infer the narrowest validated row-write query you can from the schema and recent chat.'
+        : 'When the user asks a data question, infer the best safe SQLite analysis query you can from the schema and recent chat.',
+      writesAllowed
+        ? 'SAFE mode is off. You may generate table row inserts, updates, deletes, or replaces only when the user explicitly asks to change table data. Never generate schema changes, table drops, database attach/detach, create/alter operations, vacuum/reindex operations, or unsafe pragmas/functions.'
+        : 'Generate only read-only SQLite. Never write, mutate, attach, detach, create, drop, update, insert, delete, or call unsafe pragmas/functions.',
       'When a query is useful, include exactly one fenced ```sql block with the query. Keep any user-facing explanation outside the block brief because the app will execute the SQL and then ask you to explain the returned data.',
-      'Prefer queries that answer the actual question over broad table dumps. Use LIMIT for previews and ORDER BY for ranked lists.'
+      writesAllowed
+        ? 'Keep write queries scoped to the requested table rows and prefer explicit WHERE clauses for updates and deletes.'
+        : 'Prefer queries that answer the actual question over broad table dumps. Use LIMIT for previews and ORDER BY for ranked lists.'
     ];
 
   return [
@@ -36,10 +53,15 @@ export function buildSystemPrompt(schemaContext: string, kind: DatabaseSchema['k
   ].join('\n\n');
 }
 
-export function buildResultAnalysisPrompt(kind: DatabaseSchema['kind'] = 'sqlite'): string {
+export function buildResultAnalysisPrompt(
+  kind: DatabaseSchema['kind'] = 'sqlite',
+  mode: QueryExecutionMode = 'safe'
+): string {
   return [
     'You are DB Chat, a conversational data analyst explaining results from the user\'s connected database.',
-    kind === 'elasticsearch'
+    mode === 'manual'
+      ? 'A validated read or data write has already been executed for the user with SAFE mode off.'
+      : kind === 'elasticsearch'
       ? 'A safe read-only Elasticsearch search has already been executed for the user.'
       : 'A safe read-only SQLite query has already been executed for the user.',
     'Answer in a chatty, useful way: start with the direct takeaway, then add the most important supporting details.',

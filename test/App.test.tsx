@@ -233,7 +233,7 @@ describe('App', () => {
 
     expect(await screen.findByLabelText('Data results')).toBeInTheDocument();
     expect(await screen.findByText('Ada')).toBeInTheDocument();
-    expect(api.executeQuery).toHaveBeenCalledWith('select name from users;');
+    expect(api.executeQuery).toHaveBeenCalledWith('select name from users;', 'safe');
   });
 
   it('loads chat and connection histories, restores sessions, and deletes history items', async () => {

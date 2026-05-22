@@ -66,7 +66,7 @@ describe('ElasticsearchConnector', () => {
         size: 10,
         query: { match_all: {} }
       }
-    }));
+    }), 'safe');
 
     expect(result.rows).toEqual([{
       _index: 'orders',
@@ -76,6 +76,45 @@ describe('ElasticsearchConnector', () => {
       total: 42
     }]);
     expect(result.elapsedMs).toBe(3);
+  });
+
+  it('executes validated document writes when SAFE mode is off', async () => {
+    const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/_cluster/health?filter_path=cluster_name,status')) {
+        return jsonResponse({ cluster_name: 'test', status: 'green' });
+      }
+      if (url.endsWith('/orders/_update/1') && init?.method === 'POST') {
+        return jsonResponse({ _index: 'orders', _id: '1', _version: 2, result: 'updated' });
+      }
+      return jsonResponse({ error: 'not found' }, 404);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const connector = new ElasticsearchConnector();
+    await connector.connect({
+      id: 'test-write',
+      kind: 'elasticsearch',
+      label: 'local-es',
+      elasticsearchHost: 'localhost',
+      elasticsearchPort: 9200,
+      createdAt: new Date().toISOString()
+    });
+
+    const result = await connector.executeQuery(JSON.stringify({
+      index: 'orders',
+      operation: 'update',
+      id: '1',
+      body: { doc: { status: 'paid' } }
+    }), 'manual');
+
+    expect(result.rows).toEqual([{
+      operation: 'update',
+      index: 'orders',
+      id: '1',
+      result: 'updated',
+      version: 2
+    }]);
   });
 
   it('reports each address when Elasticsearch host connections aggregate-fail', async () => {
