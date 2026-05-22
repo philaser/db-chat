@@ -280,12 +280,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       return;
     }
     const timeout = window.setTimeout(() => {
-      void api.validateQuery(query, 'safe').then(setValidation).catch((error: Error) => {
+      void api.validateQuery(query, settings.safeMode ? 'safe' : 'manual').then(setValidation).catch((error: Error) => {
         setValidation({ safe: false, reason: error.message, normalizedQuery: query });
       });
     }, 150);
     return () => window.clearTimeout(timeout);
-  }, [api, query]);
+  }, [api, query, settings.safeMode]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -366,6 +366,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }, [modelSearch, models]);
 
   const hasOnlyWelcomeMessage = messages.length === 1 && messages[0]?.role === 'assistant';
+  const activeChatTitle = buildChatTitle(messages, connection);
 
   async function refreshHistories(nextApi = api) {
     if (!nextApi) return;
@@ -523,7 +524,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setQuery(session.query ?? '');
     setResult(session.result ?? null);
     setActiveInspector(session.result ? 'results' : session.query ? 'query' : 'schema');
-    setStatus(`Opened ${session.title}`);
+    setStatus('Saved chat opened');
 
     if (session.connection) {
       if (session.connection.kind === 'elasticsearch'
@@ -622,9 +623,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   async function runQuery() {
     if (!api || !query.trim()) return;
     setBusy(true);
-    setStatus('Running safe query...');
+    setStatus(settings.safeMode ? 'Running safe query...' : 'Running validated query...');
     try {
-      const nextResult = await api.executeQuery(query);
+      const nextResult = await api.executeQuery(query, settings.safeMode ? 'safe' : 'manual');
       setResult(nextResult);
       setActiveInspector('results');
       setStatus(`Returned ${nextResult.rowCount} rows in ${nextResult.elapsedMs} ms`);
@@ -793,7 +794,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           />
           <div className={`validation ${validation?.safe ? 'safe' : 'blocked'}`}>
             <ShieldCheck size={16} />
-            <span>{validation ? validation.reason : 'SAFE mode validation will appear here.'}</span>
+            <span>{validation ? validation.reason : 'Query validation will appear here.'}</span>
           </div>
           <div className="query-actions">
             <button type="button" onClick={() => void navigator.clipboard.writeText(query)} disabled={!query.trim()}>
@@ -802,7 +803,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             </button>
             <button type="button" className="primary-button" onClick={() => void runQuery()} disabled={busy || !validation?.safe}>
               <Play size={16} />
-              Run Safe Query
+              {settings.safeMode ? 'Run Safe Query' : 'Run Validated Query'}
             </button>
           </div>
         </section>
@@ -1159,22 +1160,31 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       <section className="chat-pane" aria-label="Chat">
         <header className="chat-header">
           <div className="chat-heading">
-            <p>AI data workspace</p>
-            <h2>Ask your database anything</h2>
-            <div className="workspace-context">
-              <span>
-                <Database size={14} />
-                {connection ? connection.label : 'No database connected'}
-              </span>
-              <span className={settings.safeMode ? 'safe' : 'warning'}>
-                <ShieldCheck size={14} />
-                {settings.safeMode ? 'Safe reads on' : 'SAFE mode off'}
-              </span>
+            <div className="chat-title-row">
+              <h2>{activeChatTitle}</h2>
+              <div className="workspace-context">
+                <span
+                  aria-label={connection ? `Connected database: ${connection.label}` : 'No database connected'}
+                  className="context-chip"
+                  title={connection ? `Connected database: ${connection.label}` : 'No database connected'}
+                >
+                  <Database size={14} />
+                  <span className="context-label">{connection ? connection.label : 'No database connected'}</span>
+                </span>
+                <span
+                  aria-label={settings.safeMode ? 'Safe reads on' : 'SAFE mode off'}
+                  className={`context-chip ${settings.safeMode ? 'safe' : 'warning'}`}
+                  title={settings.safeMode ? 'Safe reads on' : 'SAFE mode off'}
+                >
+                  <ShieldCheck size={14} />
+                  <span className="context-label">{settings.safeMode ? 'Safe reads on' : 'SAFE mode off'}</span>
+                </span>
+              </div>
             </div>
-          </div>
-          <div className="chat-status" title={status}>
-            <Sparkles size={16} />
-            <span>{status}</span>
+            <div className="chat-status" title={status}>
+              <Sparkles size={14} />
+              <span>{status}</span>
+            </div>
           </div>
         </header>
 
@@ -1182,9 +1192,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           {hasOnlyWelcomeMessage && (
             <section className="welcome-panel" aria-label="Starter prompts">
               <div>
-                <span className="welcome-kicker">DB Chat</span>
-                <h3>Read the database like a conversation.</h3>
-                <p>Connect SQLite or Elasticsearch, ask a question, and DB Chat will run safe read-only analysis for you.</p>
+                <h3>Ask about the data.</h3>
+                <p>
+                  {settings.safeMode
+                    ? 'Connect a database and DB Chat will run safe read-only analysis from the conversation.'
+                    : 'Connect a database and DB Chat will run validated reads and table or document writes from the conversation.'}
+                </p>
               </div>
               <div className="starter-grid">
                 {starterPrompts.map((starter) => (
@@ -1196,7 +1209,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
               </div>
             </section>
           )}
-          {messages.map((message) => (
+          {!hasOnlyWelcomeMessage && messages.map((message) => (
             <article className={`message ${message.role}`} key={message.id}>
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
             </article>

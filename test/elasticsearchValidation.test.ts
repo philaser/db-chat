@@ -24,4 +24,21 @@ describe('validateElasticsearchReadOnlyQuery', () => {
   ])('blocks unsafe Elasticsearch query: %s', (query) => {
     expect(validateElasticsearchReadOnlyQuery(query, 'safe').safe).toBe(false);
   });
+
+  it.each([
+    JSON.stringify({ index: 'orders', operation: 'index', body: { customer: 'Ada' } }),
+    JSON.stringify({ index: 'orders', operation: 'update', id: '1', body: { doc: { customer: 'Ada' } } }),
+    JSON.stringify({ index: 'orders', operation: 'delete', id: '1' })
+  ])('allows document writes with SAFE mode off: %s', (query) => {
+    expect(validateElasticsearchReadOnlyQuery(query, 'manual').safe).toBe(true);
+  });
+
+  it.each([
+    JSON.stringify({ path: '/orders/_delete_by_query', body: { query: { match_all: {} } } }),
+    JSON.stringify({ index: 'orders-*', operation: 'delete', id: '1' }),
+    JSON.stringify({ index: 'orders', operation: 'update', id: '1', body: { script: 'ctx._source.x = 1' } }),
+    JSON.stringify({ index: 'orders', operation: 'drop', id: '1' })
+  ])('blocks higher-level or unvalidated write shapes with SAFE mode off: %s', (query) => {
+    expect(validateElasticsearchReadOnlyQuery(query, 'manual').safe).toBe(false);
+  });
 });
