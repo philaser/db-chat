@@ -88,7 +88,9 @@ jobs:
           if [[ -z "${CSC_LINK}" ]]; then
             unset CSC_LINK CSC_KEY_PASSWORD
           fi
-          npx electron-builder --mac dmg --${{ matrix.arch }} --publish always
+          RELEASE_TAG="${{ github.event.release.tag_name }}"
+          npx electron-builder --mac dmg --${{ matrix.arch }} --publish never
+          gh release upload "${RELEASE_TAG}" release/*.dmg --clobber
 
       - name: Package Windows release
         if: matrix.platform == 'win'
@@ -96,10 +98,21 @@ jobs:
           CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win nsis --${{ matrix.arch }} --publish always
+        shell: bash
+        run: |
+          if [[ -z "${CSC_LINK}" ]]; then
+            unset CSC_LINK CSC_KEY_PASSWORD
+          fi
+          RELEASE_TAG="${{ github.event.release.tag_name }}"
+          npx electron-builder --win nsis --${{ matrix.arch }} --publish never
+          gh release upload "${RELEASE_TAG}" release/*.exe --clobber
 
       - name: Package Linux release
         if: matrix.platform == 'linux'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --linux AppImage deb --${{ matrix.arch }} --publish always
+        shell: bash
+        run: |
+          RELEASE_TAG="${{ github.event.release.tag_name }}"
+          npx electron-builder --linux AppImage deb --${{ matrix.arch }} --publish never
+          gh release upload "${RELEASE_TAG}" release/*.AppImage release/*.deb --clobber
