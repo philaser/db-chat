@@ -1,4 +1,4 @@
-export type DatabaseKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres';
+export type DatabaseKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres' | 'mongodb';
 export type ModelProviderKind = 'openrouter' | 'openai';
 export type QueryExecutionMode = 'safe' | 'manual';
 export type ChatRole = 'system' | 'user' | 'assistant';
@@ -18,6 +18,16 @@ export interface ConnectionConfig {
   elasticsearchPassword?: string;
   elasticsearchRememberPassword?: boolean;
   elasticsearchHasSavedPassword?: boolean;
+  host?: string;
+  port?: number;
+  database?: string;
+  username?: string;
+  password?: string;
+  ssl?: boolean;
+  rememberPassword?: boolean;
+  hasSavedPassword?: boolean;
+  authDatabase?: string;
+  mongodbUri?: string;
   createdAt: string;
 }
 

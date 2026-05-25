@@ -4,6 +4,7 @@ import path from 'node:path';
 import type {
   ConnectionConfig,
   ConnectionHistoryItem,
+  DatabaseKind,
   ModelProviderKind,
   PersistedChatSession,
   PersistedSettings
@@ -14,6 +15,7 @@ interface StoreData {
   settings: PersistedSettings;
   encryptedApiKeys: Partial<Record<ModelProviderKind, string>>;
   encryptedElasticsearchPasswords: Record<string, string>;
+  encryptedPasswords: Record<string, string>;
   connections: ConnectionHistoryItem[];
   chatSessions: PersistedChatSession[];
 }
@@ -23,6 +25,8 @@ const DEFAULT_SETTINGS: PersistedSettings = {
   model: 'openai/gpt-4.1-mini',
   safeMode: true
 };
+
+const PASSWORD_KINDS: Set<DatabaseKind> = new Set(['elasticsearch', 'mysql', 'postgres', 'mongodb']);
 
 export class AppStore {
   private readonly filePath: string;
@@ -66,12 +70,25 @@ export class AppStore {
   }
 
   hydrateConnectionSecrets(config: ConnectionConfig): ConnectionConfig {
-    if (config.kind !== 'elasticsearch' || config.elasticsearchPassword) {
+    if (!PASSWORD_KINDS.has(config.kind)) {
       return config;
     }
 
-    const encrypted = this.read().encryptedElasticsearchPasswords[config.id];
-    return encrypted ? { ...config, elasticsearchPassword: this.decrypt(encrypted) } : config;
+    if (config.kind === 'elasticsearch') {
+      if (config.elasticsearchPassword) {
+        return config;
+      }
+      const data = this.read();
+      const encrypted = data.encryptedPasswords[config.id] ?? data.encryptedElasticsearchPasswords[config.id];
+      return encrypted ? { ...config, elasticsearchPassword: this.decrypt(encrypted) } : config;
+    }
+
+    if (config.password) {
+      return config;
+    }
+
+    const encrypted = this.read().encryptedPasswords[config.id];
+    return encrypted ? { ...config, password: this.decrypt(encrypted) } : config;
   }
 
   saveConnection(config: ConnectionConfig): ConnectionHistoryItem {
@@ -80,13 +97,27 @@ export class AppStore {
       ...config,
       lastConnectedAt: new Date().toISOString()
     });
-    const shouldRememberPassword = normalized.kind === 'elasticsearch'
-      && Boolean(config.elasticsearchRememberPassword && config.elasticsearchPassword);
+
+    const shouldRememberPassword = PASSWORD_KINDS.has(normalized.kind)
+      && Boolean(
+        (normalized.kind === 'elasticsearch'
+          ? config.elasticsearchRememberPassword && config.elasticsearchPassword
+          : config.rememberPassword && config.password)
+      );
+
     const saved: ConnectionHistoryItem = {
       ...normalized,
-      elasticsearchRememberPassword: shouldRememberPassword,
-      elasticsearchHasSavedPassword: shouldRememberPassword
+      ...(normalized.kind === 'elasticsearch'
+        ? {
+          elasticsearchRememberPassword: shouldRememberPassword,
+          elasticsearchHasSavedPassword: shouldRememberPassword
+        }
+        : {
+          rememberPassword: shouldRememberPassword,
+          hasSavedPassword: shouldRememberPassword
+        })
     };
+
     const connections = [
       saved,
       ...data.connections.filter((connection) => {
@@ -94,18 +125,34 @@ export class AppStore {
         const sameSqlitePath = saved.kind === 'sqlite' && connection.databasePath === saved.databasePath;
         const sameElasticsearchHost = saved.kind === 'elasticsearch'
           && elasticsearchKey(connection) === elasticsearchKey(saved);
-        return !sameId && !sameSqlitePath && !sameElasticsearchHost;
+        const sameRelationalHost = (saved.kind === 'mysql' || saved.kind === 'postgres' || saved.kind === 'mongodb')
+          && relationalKey(connection) === relationalKey(saved);
+        return !sameId && !sameSqlitePath && !sameElasticsearchHost && !sameRelationalHost;
       })
     ].slice(0, 20);
+
     const retainedConnectionIds = new Set(connections.map((connection) => connection.id));
-    const encryptedElasticsearchPasswords = Object.fromEntries(
-      Object.entries(data.encryptedElasticsearchPasswords)
+    const encryptedPasswords = Object.fromEntries(
+      Object.entries(data.encryptedPasswords)
         .filter(([id]) => retainedConnectionIds.has(id) && id !== saved.id)
     );
-    if (shouldRememberPassword && config.elasticsearchPassword) {
-      encryptedElasticsearchPasswords[saved.id] = this.encryptWithSafeStorage(config.elasticsearchPassword);
+
+    if (shouldRememberPassword) {
+      const savedPassword = saved.kind === 'elasticsearch'
+        ? config.elasticsearchPassword
+        : config.password;
+      if (savedPassword) {
+        encryptedPasswords[saved.id] = this.encryptWithSafeStorage(savedPassword);
+      }
     }
-    this.write({ ...data, connections, encryptedElasticsearchPasswords });
+
+    this.write({
+      ...data,
+      connections,
+      encryptedPasswords,
+      encryptedElasticsearchPasswords: Object.keys(data.encryptedElasticsearchPasswords).length
+        ? {} : data.encryptedElasticsearchPasswords
+    });
     return saved;
   }
 
@@ -114,6 +161,9 @@ export class AppStore {
     this.write({
       ...data,
       connections: data.connections.filter((connection) => connection.id !== id),
+      encryptedPasswords: Object.fromEntries(
+        Object.entries(data.encryptedPasswords).filter(([connectionId]) => connectionId !== id)
+      ),
       encryptedElasticsearchPasswords: Object.fromEntries(
         Object.entries(data.encryptedElasticsearchPasswords).filter(([connectionId]) => connectionId !== id)
       ),
@@ -129,7 +179,7 @@ export class AppStore {
 
   saveChatSession(session: PersistedChatSession): PersistedChatSession {
     const data = this.read();
-    const saved = this.normalizeChatSession(session, data.encryptedElasticsearchPasswords);
+    const saved = this.normalizeChatSession(session, data.encryptedPasswords, data.encryptedElasticsearchPasswords);
     const chatSessions = [
       saved,
       ...data.chatSessions.filter((item) => item.id !== saved.id)
@@ -151,21 +201,29 @@ export class AppStore {
       const raw = readFileSync(this.filePath, 'utf8');
       const parsed = JSON.parse(raw) as Partial<StoreData>;
       const encryptedElasticsearchPasswords = parsed.encryptedElasticsearchPasswords ?? {};
+      const encryptedPasswords: Record<string, string> = {
+        ...encryptedElasticsearchPasswords,
+        ...parsed.encryptedPasswords ?? {}
+      };
       return {
         settings: this.normalizeSettings({ ...DEFAULT_SETTINGS, ...parsed.settings }),
         encryptedApiKeys: parsed.encryptedApiKeys ?? {},
         encryptedElasticsearchPasswords,
+        encryptedPasswords,
         connections: (parsed.connections ?? []).map((connection) => this.normalizeConnection({
           ...connection,
-          elasticsearchHasSavedPassword: Boolean(connection.id && encryptedElasticsearchPasswords[connection.id])
+          ...(connection.kind === 'elasticsearch'
+            ? { elasticsearchHasSavedPassword: Boolean(connection.id && encryptedPasswords[connection.id]) }
+            : { hasSavedPassword: Boolean(connection.id && encryptedPasswords[connection.id]) })
         })).filter(Boolean),
-        chatSessions: (parsed.chatSessions ?? []).map((session) => this.normalizeChatSession(session, encryptedElasticsearchPasswords)).filter(Boolean)
+        chatSessions: (parsed.chatSessions ?? []).map((session) => this.normalizeChatSession(session, encryptedPasswords, encryptedElasticsearchPasswords)).filter(Boolean)
       };
     } catch {
       return {
         settings: DEFAULT_SETTINGS,
         encryptedApiKeys: {},
         encryptedElasticsearchPasswords: {},
+        encryptedPasswords: {},
         connections: [],
         chatSessions: []
       };
@@ -187,11 +245,15 @@ export class AppStore {
 
   private normalizeConnection(connection: Partial<ConnectionHistoryItem>): ConnectionHistoryItem {
     const createdAt = connection.createdAt ?? new Date().toISOString();
-    const kind = connection.kind === 'elasticsearch' ? 'elasticsearch' : 'sqlite';
+    const kind: DatabaseKind = PASSWORD_KINDS.has(connection.kind as DatabaseKind) || connection.kind === 'sqlite'
+      ? (connection.kind as DatabaseKind)
+      : 'sqlite';
+    const isPasswordKind = PASSWORD_KINDS.has(kind);
+
     return {
       id: connection.id || crypto.randomUUID(),
       kind,
-      label: connection.label || (kind === 'elasticsearch' ? 'Elasticsearch cluster' : 'SQLite database'),
+      label: connection.label || kindLabel(kind),
       databasePath: kind === 'sqlite' ? connection.databasePath : undefined,
       elasticsearchUrl: kind === 'elasticsearch' ? connection.elasticsearchUrl : undefined,
       elasticsearchHost: kind === 'elasticsearch' ? connection.elasticsearchHost : undefined,
@@ -201,6 +263,15 @@ export class AppStore {
       elasticsearchUsername: kind === 'elasticsearch' ? connection.elasticsearchUsername : undefined,
       elasticsearchRememberPassword: kind === 'elasticsearch' ? connection.elasticsearchRememberPassword : undefined,
       elasticsearchHasSavedPassword: kind === 'elasticsearch' ? connection.elasticsearchHasSavedPassword : undefined,
+      host: isPasswordKind && kind !== 'elasticsearch' ? connection.host : undefined,
+      port: isPasswordKind && kind !== 'elasticsearch' ? connection.port : undefined,
+      database: isPasswordKind && kind !== 'elasticsearch' ? connection.database : undefined,
+      username: isPasswordKind && kind !== 'elasticsearch' ? connection.username : undefined,
+      ssl: isPasswordKind && kind !== 'elasticsearch' ? connection.ssl : undefined,
+      rememberPassword: isPasswordKind && kind !== 'elasticsearch' ? connection.rememberPassword : undefined,
+      hasSavedPassword: isPasswordKind && kind !== 'elasticsearch' ? connection.hasSavedPassword : undefined,
+      authDatabase: kind === 'mongodb' ? connection.authDatabase : undefined,
+      mongodbUri: kind === 'mongodb' ? connection.mongodbUri : undefined,
       createdAt,
       lastConnectedAt: connection.lastConnectedAt ?? createdAt
     };
@@ -208,21 +279,27 @@ export class AppStore {
 
   private normalizeChatSession(
     session: Partial<PersistedChatSession>,
+    encryptedPasswords: Record<string, string> = {},
     encryptedElasticsearchPasswords: Record<string, string> = {}
   ): PersistedChatSession {
     const createdAt = session.createdAt ?? new Date().toISOString();
     const messages = (session.messages ?? []).filter((message) => (
       message && (message.role === 'user' || message.role === 'assistant' || message.role === 'system') && typeof message.content === 'string'
     ));
+    const allPasswords = { ...encryptedElasticsearchPasswords, ...encryptedPasswords };
     return {
       id: session.id || crypto.randomUUID(),
       title: session.title?.trim() || 'Untitled chat',
       messages,
       connection: session.connection ? this.normalizeConnection({
         ...session.connection,
-        elasticsearchHasSavedPassword: Boolean(
-          session.connection.id && encryptedElasticsearchPasswords[session.connection.id]
-        ),
+        ...(session.connection.kind === 'elasticsearch'
+          ? { elasticsearchHasSavedPassword: Boolean(
+            session.connection.id && allPasswords[session.connection.id]
+          ) }
+          : { hasSavedPassword: Boolean(
+            session.connection.id && allPasswords[session.connection.id]
+          ) }),
         lastConnectedAt: session.connection.createdAt
       }) : undefined,
       query: session.query,
@@ -241,7 +318,7 @@ export class AppStore {
 
   private encryptWithSafeStorage(value: string): string {
     if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('Secure storage is unavailable. DB Chat cannot remember this Elasticsearch password.');
+      throw new Error('Secure storage is unavailable. DB Chat cannot remember this password.');
     }
     return `safe:${safeStorage.encryptString(value).toString('base64')}`;
   }
@@ -255,6 +332,16 @@ export class AppStore {
   }
 }
 
+function kindLabel(kind: DatabaseKind): string {
+  switch (kind) {
+    case 'elasticsearch': return 'Elasticsearch cluster';
+    case 'mysql': return 'MySQL database';
+    case 'postgres': return 'PostgreSQL database';
+    case 'mongodb': return 'MongoDB database';
+    default: return 'SQLite database';
+  }
+}
+
 function elasticsearchKey(connection: Partial<ConnectionConfig>): string {
   if (connection.elasticsearchHost) {
     return [
@@ -264,4 +351,13 @@ function elasticsearchKey(connection: Partial<ConnectionConfig>): string {
     ].join(':');
   }
   return connection.elasticsearchUrl ?? '';
+}
+
+function relationalKey(connection: Partial<ConnectionConfig>): string {
+  return [
+    connection.kind ?? '',
+    connection.host ?? '',
+    String(connection.port ?? ''),
+    connection.database ?? ''
+  ].join(':');
 }

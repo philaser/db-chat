@@ -480,4 +480,177 @@ describe('App', () => {
       }));
     });
   });
+
+  it('connects to MySQL from the connections view', async () => {
+    const api = makeApi();
+    vi.mocked(api.connect).mockResolvedValue({
+      kind: 'mysql',
+      label: 'localhost',
+      tables: [{ name: 'users', columns: [{ name: 'id', type: 'int', nullable: false, primaryKey: true }] }]
+    });
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByLabelText('Connections'));
+    fireEvent.click(screen.getByRole('button', { name: 'MySQL' }));
+
+    const form = screen.getByLabelText('MySQL connection');
+    fireEvent.change(within(form).getByLabelText('Host'), {
+      target: { value: 'mysql.local' }
+    });
+    fireEvent.change(within(form).getByLabelText('Port'), {
+      target: { value: '3307' }
+    });
+    fireEvent.change(within(form).getByLabelText('Database'), {
+      target: { value: 'testdb' }
+    });
+    fireEvent.click(within(form).getByRole('button', { name: 'Connect' }));
+
+    await waitFor(() => {
+      expect(api.connect).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'mysql',
+        host: 'mysql.local',
+        port: 3307,
+        database: 'testdb'
+      }));
+    });
+  });
+
+  it('connects to PostgreSQL from the connections view', async () => {
+    const api = makeApi();
+    vi.mocked(api.connect).mockResolvedValue({
+      kind: 'postgres',
+      label: 'localhost',
+      tables: [{ name: 'users', columns: [] }]
+    });
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByLabelText('Connections'));
+    fireEvent.click(screen.getByRole('button', { name: 'PostgreSQL' }));
+
+    const form = screen.getByLabelText('PostgreSQL connection');
+    fireEvent.change(within(form).getByLabelText('Host'), {
+      target: { value: 'pg.local' }
+    });
+    fireEvent.change(within(form).getByLabelText('Port'), {
+      target: { value: '5432' }
+    });
+    fireEvent.click(within(form).getByRole('button', { name: 'Connect' }));
+
+    await waitFor(() => {
+      expect(api.connect).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'postgres',
+        host: 'pg.local',
+        port: 5432
+      }));
+    });
+  });
+
+  it('shows only the selected database connection form', () => {
+    const api = makeApi();
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByLabelText('Connections'));
+    fireEvent.click(screen.getByRole('button', { name: 'Elasticsearch' }));
+    expect(screen.getByLabelText('Elasticsearch connection')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'PostgreSQL' }));
+
+    expect(screen.queryByLabelText('Elasticsearch connection')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('PostgreSQL connection')).toBeInTheDocument();
+  });
+
+  it('connects to MongoDB from the connections view', async () => {
+    const api = makeApi();
+    vi.mocked(api.connect).mockResolvedValue({
+      kind: 'mongodb',
+      label: 'localhost',
+      tables: [{ name: 'users', columns: [] }]
+    });
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByLabelText('Connections'));
+    fireEvent.click(screen.getByRole('button', { name: 'MongoDB' }));
+
+    const form = screen.getByLabelText('MongoDB connection');
+    fireEvent.change(within(form).getByLabelText('Host'), {
+      target: { value: 'mongo.local' }
+    });
+    fireEvent.change(within(form).getByLabelText('Auth database'), {
+      target: { value: 'admin' }
+    });
+    fireEvent.click(within(form).getByRole('button', { name: 'Connect' }));
+
+    await waitFor(() => {
+      expect(api.connect).toHaveBeenCalledWith(expect.objectContaining({
+        kind: 'mongodb',
+        host: 'mongo.local',
+        authDatabase: 'admin'
+      }));
+    });
+  });
+
+  it('shows SQL placeholder for relational connections and JSON placeholder for MongoDB', async () => {
+    const api = makeApi();
+    render(<App api={api} />);
+
+    const queryTab = within(screen.getByLabelText('Inspector')).getByRole('button', { name: 'Query' });
+    fireEvent.click(queryTab);
+    expect(screen.getByPlaceholderText('Generated SQL will appear here.')).toBeInTheDocument();
+  });
+
+  it('opens db form for password entry when reconnecting a MySQL history without saved password', async () => {
+    const api = makeApi();
+    vi.mocked(api.listConnections).mockResolvedValue([{
+      id: 'mysql-history',
+      kind: 'mysql',
+      label: 'mysql.local:3306',
+      host: 'mysql.local',
+      port: 3306,
+      database: 'testdb',
+      username: 'root',
+      hasSavedPassword: false,
+      createdAt: '2026-05-21T00:00:00.000Z',
+      lastConnectedAt: '2026-05-21T00:00:00.000Z'
+    }]);
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByLabelText('Connections'));
+    fireEvent.click(await screen.findByText('mysql.local:3306'));
+
+    const form = await screen.findByLabelText('MySQL connection');
+    expect(form).toBeInTheDocument();
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+
+  it('reconnects passwordless MySQL history directly without form', async () => {
+    const api = makeApi();
+    const connection = {
+      id: 'mysql-passwordless',
+      kind: 'mysql' as const,
+      label: 'mysql.local:3306',
+      host: 'mysql.local',
+      port: 3306,
+      database: 'testdb',
+      username: undefined,
+      password: undefined,
+      hasSavedPassword: false,
+      createdAt: '2026-05-21T00:00:00.000Z',
+      lastConnectedAt: '2026-05-21T00:00:00.000Z'
+    };
+    vi.mocked(api.listConnections).mockResolvedValue([connection]);
+    vi.mocked(api.connect).mockResolvedValue({
+      kind: 'mysql',
+      label: connection.label,
+      tables: []
+    });
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByLabelText('Connections'));
+    fireEvent.click(await screen.findByText('mysql.local:3306'));
+
+    await waitFor(() => {
+      expect(api.connect).toHaveBeenCalledWith(connection);
+    });
+    expect(screen.queryByLabelText('MySQL connection')).not.toBeInTheDocument();
+  });
 });

@@ -13,7 +13,6 @@ import {
   PanelRightOpen,
   Play,
   Plus,
-  Search,
   Send,
   Settings,
   ShieldCheck,
@@ -34,6 +33,14 @@ import {
 } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import {
+  siElasticsearch,
+  siMongodb,
+  siMysql,
+  siPostgresql,
+  siSqlite,
+  type SimpleIcon
+} from 'simple-icons';
 import type {
   ChatMessage,
   ConnectionConfig,
@@ -53,6 +60,7 @@ const themeStorageKey = 'dbchat:theme';
 
 type InspectorTab = 'results' | 'query' | 'schema';
 type AppView = 'workspace' | 'connections' | 'history' | 'settings';
+type ConnectionLogoKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres' | 'mongodb';
 type ThemeMode =
   | 'light' | 'dark'
   | 'catppuccin-latte' | 'solarized-light' | 'rose-pine-dawn'
@@ -128,7 +136,15 @@ const starterPrompts = [
   }
 ];
 
-const initialAssistantMessage = 'Connect SQLite or Elasticsearch to start asking questions about your data.';
+const initialAssistantMessage = 'Connect a database to start asking questions about your data.';
+
+const connectionLogos: Record<ConnectionLogoKind, SimpleIcon> = {
+  sqlite: siSqlite,
+  elasticsearch: siElasticsearch,
+  mysql: siMysql,
+  postgres: siPostgresql,
+  mongodb: siMongodb
+};
 
 function nowMessage(role: ChatMessage['role'], content: string): ChatMessage {
   return {
@@ -137,6 +153,15 @@ function nowMessage(role: ChatMessage['role'], content: string): ChatMessage {
     content,
     createdAt: new Date().toISOString()
   };
+}
+
+function ConnectionLogo({ kind }: { kind: ConnectionLogoKind }) {
+  const icon = connectionLogos[kind];
+  return (
+    <svg aria-hidden="true" className="connection-logo" viewBox="0 0 24 24">
+      <path d={icon.path} fill={`#${icon.hex}`} />
+    </svg>
+  );
 }
 
 function loadInitialTheme(): ThemeMode {
@@ -167,6 +192,22 @@ function logDetail(error: unknown): string | undefined {
   }
 
   return error.message;
+}
+
+function defaultPort(kind: 'mysql' | 'postgres' | 'mongodb'): string {
+  switch (kind) {
+    case 'mysql': return '3306';
+    case 'postgres': return '5432';
+    case 'mongodb': return '27017';
+  }
+}
+
+function dbKindLabel(kind: 'mysql' | 'postgres' | 'mongodb'): string {
+  switch (kind) {
+    case 'mysql': return 'MySQL';
+    case 'postgres': return 'PostgreSQL';
+    case 'mongodb': return 'MongoDB';
+  }
 }
 
 function elasticsearchHistoryValues(config: ConnectionConfig) {
@@ -248,6 +289,16 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [elasticsearchUsername, setElasticsearchUsername] = useState('');
   const [elasticsearchPassword, setElasticsearchPassword] = useState('');
   const [elasticsearchRememberPassword, setElasticsearchRememberPassword] = useState(false);
+  const [dbFormOpen, setDbFormOpen] = useState(false);
+  const [dbFormKind, setDbFormKind] = useState<'mysql' | 'postgres' | 'mongodb'>('mysql');
+  const [dbFormHost, setDbFormHost] = useState('localhost');
+  const [dbFormPort, setDbFormPort] = useState('3306');
+  const [dbFormDatabase, setDbFormDatabase] = useState('');
+  const [dbFormUsername, setDbFormUsername] = useState('');
+  const [dbFormPassword, setDbFormPassword] = useState('');
+  const [dbFormSsl, setDbFormSsl] = useState(false);
+  const [dbFormRememberPassword, setDbFormRememberPassword] = useState(false);
+  const [dbFormAuthDatabase, setDbFormAuthDatabase] = useState('');
   const [rightPanelWidth, setRightPanelWidth] = useState(rightPanelDefaultWidth);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [resizeDrag, setResizeDrag] = useState<ResizeDrag | null>(null);
@@ -403,6 +454,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     }
     const unit = schema.kind === 'elasticsearch'
       ? (schema.tables.length === 1 ? 'index' : 'indices')
+      : schema.kind === 'mongodb'
+      ? (schema.tables.length === 1 ? 'collection' : 'collections')
       : (schema.tables.length === 1 ? 'table' : 'tables');
     return `${schema.tables.length} ${unit} connected`;
   }, [schema]);
@@ -476,6 +529,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       updateStatus('SQLite connections are available in the Electron desktop app.');
       return;
     }
+    setElasticsearchFormOpen(false);
+    setDbFormOpen(false);
     setBusy(true);
     updateStatus('Opening SQLite file picker...');
     try {
@@ -559,6 +614,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       prepareElasticsearchReconnect(config, `Enter the password to reconnect ${config.label}.`);
       return;
     }
+    if ((config.kind === 'mysql' || config.kind === 'postgres' || config.kind === 'mongodb')
+      && config.username
+      && !config.password && !config.hasSavedPassword) {
+      prepareDbReconnect(config, config.kind, `Enter the password to reconnect ${config.label}.`);
+      return;
+    }
     setBusy(true);
     updateStatus(`Connecting to ${config.label}...`);
     try {
@@ -595,6 +656,13 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         prepareElasticsearchReconnect(session.connection, `Opened ${session.title}. Enter the password to reconnect ${session.connection.label}.`);
         return;
       }
+      if ((session.connection.kind === 'mysql' || session.connection.kind === 'postgres' || session.connection.kind === 'mongodb')
+        && session.connection.username
+        && !session.connection.password
+        && !session.connection.hasSavedPassword) {
+        prepareDbReconnect(session.connection, session.connection.kind, `Opened ${session.title}. Enter the password to reconnect ${session.connection.label}.`);
+        return;
+      }
       setBusy(true);
       try {
         const nextSchema = await api.connect(session.connection);
@@ -628,6 +696,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
   function prepareElasticsearchReconnect(config: ConnectionConfig, nextStatus: string) {
     const values = elasticsearchHistoryValues(config);
+    setDbFormOpen(false);
     setElasticsearchHost(values.host);
     setElasticsearchPort(values.port);
     setElasticsearchUseSsl(values.useSsl);
@@ -637,6 +706,93 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setElasticsearchRememberPassword(Boolean(config.elasticsearchHasSavedPassword || config.elasticsearchRememberPassword));
     setElasticsearchFormOpen(true);
     updateStatus(nextStatus);
+  }
+
+  function openElasticsearchForm() {
+    setDbFormOpen(false);
+    setElasticsearchFormOpen((current) => !current);
+  }
+
+  function openDbForm(kind: 'mysql' | 'postgres' | 'mongodb') {
+    setElasticsearchFormOpen(false);
+    setDbFormKind(kind);
+    setDbFormHost('localhost');
+    setDbFormPort(defaultPort(kind));
+    setDbFormDatabase('');
+    setDbFormUsername('');
+    setDbFormPassword('');
+    setDbFormSsl(false);
+    setDbFormRememberPassword(false);
+    setDbFormAuthDatabase('');
+    setDbFormOpen(true);
+  }
+
+  function prepareDbReconnect(config: ConnectionConfig, kind: 'mysql' | 'postgres' | 'mongodb', nextStatus: string) {
+    setElasticsearchFormOpen(false);
+    setDbFormKind(kind);
+    setDbFormHost(config.host ?? 'localhost');
+    setDbFormPort(String(config.port ?? Number(defaultPort(kind))));
+    setDbFormDatabase(config.database ?? '');
+    setDbFormUsername(config.username ?? '');
+    setDbFormPassword('');
+    setDbFormSsl(Boolean(config.ssl));
+    setDbFormRememberPassword(Boolean(config.hasSavedPassword || config.rememberPassword));
+    setDbFormAuthDatabase(config.authDatabase ?? '');
+    setDbFormOpen(true);
+    updateStatus(nextStatus);
+  }
+
+  async function connectDb(event?: FormEvent) {
+    event?.preventDefault();
+    if (!api) {
+      updateStatus('Database connections are available in the Electron desktop app.');
+      return;
+    }
+    if (!dbFormHost.trim()) {
+      updateStatus('Enter a host before connecting.');
+      return;
+    }
+    const port = Number(dbFormPort);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      updateStatus('Enter a valid port (1-65535).');
+      return;
+    }
+
+    setBusy(true);
+    updateStatus(`Connecting to ${dbKindLabel(dbFormKind)}...`);
+    try {
+      const config: ConnectionConfig = {
+        id: crypto.randomUUID(),
+        kind: dbFormKind,
+        label: `${dbFormKind} ${dbFormHost.trim()}:${port}${dbFormDatabase ? `/${dbFormDatabase}` : ''}`,
+        host: dbFormHost.trim(),
+        port,
+        database: dbFormDatabase.trim() || undefined,
+        username: dbFormUsername.trim() || undefined,
+        password: dbFormPassword || undefined,
+        ssl: dbFormSsl,
+        rememberPassword: dbFormRememberPassword,
+        ...(dbFormKind === 'mongodb' ? { authDatabase: dbFormAuthDatabase.trim() || undefined } : {}),
+        createdAt: new Date().toISOString()
+      };
+      const nextSchema = await api.connect(config);
+      setConnection(config);
+      setSchema(nextSchema);
+      setActiveInspector('schema');
+      setActiveView('workspace');
+      setDbFormOpen(false);
+      const tableLabel = dbFormKind === 'mongodb' ? 'collections' : 'tables';
+      setMessages((current) => [
+        ...current,
+        nowMessage('assistant', `Connected to ${config.label}. I found ${nextSchema.tables.length} ${tableLabel}.`)
+      ]);
+      updateStatus(`Connected to ${config.label}`);
+      await refreshHistories();
+    } catch (error) {
+      reportError(`Could not connect to ${dbKindLabel(dbFormKind)}.`, error);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function sendChat(event: FormEvent) {
@@ -837,7 +993,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             className="query-editor"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder={connection?.kind === 'elasticsearch' ? 'Generated Elasticsearch JSON will appear here.' : 'Generated SQL will appear here.'}
+              placeholder={connection?.kind === 'elasticsearch' || connection?.kind === 'mongodb' ? 'Generated JSON will appear here.' : 'Generated SQL will appear here.'}
             spellCheck={false}
           />
           <div className={`validation ${validation?.safe ? 'safe' : 'blocked'}`}>
@@ -884,7 +1040,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         ) : (
           <div className="empty-state">
             <Database size={22} />
-            <span>Connect SQLite or Elasticsearch to inspect its schema.</span>
+            <span>Connect a database to inspect its schema.</span>
           </div>
         )}
       </section>
@@ -947,6 +1103,71 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           <span>Remember password</span>
         </label>
         <button type="submit" className="primary-button" disabled={busy || !elasticsearchHost.trim() || !elasticsearchPort.trim()}>
+          Connect
+        </button>
+      </form>
+    );
+  }
+
+  function renderDbForm() {
+    if (!dbFormOpen) {
+      return null;
+    }
+
+    const label = dbKindLabel(dbFormKind);
+
+    return (
+      <form className="elasticsearch-form" aria-label={`${label} connection`} onSubmit={(event) => void connectDb(event)}>
+        <label>
+          <span>Host</span>
+          <input
+            value={dbFormHost}
+            onChange={(event) => setDbFormHost(event.target.value)}
+            placeholder="localhost"
+          />
+        </label>
+        <label>
+          <span>Port</span>
+          <input
+            value={dbFormPort}
+            onChange={(event) => setDbFormPort(event.target.value)}
+            inputMode="numeric"
+            type="number"
+            min={1}
+            max={65535}
+          />
+        </label>
+        <label>
+          <span>Database</span>
+          <input value={dbFormDatabase} onChange={(event) => setDbFormDatabase(event.target.value)} placeholder="mydb" />
+        </label>
+        <label>
+          <span>Username</span>
+          <input value={dbFormUsername} onChange={(event) => setDbFormUsername(event.target.value)} />
+        </label>
+        <label>
+          <span>Password</span>
+          <input type="password" value={dbFormPassword} onChange={(event) => setDbFormPassword(event.target.value)} />
+        </label>
+        {dbFormKind === 'mongodb' && (
+          <label>
+            <span>Auth database</span>
+            <input value={dbFormAuthDatabase} onChange={(event) => setDbFormAuthDatabase(event.target.value)} placeholder="admin" />
+          </label>
+        )}
+        <label className="elasticsearch-checkbox">
+          <input type="checkbox" checked={dbFormSsl} onChange={(event) => setDbFormSsl(event.target.checked)} />
+          <span>Use SSL/TLS</span>
+        </label>
+        <label className="elasticsearch-checkbox">
+          <input
+            type="checkbox"
+            checked={dbFormRememberPassword}
+            onChange={(event) => setDbFormRememberPassword(event.target.checked)}
+          />
+          <span>Remember password</span>
+        </label>
+        <button type="submit" className="primary-button" disabled={busy || !dbFormHost.trim() || !dbFormPort.trim()}>
           Connect
         </button>
       </form>
@@ -1065,15 +1286,28 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
               </div>
               <div className="connection-actions">
                 <button type="button" className="secondary-button" onClick={connectSqlite} disabled={busy || !api}>
-                  <Database size={16} />
+                  <ConnectionLogo kind="sqlite" />
                   SQLite
                 </button>
-                <button type="button" className="secondary-button" onClick={() => setElasticsearchFormOpen((current) => !current)} disabled={busy || !api}>
-                  <Search size={16} />
+                <button type="button" className="secondary-button" onClick={openElasticsearchForm} disabled={busy || !api}>
+                  <ConnectionLogo kind="elasticsearch" />
                   Elasticsearch
+                </button>
+                <button type="button" className="secondary-button" onClick={() => openDbForm('mysql')} disabled={busy || !api}>
+                  <ConnectionLogo kind="mysql" />
+                  MySQL
+                </button>
+                <button type="button" className="secondary-button" onClick={() => openDbForm('postgres')} disabled={busy || !api}>
+                  <ConnectionLogo kind="postgres" />
+                  PostgreSQL
+                </button>
+                <button type="button" className="secondary-button" onClick={() => openDbForm('mongodb')} disabled={busy || !api}>
+                  <ConnectionLogo kind="mongodb" />
+                  MongoDB
                 </button>
               </div>
               {renderElasticsearchForm()}
+              {renderDbForm()}
             </section>
             <section className="focus-panel history-section" aria-label="Connection history">
               <div className="history-heading">
@@ -1415,7 +1649,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                   {activeInspector === 'results'
                     ? 'Executed output'
                     : activeInspector === 'query'
-                      ? 'Generated SQL'
+                      ? `Generated ${connection?.kind === 'elasticsearch' || connection?.kind === 'mongodb' ? 'JSON' : 'SQL'}`
                       : 'Database map'}
                 </p>
                 <h2>{activeInspector === 'results' ? 'Results' : activeInspector === 'query' ? 'Query' : 'Schema'}</h2>

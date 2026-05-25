@@ -3,11 +3,13 @@ import {
   buildLocalAssistantResponse,
   buildResultAnalysisPrompt,
   buildSystemPrompt,
+  extractQueryBlock,
+  removeSqlBlocks,
   summarizeQueryResult
 } from '../src/main/assistant/localAssistant';
 import type { DatabaseSchema, QueryResult } from '../src/shared/types';
 
-const schema: DatabaseSchema = {
+const sqliteSchema: DatabaseSchema = {
   kind: 'sqlite',
   label: 'sample.db',
   tables: [
@@ -18,6 +20,49 @@ const schema: DatabaseSchema = {
         { name: 'created_at', type: 'TEXT', nullable: false, primaryKey: false },
         { name: 'customer_id', type: 'INTEGER', nullable: false, primaryKey: false },
         { name: 'total', type: 'REAL', nullable: false, primaryKey: false }
+      ]
+    }
+  ]
+};
+
+const mysqlSchema: DatabaseSchema = {
+  kind: 'mysql',
+  label: 'mysql-db',
+  tables: [
+    {
+      name: 'orders',
+      columns: [
+        { name: 'id', type: 'int', nullable: false, primaryKey: true },
+        { name: 'total', type: 'decimal', nullable: false, primaryKey: false }
+      ]
+    }
+  ]
+};
+
+const postgresSchema: DatabaseSchema = {
+  kind: 'postgres',
+  label: 'pg-db',
+  tables: [
+    {
+      name: 'users',
+      columns: [
+        { name: 'id', type: 'integer', nullable: false, primaryKey: true },
+        { name: 'name', type: 'text', nullable: false, primaryKey: false }
+      ]
+    }
+  ]
+};
+
+const mongodbSchema: DatabaseSchema = {
+  kind: 'mongodb',
+  label: 'mongo-db',
+  tables: [
+    {
+      name: 'orders',
+      columns: [
+        { name: '_id', type: 'objectid', nullable: true, primaryKey: true },
+        { name: 'customer', type: 'string', nullable: true, primaryKey: false },
+        { name: 'total', type: 'number', nullable: true, primaryKey: false }
       ]
     }
   ]
@@ -48,7 +93,59 @@ describe('local assistant prompt shaping', () => {
     expect(prompt).toContain('suggest one or two good next questions');
   });
 
-  it('guides result answers to be chatty while keeping SQL out of chat', () => {
+  it('guides MySQL with backend-specific instructions', () => {
+    const prompt = buildSystemPrompt('Table orders: id int, total decimal', 'mysql');
+
+    expect(prompt).toContain('Generate only read-only MySQL');
+    expect(prompt).toContain('include exactly one fenced ```sql block');
+  });
+
+  it('guides PostgreSQL with backend-specific instructions', () => {
+    const prompt = buildSystemPrompt('Table users: id integer, name text', 'postgres');
+
+    expect(prompt).toContain('Generate only read-only PostgreSQL');
+    expect(prompt).toContain('include exactly one fenced ```sql block');
+  });
+
+  it('guides MongoDB with JSON instructions', () => {
+    const prompt = buildSystemPrompt('MongoDB collection orders: _id objectid, customer string', 'mongodb');
+
+    expect(prompt).toContain('safe MongoDB');
+    expect(prompt).toContain('include exactly one fenced ```json block');
+    expect(prompt).toContain('"collection"');
+    expect(prompt).toContain('"method"');
+  });
+
+  it('guides Elasticsearch with JSON instructions', () => {
+    const prompt = buildSystemPrompt('Elasticsearch index orders: customer keyword, total double', 'elasticsearch');
+
+    expect(prompt).toContain('safe Elasticsearch search request');
+    expect(prompt).toContain('include exactly one fenced ```json block');
+    expect(prompt).toContain('Never generate writes, deletes, updates');
+  });
+
+  it('extracts sql blocks for relational backends and json blocks for MongoDB/ES', () => {
+    const sqlContent = 'Here is the query:\n```sql\nselect * from orders;\n```\nDone.';
+    const jsonContent = 'Here is the query:\n```json\n{"collection":"orders","method":"find","body":{"filter":{}}}\n```\nDone.';
+
+    expect(extractQueryBlock(sqlContent, 'mysql')).toBe('select * from orders;');
+    expect(extractQueryBlock(sqlContent, 'postgres')).toBe('select * from orders;');
+    expect(extractQueryBlock(sqlContent, 'sqlite')).toBe('select * from orders;');
+    expect(extractQueryBlock(jsonContent, 'mongodb')).toBe('{"collection":"orders","method":"find","body":{"filter":{}}}');
+    expect(extractQueryBlock(jsonContent, 'elasticsearch')).toBe('{"collection":"orders","method":"find","body":{"filter":{}}}');
+  });
+
+  it('removes both sql and json blocks from chat text', () => {
+    const content = 'Before\n```sql\nselect 1;\n```\nMiddle\n```json\n{"key":"value"}\n```\nAfter';
+    const result = removeSqlBlocks(content);
+    expect(result).not.toContain('select 1');
+    expect(result).not.toContain('{"key":"value"}');
+    expect(result).toContain('Before');
+    expect(result).toContain('Middle');
+    expect(result).toContain('After');
+  });
+
+  it('guides result answers to be chatty while keeping SQL/JSON out of chat', () => {
     const prompt = buildResultAnalysisPrompt();
 
     expect(prompt).toContain('start with the direct takeaway');
@@ -57,27 +154,31 @@ describe('local assistant prompt shaping', () => {
     expect(prompt).toContain('Do not include SQL, query text, fenced code blocks, JSON, or implementation details');
   });
 
-  it('guides provider models toward safe Elasticsearch searches when connected to Elasticsearch', () => {
-    const prompt = buildSystemPrompt('Elasticsearch index orders: customer keyword, total double', 'elasticsearch');
+  it('guides result answers with backend-specific context', () => {
+    const mysqlPrompt = buildResultAnalysisPrompt('mysql');
+    expect(mysqlPrompt).toContain('read-only MySQL');
 
-    expect(prompt).toContain('safe Elasticsearch search request');
-    expect(prompt).toContain('include exactly one fenced ```json block');
-    expect(prompt).toContain('Never generate writes, deletes, updates');
+    const mongoPrompt = buildResultAnalysisPrompt('mongodb');
+    expect(mongoPrompt).toContain('read-only MongoDB');
+    expect(mongoPrompt).toContain('MongoDB request JSON out of the chat answer');
   });
 
   it('allows validated data writes in prompts only when SAFE mode is off', () => {
     const sqlitePrompt = buildSystemPrompt('orders(id, total)', 'sqlite', 'manual');
-    const elasticsearchPrompt = buildSystemPrompt('Elasticsearch index orders: customer keyword', 'elasticsearch', 'manual');
-
     expect(sqlitePrompt).toContain('SAFE mode is off');
     expect(sqlitePrompt).toContain('table row inserts, updates, deletes, or replaces');
-    expect(sqlitePrompt).toContain('Never generate schema changes');
-    expect(elasticsearchPrompt).toContain('document index, update, and delete requests');
-    expect(elasticsearchPrompt).toContain('Never generate index deletion');
+
+    const mysqlPrompt = buildSystemPrompt('orders(id, total)', 'mysql', 'manual');
+    expect(mysqlPrompt).toContain('SAFE mode is off');
+    expect(mysqlPrompt).toContain('table row inserts');
+
+    const mongoPrompt = buildSystemPrompt('MongoDB collection orders: customer string', 'mongodb', 'manual');
+    expect(mongoPrompt).toContain('SAFE mode is off');
+    expect(mongoPrompt).toContain('insertOne, updateOne, and deleteOne');
   });
 
   it('gives schema questions a next-question ramp', () => {
-    const response = buildLocalAssistantResponse('what tables are available?', schema);
+    const response = buildLocalAssistantResponse('what tables are available?', sqliteSchema);
 
     expect(response.content).toContain('Here is what I can see');
     expect(response.content).toContain('A good next question could be');
@@ -92,6 +193,38 @@ describe('local assistant prompt shaping', () => {
     };
 
     expect(summarizeQueryResult(result)).toContain('A useful next step would be');
+  });
+
+  it('builds local fallback SQL queries for MySQL', () => {
+    const response = buildLocalAssistantResponse('show orders', mysqlSchema);
+
+    expect(response.query?.query).toContain('select * from "orders"');
+    expect(response.query?.validation.safe).toBe(true);
+  });
+
+  it('builds local fallback SQL queries for PostgreSQL', () => {
+    const response = buildLocalAssistantResponse('show users', postgresSchema);
+
+    expect(response.query?.query).toContain('select * from "users"');
+    expect(response.query?.validation.safe).toBe(true);
+  });
+
+  it('builds local fallback MongoDB queries', () => {
+    const response = buildLocalAssistantResponse('show orders', mongodbSchema);
+
+    expect(response.content).toContain('MongoDB');
+    expect(response.query?.query).toContain('"collection": "orders"');
+    expect(response.query?.query).toContain('"method": "find"');
+    expect(response.query?.validation.safe).toBe(true);
+  });
+
+  it('builds local fallback MongoDB count query for count prompts', () => {
+    const response = buildLocalAssistantResponse('how many orders are there?', mongodbSchema);
+
+    expect(response.query?.query).toContain('"method": "count"');
+    expect(response.query?.query).toContain('"collection": "orders"');
+    expect(response.query?.query).toContain('"filter": {}');
+    expect(response.query?.validation.safe).toBe(true);
   });
 
   it('builds local fallback Elasticsearch searches', () => {

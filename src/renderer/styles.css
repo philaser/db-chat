@@ -787,8 +787,8 @@ button:disabled {
 
 .connection-actions {
   display: grid;
-  gap: 8px;
-  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   min-width: 0;
 }
 
@@ -803,6 +803,11 @@ button:disabled {
 
 .connection-actions button svg {
   flex: 0 0 auto;
+}
+
+.connection-logo {
+  height: 16px;
+  width: 16px;
 }
 
 .elasticsearch-form {
