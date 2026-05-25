@@ -53,7 +53,36 @@ const themeStorageKey = 'dbchat:theme';
 
 type InspectorTab = 'results' | 'query' | 'schema';
 type AppView = 'workspace' | 'connections' | 'history' | 'settings';
-type ThemeMode = 'light' | 'dark';
+type ThemeMode =
+  | 'light' | 'dark'
+  | 'catppuccin-latte' | 'solarized-light' | 'rose-pine-dawn'
+  | 'catppuccin-frappe' | 'catppuccin-macchiato' | 'catppuccin-mocha'
+  | 'nord' | 'tokyo-night' | 'dracula' | 'gruvbox-dark' | 'monokai' | 'rose-pine';
+
+interface ThemeEntry {
+  id: ThemeMode;
+  label: string;
+  group: 'light' | 'dark';
+}
+
+const themeRegistry: ThemeEntry[] = [
+  { id: 'light',               label: 'Light',              group: 'light' },
+  { id: 'catppuccin-latte',    label: 'Catppuccin Latte',   group: 'light' },
+  { id: 'solarized-light',     label: 'Solarized Light',    group: 'light' },
+  { id: 'rose-pine-dawn',      label: 'Rose Pine Dawn',     group: 'light' },
+  { id: 'dark',                label: 'Dark',               group: 'dark'  },
+  { id: 'catppuccin-frappe',   label: 'Catppuccin Frappe',  group: 'dark'  },
+  { id: 'catppuccin-macchiato',label: 'Catppuccin Macchiato',group: 'dark'  },
+  { id: 'catppuccin-mocha',    label: 'Catppuccin Mocha',   group: 'dark'  },
+  { id: 'nord',                label: 'Nord',               group: 'dark'  },
+  { id: 'tokyo-night',         label: 'Tokyo Night',        group: 'dark'  },
+  { id: 'dracula',             label: 'Dracula',            group: 'dark'  },
+  { id: 'gruvbox-dark',        label: 'Gruvbox Dark',       group: 'dark'  },
+  { id: 'monokai',             label: 'Monokai',            group: 'dark'  },
+  { id: 'rose-pine',           label: 'Rose Pine',          group: 'dark'  },
+];
+
+const validThemeIds = new Set<string>(themeRegistry.map((entry) => entry.id));
 type ResizeSide = 'right';
 type LogLevel = 'info' | 'error';
 type AppLogEntry = {
@@ -114,7 +143,8 @@ function loadInitialTheme(): ThemeMode {
   if (typeof window === 'undefined') {
     return 'light';
   }
-  return window.localStorage.getItem(themeStorageKey) === 'dark' ? 'dark' : 'light';
+  const stored = window.localStorage.getItem(themeStorageKey);
+  return stored && validThemeIds.has(stored) ? stored as ThemeMode : 'light';
 }
 
 function createInitialMessages(): ChatMessage[] {
@@ -1122,15 +1152,31 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
               <ShieldCheck size={16} />
               SAFE mode
             </label>
-            <div className="theme-toggle" aria-label="Theme">
-              <button type="button" className={theme === 'light' ? 'active' : ''} onClick={() => setTheme('light')}>
-                <Sun size={16} />
-                Light
-              </button>
-              <button type="button" className={theme === 'dark' ? 'active' : ''} onClick={() => setTheme('dark')}>
-                <Moon size={16} />
-                Dark
-              </button>
+            <div className="theme-picker" aria-label="Theme">
+              {(['light', 'dark'] as const).map((group) => {
+                const groupThemes = themeRegistry.filter((entry) => entry.group === group);
+                const selectedId = groupThemes.some((entry) => entry.id === theme)
+                  ? theme
+                  : groupThemes[0]?.id ?? theme;
+                return (
+                  <div className="theme-group" key={group}>
+                    <div className="theme-group-label">
+                      {group === 'light' ? <Sun size={14} /> : <Moon size={14} />}
+                      <span>{group === 'light' ? 'Light' : 'Dark'}</span>
+                    </div>
+                    <select
+                      className="theme-select"
+                      value={selectedId}
+                      onChange={(event) => setTheme(event.target.value as ThemeMode)}
+                      aria-label={`${group === 'light' ? 'Light' : 'Dark'} theme`}
+                    >
+                      {groupThemes.map((entry) => (
+                        <option key={entry.id} value={entry.id}>{entry.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              })}
             </div>
             <div className="provider-card">
               <span>{settings.provider}</span>

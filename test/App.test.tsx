@@ -170,16 +170,29 @@ describe('App', () => {
 
   it('switches theme modes and persists the selection', () => {
     const api = makeApi();
-    render(<App api={api} />);
+    const { container } = render(<App api={api} />);
 
     fireEvent.click(screen.getByLabelText('Settings'));
-    fireEvent.click(screen.getByRole('button', { name: 'Dark' }));
-    expect(document.documentElement.dataset.theme).toBe('dark');
-    expect(window.localStorage.getItem('dbchat:theme')).toBe('dark');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    const themeSelects = container.querySelectorAll<HTMLSelectElement>('select.theme-select');
+    expect(themeSelects).toHaveLength(2);
+    const [lightSelect, darkSelect] = themeSelects;
+
+    fireEvent.change(lightSelect, { target: { value: 'catppuccin-latte' } });
+    expect(document.documentElement.dataset.theme).toBe('catppuccin-latte');
+    expect(window.localStorage.getItem('dbchat:theme')).toBe('catppuccin-latte');
+
+    fireEvent.change(darkSelect, { target: { value: 'nord' } });
+    expect(document.documentElement.dataset.theme).toBe('nord');
+    expect(window.localStorage.getItem('dbchat:theme')).toBe('nord');
+
+    fireEvent.change(lightSelect, { target: { value: 'light' } });
     expect(document.documentElement.dataset.theme).toBe('light');
     expect(window.localStorage.getItem('dbchat:theme')).toBe('light');
+
+    fireEvent.change(darkSelect, { target: { value: 'dark' } });
+    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(window.localStorage.getItem('dbchat:theme')).toBe('dark');
   });
 
   it('keeps the workspace rail fixed and collapses the resizable inspector', () => {
