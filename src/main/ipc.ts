@@ -14,6 +14,9 @@ import type {
 } from '../shared/types.js';
 import type { OpenDialogOptions } from 'electron';
 import { ElasticsearchConnector } from './connectors/ElasticsearchConnector.js';
+import { MongoDBConnector } from './connectors/MongoDBConnector.js';
+import { MySQLConnector } from './connectors/MySQLConnector.js';
+import { PostgresConnector } from './connectors/PostgresConnector.js';
 import { SQLiteConnector } from './connectors/SQLiteConnector.js';
 import {
   buildLocalAssistantResponse,
@@ -61,14 +64,9 @@ export class IpcController {
   }
 
   async connect(config: ConnectionConfig): Promise<DatabaseSchema> {
-    if (config.kind !== 'sqlite' && config.kind !== 'elasticsearch') {
-      throw new Error(`${config.kind} is not implemented in this MVP.`);
-    }
     const hydratedConfig = this.store.hydrateConnectionSecrets(config);
     this.connector?.close();
-    const connector = hydratedConfig.kind === 'elasticsearch'
-      ? new ElasticsearchConnector()
-      : new SQLiteConnector();
+    const connector = createConnector(hydratedConfig.kind);
     await connector.connect(hydratedConfig);
     this.connector = connector;
     this.schema = await connector.introspect();
@@ -233,5 +231,22 @@ export class IpcController {
       throw new Error('No database is connected.');
     }
     return this.connector;
+  }
+}
+
+function createConnector(kind: string): DatabaseConnector {
+  switch (kind) {
+    case 'elasticsearch':
+      return new ElasticsearchConnector();
+    case 'mysql':
+      return new MySQLConnector();
+    case 'postgres':
+      return new PostgresConnector();
+    case 'mongodb':
+      return new MongoDBConnector();
+    case 'sqlite':
+      return new SQLiteConnector();
+    default:
+      throw new Error(`Unsupported database kind: ${kind}`);
   }
 }

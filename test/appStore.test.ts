@@ -43,3 +43,144 @@ describe('AppStore Elasticsearch passwords', () => {
     expect(store.hydrateConnectionSecrets(history).elasticsearchPassword).toBe('elastic-password');
   });
 });
+
+describe('AppStore generic password connectors', () => {
+  it('stores remembered MySQL passwords encrypted and hydrates them', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'db-chat-store-'));
+    const filePath = path.join(dir, 'store.json');
+    const store = new AppStore(filePath);
+    const config = {
+      id: 'mysql-conn',
+      kind: 'mysql' as const,
+      label: 'mysql.local:3306',
+      host: 'mysql.local',
+      port: 3306,
+      database: 'mydb',
+      username: 'root',
+      password: 'mysql-password',
+      rememberPassword: true,
+      createdAt: '2026-05-21T00:00:00.000Z'
+    };
+
+    store.saveConnection(config);
+
+    const fileContents = readFileSync(filePath, 'utf8');
+    const history = store.listConnections()[0];
+    expect(fileContents).not.toContain('mysql-password');
+    expect(fileContents).toContain('"mysql-conn": "safe:');
+    expect(history.password).toBeUndefined();
+    expect(history.hasSavedPassword).toBe(true);
+    expect(store.hydrateConnectionSecrets(history).password).toBe('mysql-password');
+  });
+
+  it('stores remembered PostgreSQL passwords encrypted and hydrates them', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'db-chat-store-'));
+    const filePath = path.join(dir, 'store.json');
+    const store = new AppStore(filePath);
+    const config = {
+      id: 'pg-conn',
+      kind: 'postgres' as const,
+      label: 'pg.local:5432',
+      host: 'pg.local',
+      port: 5432,
+      database: 'mydb',
+      username: 'admin',
+      password: 'pg-password',
+      rememberPassword: true,
+      createdAt: '2026-05-21T00:00:00.000Z'
+    };
+
+    store.saveConnection(config);
+
+    const fileContents = readFileSync(filePath, 'utf8');
+    const history = store.listConnections()[0];
+    expect(fileContents).not.toContain('pg-password');
+    expect(history.hasSavedPassword).toBe(true);
+    expect(store.hydrateConnectionSecrets(history).password).toBe('pg-password');
+  });
+
+  it('stores remembered MongoDB passwords encrypted and hydrates them', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'db-chat-store-'));
+    const filePath = path.join(dir, 'store.json');
+    const store = new AppStore(filePath);
+    const config = {
+      id: 'mongo-conn',
+      kind: 'mongodb' as const,
+      label: 'mongo.local:27017',
+      host: 'mongo.local',
+      port: 27017,
+      database: 'mydb',
+      username: 'admin',
+      password: 'mongo-password',
+      authDatabase: 'admin',
+      rememberPassword: true,
+      createdAt: '2026-05-21T00:00:00.000Z'
+    };
+
+    store.saveConnection(config);
+
+    const fileContents = readFileSync(filePath, 'utf8');
+    const history = store.listConnections()[0];
+    expect(fileContents).not.toContain('mongo-password');
+    expect(history.hasSavedPassword).toBe(true);
+    expect(history.authDatabase).toBe('admin');
+    expect(store.hydrateConnectionSecrets(history).password).toBe('mongo-password');
+  });
+
+  it('does not hydrate password when not remembered', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'db-chat-store-'));
+    const filePath = path.join(dir, 'store.json');
+    const store = new AppStore(filePath);
+    const config = {
+      id: 'no-remember',
+      kind: 'mysql' as const,
+      label: 'mysql.local:3306',
+      host: 'mysql.local',
+      port: 3306,
+      database: 'mydb',
+      username: 'root',
+      password: 'tmp-password',
+      createdAt: '2026-05-21T00:00:00.000Z'
+    };
+
+    store.saveConnection(config);
+
+    const history = store.listConnections()[0];
+    expect(history.hasSavedPassword).toBeFalsy();
+    expect(store.hydrateConnectionSecrets(history).password).toBeUndefined();
+  });
+
+  it('retains MySQL and PostgreSQL connections with same host/port/database', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'db-chat-store-'));
+    const filePath = path.join(dir, 'store.json');
+    const store = new AppStore(filePath);
+
+    const mysqlConfig = {
+      id: 'mysql-same',
+      kind: 'mysql' as const,
+      label: 'mysql.local:3306/mydb',
+      host: 'db.local',
+      port: 3306,
+      database: 'mydb',
+      createdAt: '2026-05-21T00:00:00.000Z'
+    };
+
+    const pgConfig = {
+      id: 'pg-same',
+      kind: 'postgres' as const,
+      label: 'pg.local:5432/mydb',
+      host: 'db.local',
+      port: 3306,
+      database: 'mydb',
+      createdAt: '2026-05-21T00:00:00.000Z'
+    };
+
+    store.saveConnection(mysqlConfig);
+    store.saveConnection(pgConfig);
+
+    const connections = store.listConnections();
+    expect(connections).toHaveLength(2);
+    expect(connections[0].id).toBe('pg-same');
+    expect(connections[1].id).toBe('mysql-same');
+  });
+});
