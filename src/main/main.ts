@@ -52,6 +52,7 @@ function registerIpc(): void {
   ipcMain.handle('dbchat:list-chat-sessions', () => controller.listChatSessions());
   ipcMain.handle('dbchat:save-chat-session', (_event, session: PersistedChatSession) => controller.saveChatSession(session));
   ipcMain.handle('dbchat:delete-chat-session', (_event, id: string) => controller.deleteChatSession(id));
+  ipcMain.handle('dbchat:clear-chat-sessions', () => controller.clearChatSessions());
   ipcMain.handle('dbchat:list-connections', () => controller.listConnections());
   ipcMain.handle('dbchat:delete-connection', (_event, id: string) => controller.deleteConnection(id));
 }

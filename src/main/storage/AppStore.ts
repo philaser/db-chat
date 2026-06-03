@@ -196,6 +196,14 @@ export class AppStore {
     });
   }
 
+  clearChatSessions(): void {
+    const data = this.read();
+    this.write({
+      ...data,
+      chatSessions: []
+    });
+  }
+
   private read(): StoreData {
     try {
       const raw = readFileSync(this.filePath, 'utf8');

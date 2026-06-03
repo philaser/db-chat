@@ -218,6 +218,10 @@ export class IpcController {
     this.store.deleteChatSession(id);
   }
 
+  clearChatSessions(): void {
+    this.store.clearChatSessions();
+  }
+
   listConnections(): ConnectionHistoryItem[] {
     return this.store.listConnections();
   }

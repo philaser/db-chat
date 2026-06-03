@@ -154,6 +154,7 @@ export interface DbChatApi {
   listChatSessions(): Promise<PersistedChatSession[]>;
   saveChatSession(session: PersistedChatSession): Promise<PersistedChatSession>;
   deleteChatSession(id: string): Promise<void>;
+  clearChatSessions(): Promise<void>;
   listConnections(): Promise<ConnectionHistoryItem[]>;
   deleteConnection(id: string): Promise<void>;
 }

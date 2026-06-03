@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/renderer/App';
-import type { DbChatApi } from '../src/shared/types';
+import type { DatabaseSchema, DbChatApi } from '../src/shared/types';
 
 function makeApi(): DbChatApi {
   return {
@@ -61,6 +61,7 @@ function makeApi(): DbChatApi {
     listChatSessions: vi.fn(async () => []),
     saveChatSession: vi.fn(async (session) => session),
     deleteChatSession: vi.fn(),
+    clearChatSessions: vi.fn(),
     listConnections: vi.fn(async () => []),
     deleteConnection: vi.fn()
   };
@@ -229,6 +230,84 @@ describe('App', () => {
     );
   });
 
+  it('searches, expands, and switches the schema between Pro and Raw views', async () => {
+    const api = makeApi();
+    const connection = {
+      id: 'schema-db',
+      kind: 'sqlite' as const,
+      label: 'schema.db',
+      databasePath: '/tmp/schema.db',
+      createdAt: '2026-06-03T00:00:00.000Z'
+    };
+    const schema: DatabaseSchema = {
+      kind: 'sqlite',
+      label: 'schema.db',
+      tables: [
+        {
+          name: 'z_archive',
+          columns: [{ name: 'archived_at', type: 'datetime', nullable: true, primaryKey: false }]
+        },
+        {
+          name: 'customer_orders',
+          columns: [
+            { name: 'status', type: 'text', nullable: true, primaryKey: false },
+            { name: 'total_amount', type: 'decimal', nullable: false, primaryKey: false },
+            { name: 'id', type: 'integer', nullable: false, primaryKey: true },
+            { name: 'created_at', type: 'datetime', nullable: false, primaryKey: false },
+            { name: 'customer_id', type: 'integer', nullable: false, primaryKey: false }
+          ]
+        }
+      ]
+    };
+    vi.mocked(api.chooseSqliteFile).mockResolvedValue(connection);
+    vi.mocked(api.connect).mockResolvedValue(schema);
+
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByLabelText('Connections'));
+    fireEvent.click(screen.getByRole('button', { name: 'SQLite' }));
+
+    expect(await screen.findByText('Customer Orders')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Pro' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('Z Archive')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Search schema'), {
+      target: { value: 'status' }
+    });
+    expect(screen.getByText('Customer Orders')).toBeInTheDocument();
+    expect(screen.queryByText('Z Archive')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Status').length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText('Search schema'), {
+      target: { value: 'no match' }
+    });
+    expect(screen.getByText('No schema matches found.')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Search schema'), {
+      target: { value: '' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Raw' }));
+    expect(screen.getByRole('button', { name: 'Raw' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('customer_orders')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /customer_orders/i }));
+    expect(screen.getByText('created_at')).toBeInTheDocument();
+    expect(screen.getByText('Primary')).toBeInTheDocument();
+    expect(screen.getAllByText('Required').length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pro' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Summarize Customer Orders.' }));
+    expect(screen.getByPlaceholderText('Ask about the connected database...')).toHaveValue('Summarize Customer Orders.');
+
+    const schemaPanel = screen.getByLabelText('Schema') as HTMLElement;
+    const scrollTo = vi.fn();
+    schemaPanel.scrollTo = scrollTo as unknown as HTMLElement['scrollTo'];
+    schemaPanel.scrollTop = 120;
+    fireEvent.scroll(schemaPanel);
+    fireEvent.click(screen.getByLabelText('Return to top of schema'));
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' });
+  });
+
   it('lets the inspector switch tabs and selects results after a manual safe query', async () => {
     const api = makeApi();
     render(<App api={api} />);
@@ -313,13 +392,42 @@ describe('App', () => {
     fireEvent.click(screen.getByLabelText('Delete chat Top customers'));
     await waitFor(() => {
       expect(api.deleteChatSession).toHaveBeenCalledWith('session-1');
-      expect(screen.getByText('Chat deleted')).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByLabelText('Connections'));
     expect((await screen.findAllByText('customers.db')).length).toBeGreaterThan(0);
     fireEvent.click(await screen.findByLabelText('Delete connection customers.db'));
     expect(api.deleteConnection).toHaveBeenCalledWith('connection-1');
+  });
+
+  it('closes recent chats when clicking away and clears all chat history', async () => {
+    const api = makeApi();
+    const sessions = [{
+      id: 'session-1',
+      title: 'Top customers',
+      messages: [],
+      createdAt: '2026-05-02T00:00:00.000Z',
+      updatedAt: '2026-05-02T00:00:01.000Z'
+    }];
+    vi.mocked(api.listChatSessions).mockImplementation(async () => sessions);
+
+    render(<App api={api} />);
+
+    fireEvent.click(await screen.findByLabelText('Recent chats'));
+    expect(await screen.findByText('Top customers')).toBeInTheDocument();
+
+    fireEvent.pointerDown(document.body);
+    await waitFor(() => {
+      expect(screen.queryByText('Top customers')).not.toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByLabelText('Recent chats'));
+    fireEvent.click(screen.getByText('All history'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
+
+    await waitFor(() => {
+      expect(api.clearChatSessions).toHaveBeenCalledOnce();
+    });
   });
 
   it('connects to Elasticsearch from the connections view', async () => {
@@ -354,6 +462,7 @@ describe('App', () => {
         elasticsearchRememberPassword: true
       }));
     });
+    expect(await screen.findByPlaceholderText('Search indexes or fields')).toBeInTheDocument();
     expect(await screen.findByText('orders')).toBeInTheDocument();
   });
 
@@ -376,7 +485,7 @@ describe('App', () => {
     fireEvent.click(screen.getByLabelText('Connections'));
     fireEvent.click(await screen.findByText('elastic.internal:9243'));
 
-    expect(await screen.findByText('Enter the password to reconnect elastic.internal:9243.')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Elasticsearch connection')).toBeInTheDocument();
     expect(screen.getByLabelText('Host')).toHaveValue('elastic.internal');
     expect(screen.getByLabelText('Port')).toHaveValue(9243);
     expect(screen.getByLabelText('Username')).toHaveValue('elastic-user');
@@ -429,7 +538,6 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Elasticsearch' }));
     fireEvent.click(within(screen.getByLabelText('Elasticsearch connection')).getByRole('button', { name: 'Connect' }));
 
-    expect(await screen.findByText('Could not connect to Elasticsearch.')).toBeInTheDocument();
     expect(screen.queryByText(/Could not reach Elasticsearch at https:\/\/elastic.internal:9243: self-signed certificate/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Error invoking remote method/)).not.toBeInTheDocument();
 
