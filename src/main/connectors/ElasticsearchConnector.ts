@@ -34,8 +34,7 @@ export class ElasticsearchConnector implements DatabaseConnector {
     const indices = await this.request<Array<{ index?: string }>>('_cat/indices?format=json&h=index&s=index');
     const visibleIndices = indices
       .map((item) => item.index)
-      .filter((index): index is string => Boolean(index && !index.startsWith('.')))
-      .slice(0, 50);
+      .filter((index): index is string => Boolean(index && !index.startsWith('.')));
 
     const tables: TableInfo[] = [];
     for (const index of visibleIndices) {

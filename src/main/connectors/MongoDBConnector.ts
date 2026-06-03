@@ -48,8 +48,7 @@ export class MongoDBConnector implements DatabaseConnector {
     const db = this.requireDb();
     const collections = await db.listCollections().toArray();
     const visible = collections
-      .filter((c: { name: string }) => !c.name.startsWith('system.') && !c.name.startsWith('_'))
-      .slice(0, 50);
+      .filter((c: { name: string }) => !c.name.startsWith('system.') && !c.name.startsWith('_'));
 
     const tables: TableInfo[] = [];
     for (const coll of visible) {

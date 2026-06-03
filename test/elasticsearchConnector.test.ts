@@ -78,6 +78,49 @@ describe('ElasticsearchConnector', () => {
     expect(result.elapsedMs).toBe(3);
   });
 
+  it('introspects every visible index instead of truncating large clusters', async () => {
+    const indices = Array.from({ length: 55 }, (_, index) => ({ index: `orders-${String(index).padStart(2, '0')}` }));
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('/_cluster/health?filter_path=cluster_name,status')) {
+        return jsonResponse({ cluster_name: 'test', status: 'green' });
+      }
+      if (url.endsWith('/_cat/indices?format=json&h=index&s=index')) {
+        return jsonResponse([{ index: '.security' }, ...indices]);
+      }
+      if (url.endsWith('/_mapping')) {
+        const indexName = decodeURIComponent(url.split('/').at(-2) ?? '');
+        return jsonResponse({
+          [indexName]: {
+            mappings: {
+              properties: {
+                customer: { type: 'keyword' }
+              }
+            }
+          }
+        });
+      }
+      return jsonResponse({ error: 'not found' }, 404);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const connector = new ElasticsearchConnector();
+    await connector.connect({
+      id: 'large-cluster',
+      kind: 'elasticsearch',
+      label: 'local-es',
+      elasticsearchHost: 'localhost',
+      elasticsearchPort: 9200,
+      createdAt: new Date().toISOString()
+    });
+
+    const schema = await connector.introspect();
+
+    expect(schema.tables).toHaveLength(55);
+    expect(schema.tables.map((table) => table.name)).toContain('orders-54');
+    expect(schema.tables.map((table) => table.name)).not.toContain('.security');
+  });
+
   it('executes validated document writes when SAFE mode is off', async () => {
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input);

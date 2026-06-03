@@ -1,9 +1,11 @@
 import {
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Clock3,
   Copy,
   Database,
+  ArrowUp,
   KeyRound,
   List,
   Loader2,
@@ -17,6 +19,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  Search,
   Sun,
   Table2,
   Trash2
@@ -26,6 +29,7 @@ import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type UIEvent as ReactUIEvent,
   useEffect,
   useMemo,
   useRef,
@@ -52,7 +56,8 @@ import type {
   PersistedChatSession,
   PersistedSettings,
   QueryResult,
-  QueryValidationResult
+  QueryValidationResult,
+  TableInfo
 } from '../shared/types';
 
 const fallbackApi = typeof window !== 'undefined' ? window.dbchat : undefined;
@@ -61,6 +66,7 @@ const themeStorageKey = 'dbchat:theme';
 type InspectorTab = 'results' | 'query' | 'schema';
 type AppView = 'workspace' | 'connections' | 'history' | 'settings';
 type ConnectionLogoKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres' | 'mongodb';
+type SchemaViewMode = 'pro' | 'raw';
 type ThemeMode =
   | 'light' | 'dark'
   | 'catppuccin-latte' | 'solarized-light' | 'rose-pine-dawn'
@@ -136,6 +142,18 @@ const starterPrompts = [
   }
 ];
 
+const schemaFieldGroups = [
+  'Identity',
+  'Links',
+  'Dates',
+  'Amounts',
+  'Status',
+  'Text',
+  'Other'
+] as const;
+
+type SchemaFieldGroup = typeof schemaFieldGroups[number];
+
 const initialAssistantMessage = 'Connect a database to start asking questions about your data.';
 
 const connectionLogos: Record<ConnectionLogoKind, SimpleIcon> = {
@@ -153,6 +171,126 @@ function nowMessage(role: ChatMessage['role'], content: string): ChatMessage {
     content,
     createdAt: new Date().toISOString()
   };
+}
+
+function schemaObjectKind(kind?: DatabaseSchema['kind']): string {
+  if (kind === 'elasticsearch') return 'index';
+  if (kind === 'mongodb') return 'collection';
+  return 'table';
+}
+
+function schemaObjectPlural(kind?: DatabaseSchema['kind']): string {
+  if (kind === 'elasticsearch') return 'indices';
+  if (kind === 'mongodb') return 'collections';
+  return 'tables';
+}
+
+function humanizeIdentifier(value: string): string {
+  const words = value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_./:-]+/g, ' ')
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter(Boolean);
+
+  if (!words.length) {
+    return value;
+  }
+
+  return words
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+}
+
+function schemaSearchText(table: TableInfo): string {
+  return [
+    table.name,
+    humanizeIdentifier(table.name),
+    ...table.columns.flatMap((column) => [
+      column.name,
+      humanizeIdentifier(column.name),
+      column.type,
+      fieldGroup(column)
+    ])
+  ].join(' ').toLowerCase();
+}
+
+function isIdentityOrLinkField(column: { name: string; primaryKey: boolean }): boolean {
+  const name = column.name.toLowerCase();
+  return column.primaryKey
+    || name === 'id'
+    || name === '_id'
+    || name.endsWith('_id')
+    || name.endsWith('id')
+    || name.includes('uuid')
+    || name.includes('email');
+}
+
+function sortSchemaColumns(columns: TableInfo['columns']): TableInfo['columns'] {
+  return [...columns].sort((a, b) => {
+    if (a.primaryKey !== b.primaryKey) return a.primaryKey ? -1 : 1;
+    const aLink = isIdentityOrLinkField(a);
+    const bLink = isIdentityOrLinkField(b);
+    if (aLink !== bLink) return aLink ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function sortSchemaTables(tables: TableInfo[]): TableInfo[] {
+  return [...tables]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((table) => ({
+      ...table,
+      columns: sortSchemaColumns(table.columns)
+    }));
+}
+
+function fieldGroup(column: TableInfo['columns'][number]): SchemaFieldGroup {
+  const name = column.name.toLowerCase();
+  const type = column.type.toLowerCase();
+
+  if (column.primaryKey || name === 'id' || name === '_id' || name.includes('uuid') || name.includes('email')) {
+    return 'Identity';
+  }
+  if (name.endsWith('_id') || name.endsWith('id') || name.includes('customer') || name.includes('user')) {
+    return 'Links';
+  }
+  if (name.includes('date') || name.includes('time') || name.includes('created') || name.includes('updated') || type.includes('date') || type.includes('time')) {
+    return 'Dates';
+  }
+  if (name.includes('amount') || name.includes('price') || name.includes('total') || name.includes('cost') || name.includes('revenue') || name.includes('count') || /int|double|float|decimal|number|numeric/.test(type)) {
+    return 'Amounts';
+  }
+  if (name.includes('status') || name.includes('state') || name.includes('type') || name.includes('category') || name.includes('kind')) {
+    return 'Status';
+  }
+  if (name.includes('name') || name.includes('title') || name.includes('description') || name.includes('comment') || name.includes('note') || name.includes('text') || /char|text|string|keyword/.test(type)) {
+    return 'Text';
+  }
+  return 'Other';
+}
+
+function groupedSchemaFields(columns: TableInfo['columns']): Array<{ group: SchemaFieldGroup; fields: TableInfo['columns'] }> {
+  return schemaFieldGroups
+    .map((group) => ({
+      group,
+      fields: columns.filter((column) => fieldGroup(column) === group)
+    }))
+    .filter((entry) => entry.fields.length > 0);
+}
+
+function schemaFieldPreview(columns: TableInfo['columns'], mode: SchemaViewMode): string {
+  const labels = columns.slice(0, 6).map((column) => mode === 'pro' ? humanizeIdentifier(column.name) : column.name);
+  const suffix = columns.length > labels.length ? `, +${columns.length - labels.length} more` : '';
+  return labels.length ? `${labels.join(', ')}${suffix}` : 'No fields found';
+}
+
+function schemaStarterPrompts(label: string, kind: string): string[] {
+  return [
+    `What can I ask about ${label}?`,
+    `Summarize ${label}.`,
+    `Find data quality issues in ${label}.`
+  ].map((prompt) => kind === 'index' ? prompt.replace('data quality issues', 'unusual patterns') : prompt);
 }
 
 function ConnectionLogo({ kind }: { kind: ConnectionLogoKind }) {
@@ -280,6 +418,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [busy, setBusy] = useState(false);
   const [answerGenerating, setAnswerGenerating] = useState(false);
   const [activeInspector, setActiveInspector] = useState<InspectorTab>('schema');
+  const [schemaViewMode, setSchemaViewMode] = useState<SchemaViewMode>('pro');
+  const [schemaSearch, setSchemaSearch] = useState('');
+  const [expandedSchemaItems, setExpandedSchemaItems] = useState<Record<string, boolean>>({});
+  const [schemaScrolled, setSchemaScrolled] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(loadInitialTheme);
   const [elasticsearchFormOpen, setElasticsearchFormOpen] = useState(false);
   const [elasticsearchHost, setElasticsearchHost] = useState('localhost');
@@ -303,6 +445,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [resizeDrag, setResizeDrag] = useState<ResizeDrag | null>(null);
   const shellRef = useRef<HTMLElement | null>(null);
+  const recentChatsRef = useRef<HTMLDivElement | null>(null);
+  const schemaPanelRef = useRef<HTMLElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   function appendLog(level: LogLevel, message: string, detail?: string) {
@@ -380,6 +524,15 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }, [settings.model]);
 
   useEffect(() => {
+    setSchemaSearch('');
+    setExpandedSchemaItems({});
+    setSchemaScrolled(false);
+    if (schemaPanelRef.current) {
+      schemaPanelRef.current.scrollTop = 0;
+    }
+  }, [schema]);
+
+  useEffect(() => {
     if (!api || !query) {
       setValidation(null);
       return;
@@ -395,6 +548,22 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, answerGenerating]);
+
+  useEffect(() => {
+    if (!recentChatsOpen) {
+      return;
+    }
+
+    function closeRecentChats(event: PointerEvent) {
+      if (event.target instanceof Node && recentChatsRef.current?.contains(event.target)) {
+        return;
+      }
+      setRecentChatsOpen(false);
+    }
+
+    window.addEventListener('pointerdown', closeRecentChats);
+    return () => window.removeEventListener('pointerdown', closeRecentChats);
+  }, [recentChatsOpen]);
 
   useEffect(() => {
     if (!resizeDrag) {
@@ -467,6 +636,18 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     }
     return models.filter((model) => `${model.id} ${model.name}`.toLowerCase().includes(query));
   }, [modelSearch, models]);
+
+  const schemaTables = useMemo(() => sortSchemaTables(schema?.tables ?? []), [schema]);
+  const filteredSchemaTables = useMemo(() => {
+    const search = schemaSearch.trim().toLowerCase();
+    if (!search) {
+      return schemaTables;
+    }
+    return schemaTables.filter((table) => schemaSearchText(table).includes(search));
+  }, [schemaSearch, schemaTables]);
+  const schemaSearchActive = schemaSearch.trim().length > 0;
+  const allSchemaItemsExpanded = filteredSchemaTables.length > 0
+    && filteredSchemaTables.every((table) => expandedSchemaItems[table.name]);
 
   const hasOnlyWelcomeMessage = messages.length === 1 && messages[0]?.role === 'assistant';
   const activeChatTitle = buildChatTitle(messages, connection);
@@ -685,6 +866,21 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     }
     await refreshHistories();
     updateStatus('Chat deleted');
+  }
+
+  async function clearChatHistory() {
+    if (!api || !chatSessions.length) return;
+    await api.clearChatSessions();
+    setActiveChatId(null);
+    setMessages(createInitialMessages());
+    setPrompt('');
+    setQuery('');
+    setValidation(null);
+    setResult(null);
+    setActiveInspector('schema');
+    setRecentChatsOpen(false);
+    await refreshHistories();
+    updateStatus('Chat history cleared');
   }
 
   async function deleteConnection(id: string) {
@@ -907,6 +1103,42 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setPrompt(starterPrompt);
   }
 
+  function chooseSchemaPrompt(starterPrompt: string) {
+    setPrompt(starterPrompt);
+    setActiveView('workspace');
+  }
+
+  function toggleSchemaItem(name: string) {
+    setExpandedSchemaItems((current) => ({
+      ...current,
+      [name]: !current[name]
+    }));
+  }
+
+  function toggleAllSchemaItems() {
+    setExpandedSchemaItems((current) => {
+      const next = { ...current };
+      for (const table of filteredSchemaTables) {
+        next[table.name] = !allSchemaItemsExpanded;
+      }
+      return next;
+    });
+  }
+
+  function handleSchemaScroll(event: ReactUIEvent<HTMLElement>) {
+    setSchemaScrolled(event.currentTarget.scrollTop > 80);
+  }
+
+  function scrollSchemaToTop() {
+    const panel = schemaPanelRef.current;
+    if (!panel) return;
+    panel.scrollTo?.({ top: 0, behavior: 'smooth' });
+    if (!panel.scrollTo) {
+      panel.scrollTop = 0;
+    }
+    setSchemaScrolled(false);
+  }
+
   function getShellWidth(): number {
     return shellRef.current?.getBoundingClientRect().width ?? 0;
   }
@@ -1015,27 +1247,137 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     }
 
     return (
-      <section className="inspector-body schema-panel" aria-label="Schema">
+      <section className="inspector-body schema-panel" aria-label="Schema" onScroll={handleSchemaScroll} ref={schemaPanelRef}>
         {schema ? (
           <>
             <div className="schema-summary">
               <Database size={18} />
               <div>
-                <strong>{connection?.label ?? 'Database'}</strong>
+                <strong>{connection?.label ?? schema.label ?? 'Database'}</strong>
                 <span>{schemaSummary}</span>
               </div>
             </div>
-            <div className="schema-list">
-              {schema.tables.map((table) => (
-                <article className="schema-card" key={table.name}>
-                  <div>
-                    <strong>{table.name}</strong>
-                    <span>{table.columns.length} columns</span>
-                  </div>
-                  <p>{table.columns.map((column) => column.name).join(', ') || 'No columns found'}</p>
-                </article>
-              ))}
+            <div className="schema-toolbar">
+              <label className="schema-search">
+                <Search size={14} />
+                <input
+                  aria-label="Search schema"
+                  onChange={(event) => setSchemaSearch(event.target.value)}
+                  placeholder={`Search ${schemaObjectPlural(schema.kind)} or fields`}
+                  type="search"
+                  value={schemaSearch}
+                />
+              </label>
+              <div className="schema-view-toggle" aria-label="Schema view">
+                {(['pro', 'raw'] as const).map((mode) => (
+                  <button
+                    aria-pressed={schemaViewMode === mode}
+                    className={schemaViewMode === mode ? 'active' : ''}
+                    key={mode}
+                    onClick={() => setSchemaViewMode(mode)}
+                    type="button"
+                  >
+                    {mode === 'pro' ? 'Pro' : 'Raw'}
+                  </button>
+                ))}
+              </div>
+              {!schemaSearchActive && filteredSchemaTables.length > 0 && (
+                <button type="button" className="schema-expand-all" onClick={toggleAllSchemaItems}>
+                  {allSchemaItemsExpanded ? 'Collapse all' : 'Expand all'}
+                </button>
+              )}
             </div>
+            {filteredSchemaTables.length ? (
+              <div className="schema-list">
+                {filteredSchemaTables.map((table) => {
+                  const objectKind = schemaObjectKind(schema.kind);
+                  const friendlyName = humanizeIdentifier(table.name);
+                  const displayName = schemaViewMode === 'pro' ? friendlyName : table.name;
+                  const expanded = schemaSearchActive || Boolean(expandedSchemaItems[table.name]);
+                  return (
+                    <article className={`schema-card ${expanded ? 'expanded' : ''}`} key={table.name}>
+                      <button
+                        aria-expanded={expanded}
+                        className="schema-card-header"
+                        onClick={() => toggleSchemaItem(table.name)}
+                        type="button"
+                      >
+                        <ChevronDown size={15} />
+                        <span>
+                          <strong>{displayName}</strong>
+                          {schemaViewMode === 'pro' && table.name !== friendlyName && <small>{table.name}</small>}
+                        </span>
+                        <em>{objectKind}</em>
+                        <b>{table.columns.length} {table.columns.length === 1 ? 'field' : 'fields'}</b>
+                      </button>
+                      <p>{schemaFieldPreview(table.columns, schemaViewMode)}</p>
+                      {expanded && (
+                        <div className="schema-card-detail">
+                          {schemaViewMode === 'pro' ? (
+                            <>
+                              <div className="schema-prompt-row">
+                                {schemaStarterPrompts(friendlyName, objectKind).map((starterPrompt) => (
+                                  <button type="button" onClick={() => chooseSchemaPrompt(starterPrompt)} key={starterPrompt}>
+                                    {starterPrompt}
+                                  </button>
+                                ))}
+                              </div>
+                              {groupedSchemaFields(table.columns).map((group) => (
+                                <section className="schema-field-group" key={group.group}>
+                                  <h3>{group.group}</h3>
+                                  <div className="schema-field-list">
+                                    {group.fields.map((column) => (
+                                      <div className="schema-field-row" key={column.name}>
+                                        <span>
+                                          <strong>{humanizeIdentifier(column.name)}</strong>
+                                          <small>{column.name}</small>
+                                        </span>
+                                        <em>{column.type}</em>
+                                        {column.primaryKey && <b>Primary</b>}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </section>
+                              ))}
+                            </>
+                          ) : (
+                            <div className="schema-field-list raw">
+                              {table.columns.map((column) => (
+                                <div className="schema-field-row" key={column.name}>
+                                  <span>
+                                    <strong>{column.name}</strong>
+                                    <small>{fieldGroup(column)}</small>
+                                  </span>
+                                  <em>{column.type}</em>
+                                  {column.primaryKey && <b>Primary</b>}
+                                  <b>{column.nullable ? 'Nullable' : 'Required'}</b>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="empty-state schema-empty">
+                <Search size={22} />
+                <span>No schema matches found.</span>
+              </div>
+            )}
+            {schemaScrolled && (
+              <button
+                aria-label="Return to top of schema"
+                className="schema-return-top"
+                onClick={scrollSchemaToTop}
+                type="button"
+              >
+                <ArrowUp size={14} />
+                Top
+              </button>
+            )}
           </>
         ) : (
           <div className="empty-state">
@@ -1334,10 +1676,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
               </div>
             </section>
           </div>
-          <div className="focus-status" title={status}>
-            <Sparkles size={15} />
-            <span>{status}</span>
-          </div>
         </section>
       );
     }
@@ -1350,16 +1688,18 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
               <p>Saved conversations</p>
               <h2>History</h2>
             </div>
-            <button type="button" className="primary-button" onClick={resetChat}>
-              <Plus size={16} />
-              New chat
-            </button>
+            <div className="focus-header-actions">
+              <button type="button" className="secondary-button" onClick={() => void clearChatHistory()} disabled={!chatSessions.length || !api}>
+                <Trash2 size={16} />
+                Clear all
+              </button>
+              <button type="button" className="primary-button" onClick={resetChat}>
+                <Plus size={16} />
+                New chat
+              </button>
+            </div>
           </header>
           <section className="focus-panel history-section">{renderChatHistory()}</section>
-          <div className="focus-status" title={status}>
-            <Sparkles size={15} />
-            <span>{status}</span>
-          </div>
         </section>
       );
     }
@@ -1452,10 +1792,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             </div>
           </section>
         )}
-        <div className="focus-status" title={status}>
-          <Sparkles size={15} />
-          <span>{status}</span>
-        </div>
       </section>
     );
   }
@@ -1487,7 +1823,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
               <Plus size={19} />
               <span className="rail-tooltip">New chat</span>
             </button>
-            <div className="recent-anchor">
+            <div className="recent-anchor" ref={recentChatsRef}>
               <button
                 aria-expanded={recentChatsOpen}
                 aria-label="Recent chats"
