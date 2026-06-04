@@ -44,7 +44,7 @@ function registerIpc(): void {
   ipcMain.handle('dbchat:execute-query', (_event, query: string, mode: QueryExecutionMode) => {
     return controller.requireConnector().executeQuery(query, mode);
   });
-  ipcMain.handle('dbchat:send-chat', (_event, messages) => controller.sendChat(messages));
+  ipcMain.handle('dbchat:send-chat', (event, messages, turnId?: string) => controller.sendChat(messages, turnId, event.sender));
   ipcMain.handle('dbchat:load-settings', () => controller.loadSettings());
   ipcMain.handle('dbchat:save-settings', (_event, settings: PersistedSettings) => controller.saveSettings(settings));
   ipcMain.handle('dbchat:save-api-key', (_event, provider: ModelProviderKind, apiKey: string) => controller.saveApiKey(provider, apiKey));

@@ -20,6 +20,39 @@ describe('model provider request shaping', () => {
     expect(request.body.model).toBe('gpt-4.1-mini');
   });
 
+  it('builds strict tool-call requests with parallel tool execution enabled', () => {
+    const tools = [{
+      type: 'function' as const,
+      function: {
+        name: 'run_database_query',
+        description: 'Run a query.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            purpose: { type: 'string' }
+          },
+          required: ['query', 'purpose'],
+          additionalProperties: false
+        }
+      }
+    }];
+    const request = buildOpenAIRequest(messages, {
+      model: 'gpt-4.1-mini',
+      apiKey: 'key',
+      tools,
+      toolChoice: 'auto',
+      parallelToolCalls: true
+    });
+
+    expect(request.body.tools).toEqual(tools);
+    expect(request.body.tool_choice).toBe('auto');
+    expect(request.body.parallel_tool_calls).toBe(true);
+    expect(request.body.tools?.[0].function.strict).toBe(true);
+    expect(request.body.tools?.[0].function.parameters.additionalProperties).toBe(false);
+  });
+
   it('normalizes accidental whitespace in API keys', () => {
     expect(normalizeApiKey('  sk-test\n')).toBe('sk-test');
   });

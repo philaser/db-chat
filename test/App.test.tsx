@@ -1,10 +1,16 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/renderer/App';
-import type { DatabaseSchema, DbChatApi } from '../src/shared/types';
+import type { ChatProgressEvent, DatabaseSchema, DbChatApi } from '../src/shared/types';
 
-function makeApi(): DbChatApi {
-  return {
+type TestDbChatApi = DbChatApi & {
+  emitProgress: (event: ChatProgressEvent) => void;
+};
+
+function makeApi(): TestDbChatApi {
+  let progressListener: ((event: ChatProgressEvent) => void) | null = null;
+  let subscribedTurnId: string | null = null;
+  const api: DbChatApi = {
     chooseSqliteFile: vi.fn(),
     connect: vi.fn(),
     getSchema: vi.fn(),
@@ -42,6 +48,16 @@ function makeApi(): DbChatApi {
         elapsedMs: 1
       }
     })),
+    onChatProgress: vi.fn((turnId, listener) => {
+      subscribedTurnId = turnId;
+      progressListener = listener;
+      return vi.fn(() => {
+        if (subscribedTurnId === turnId) {
+          subscribedTurnId = null;
+          progressListener = null;
+        }
+      });
+    }),
     loadSettings: vi.fn(async () => ({
       provider: 'openrouter' as const,
       model: 'openai/gpt-4.1-mini',
@@ -65,11 +81,19 @@ function makeApi(): DbChatApi {
     listConnections: vi.fn(async () => []),
     deleteConnection: vi.fn()
   };
+  return {
+    ...api,
+    emitProgress: (event: ChatProgressEvent) => progressListener?.({
+      ...event,
+      turnId: event.turnId === 'active-turn' && subscribedTurnId ? subscribedTurnId : event.turnId
+    })
+  };
 }
 
 describe('App', () => {
   beforeEach(() => {
     Element.prototype.scrollIntoView = vi.fn();
+    Element.prototype.scrollTo = vi.fn();
     window.localStorage.clear();
     document.documentElement.removeAttribute('data-theme');
   });
@@ -91,7 +115,7 @@ describe('App', () => {
     expect(await screen.findByDisplayValue('select name from users;')).toBeInTheDocument();
     expect(api.sendChat).toHaveBeenCalledWith(expect.arrayContaining([
       expect.objectContaining({ role: 'user', content: 'show users' })
-    ]));
+    ]), expect.any(String));
     await waitFor(() => {
       expect(api.saveChatSession).toHaveBeenCalledWith(expect.objectContaining({
         title: 'show users',
@@ -137,8 +161,9 @@ describe('App', () => {
     });
     fireEvent.click(screen.getByLabelText('Send message'));
 
-    expect(await screen.findByLabelText('Generating answer')).toBeInTheDocument();
-    expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+    expect(await screen.findByText('Thinking...')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Query activity')).not.toBeInTheDocument();
+    expect(Element.prototype.scrollTo).toHaveBeenCalled();
 
     resolveChat({
       message: {
@@ -150,9 +175,245 @@ describe('App', () => {
     });
 
     await waitFor(() => {
-      expect(screen.queryByLabelText('Generating answer')).not.toBeInTheDocument();
+      expect(screen.queryByText('Preparing answer...')).not.toBeInTheDocument();
       expect(screen.getByText('Done.')).toBeInTheDocument();
     });
+  });
+
+  it('does not render an empty live activity panel before the first streamed query event', async () => {
+    const api = makeApi();
+    vi.mocked(api.sendChat).mockReturnValueOnce(new Promise(() => undefined));
+    render(<App api={api} />);
+
+    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
+      target: { value: 'show users' }
+    });
+    fireEvent.click(screen.getByLabelText('Send message'));
+
+    expect(await screen.findByText('Thinking...')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Query activity')).not.toBeInTheDocument();
+  });
+
+  it('updates one activity row as a query moves through stages', async () => {
+    const api = makeApi();
+    let resolveChat: (value: Awaited<ReturnType<DbChatApi['sendChat']>>) => void = () => undefined;
+    vi.mocked(api.sendChat).mockReturnValueOnce(new Promise((resolve) => {
+      resolveChat = resolve;
+    }));
+    render(<App api={api} />);
+
+    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
+      target: { value: 'count customers' }
+    });
+    fireEvent.click(screen.getByLabelText('Send message'));
+
+    const queryStep = {
+      turnId: 'active-turn',
+      step: {
+        id: 'step-validating',
+        queryId: 'query-1',
+        status: 'validating' as const,
+        title: 'Count customers living in cities where employees also live',
+        query: 'select count(*) from customers;',
+        createdAt: new Date().toISOString()
+      }
+    };
+    act(() => api.emitProgress(queryStep));
+    await waitFor(() => {
+      expect(Element.prototype.scrollTo).toHaveBeenCalled();
+    });
+    act(() => api.emitProgress({
+      ...queryStep,
+      step: {
+        ...queryStep.step,
+        id: 'step-running',
+        status: 'running' as const
+      }
+    }));
+    const successStep = {
+      ...queryStep,
+      step: {
+        ...queryStep.step,
+        id: 'step-success',
+        status: 'success' as const,
+        detail: '1 row returned.',
+        rowCount: 1,
+        elapsedMs: 2
+      }
+    };
+    act(() => api.emitProgress(successStep));
+
+    const activity = screen.getByLabelText('Query activity');
+    expect(within(activity).getAllByText('Count customers living in cities where employees also live')).toHaveLength(2);
+    expect(within(activity).getByText('success')).toBeInTheDocument();
+    expect(within(activity).queryByText('validating')).not.toBeInTheDocument();
+    expect(within(activity).queryByText('running')).not.toBeInTheDocument();
+    expect(Element.prototype.scrollTo).toHaveBeenCalled();
+
+    resolveChat({
+      message: {
+        id: 'assistant-done',
+        role: 'assistant' as const,
+        content: 'Done.',
+        createdAt: new Date().toISOString()
+      },
+      activity: [successStep.step]
+    });
+
+    await waitFor(() => expect(screen.getByText('Done.')).toBeInTheDocument());
+    const completedActivity = screen.getByLabelText('Query activity');
+    fireEvent.click(within(completedActivity).getByRole('button'));
+    expect(within(completedActivity).getByText('success')).toBeInTheDocument();
+    expect(within(completedActivity).getByText('select count(*) from customers;')).toBeInTheDocument();
+  });
+
+  it('keeps earlier activity summaries after later responses', async () => {
+    const api = makeApi();
+    vi.mocked(api.sendChat)
+      .mockResolvedValueOnce({
+        message: {
+          id: 'assistant-first',
+          role: 'assistant' as const,
+          content: 'First answer.',
+          createdAt: new Date().toISOString()
+        },
+        activity: [{
+          id: 'first-step',
+          queryId: 'first-query',
+          status: 'success' as const,
+          title: 'First query',
+          query: 'select 1;',
+          rowCount: 1,
+          elapsedMs: 1,
+          createdAt: new Date().toISOString()
+        }]
+      })
+      .mockResolvedValueOnce({
+        message: {
+          id: 'assistant-second',
+          role: 'assistant' as const,
+          content: 'Second answer.',
+          createdAt: new Date().toISOString()
+        },
+        activity: [{
+          id: 'second-step',
+          queryId: 'second-query',
+          status: 'success' as const,
+          title: 'Second query',
+          query: 'select 2;',
+          rowCount: 1,
+          elapsedMs: 2,
+          createdAt: new Date().toISOString()
+        }]
+      });
+    render(<App api={api} />);
+
+    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
+      target: { value: 'first question' }
+    });
+    fireEvent.click(screen.getByLabelText('Send message'));
+    expect(await screen.findByText('First answer.')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
+      target: { value: 'second question' }
+    });
+    fireEvent.click(screen.getByLabelText('Send message'));
+    expect(await screen.findByText('Second answer.')).toBeInTheDocument();
+
+    const activities = screen.getAllByLabelText('Query activity');
+    expect(activities).toHaveLength(2);
+    fireEvent.click(within(activities[0]).getByRole('button'));
+    fireEvent.click(within(activities[1]).getByRole('button'));
+    expect(within(activities[0]).getByText('select 1;')).toBeInTheDocument();
+    expect(within(activities[1]).getByText('select 2;')).toBeInTheDocument();
+  });
+
+  it('renders streamed query stages in the live panel on a second turn', async () => {
+    const api = makeApi();
+    let resolveSecondChat: (value: Awaited<ReturnType<DbChatApi['sendChat']>>) => void = () => undefined;
+    vi.mocked(api.sendChat)
+      .mockResolvedValueOnce({
+        message: {
+          id: 'assistant-first',
+          role: 'assistant' as const,
+          content: 'First answer.',
+          createdAt: new Date().toISOString()
+        },
+        activity: [{
+          id: 'first-step',
+          queryId: 'first-query',
+          status: 'success' as const,
+          title: 'First query',
+          query: 'select 1;',
+          rowCount: 1,
+          elapsedMs: 1,
+          createdAt: new Date().toISOString()
+        }]
+      })
+      .mockReturnValueOnce(new Promise((resolve) => {
+        resolveSecondChat = resolve;
+      }));
+    render(<App api={api} />);
+
+    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
+      target: { value: 'first question' }
+    });
+    fireEvent.click(screen.getByLabelText('Send message'));
+    expect(await screen.findByText('First answer.')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
+      target: { value: 'second question' }
+    });
+    fireEvent.click(screen.getByLabelText('Send message'));
+    act(() => api.emitProgress({
+      turnId: 'completed-turn',
+      step: {
+        id: 'stale-running',
+        queryId: 'stale-query',
+        status: 'running' as const,
+        title: 'Stale query should not render',
+        query: 'select 0;',
+        createdAt: new Date().toISOString()
+      }
+    }));
+    expect(screen.queryByText('Stale query should not render')).not.toBeInTheDocument();
+
+    act(() => api.emitProgress({
+      turnId: 'active-turn',
+      step: {
+        id: 'second-running',
+        queryId: 'second-query',
+        status: 'running' as const,
+        title: 'Second query is running',
+        query: 'select 2;',
+        createdAt: new Date().toISOString()
+      }
+    }));
+
+    const liveActivity = screen.getAllByLabelText('Query activity').at(-1) as HTMLElement;
+    expect(within(liveActivity).getAllByText('Second query is running').length).toBeGreaterThan(0);
+    expect(within(liveActivity).getByText('running')).toBeInTheDocument();
+    expect(within(liveActivity).getByText('select 2;')).toBeInTheDocument();
+
+    resolveSecondChat({
+      message: {
+        id: 'assistant-second',
+        role: 'assistant' as const,
+        content: 'Second answer.',
+        createdAt: new Date().toISOString()
+      },
+      activity: [{
+        id: 'second-success',
+        queryId: 'second-query',
+        status: 'success' as const,
+        title: 'Second query is running',
+        query: 'select 2;',
+        rowCount: 1,
+        elapsedMs: 2,
+        createdAt: new Date().toISOString()
+      }]
+    });
+    expect(await screen.findByText('Second answer.')).toBeInTheDocument();
   });
 
   it('shows blocked validation for unsafe SQL', async () => {
@@ -462,7 +723,7 @@ describe('App', () => {
         elasticsearchRememberPassword: true
       }));
     });
-    expect(await screen.findByPlaceholderText('Search indexes or fields')).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText('Search indices or fields')).toBeInTheDocument();
     expect(await screen.findByText('orders')).toBeInTheDocument();
   });
 
