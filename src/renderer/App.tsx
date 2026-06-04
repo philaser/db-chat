@@ -22,7 +22,8 @@ import {
   Search,
   Sun,
   Table2,
-  Trash2
+  Trash2,
+  XCircle
 } from 'lucide-react';
 import {
   FormEvent,
@@ -47,6 +48,7 @@ import {
 } from 'simple-icons';
 import type {
   ChatMessage,
+  ChatActivityStep,
   ConnectionConfig,
   ConnectionHistoryItem,
   DatabaseSchema,
@@ -114,6 +116,26 @@ type ResizeDrag = {
   startX: number;
   staticPanelWidth: number;
 };
+
+declare global {
+  interface Window {
+    __dbchatActivityDebug?: {
+      activeTurnId: string | null;
+      answerGenerating: boolean;
+      activityOpen: boolean;
+      chatActivity: ChatActivityStep[];
+      messages: Array<{ id: string; role: ChatMessage['role']; content: string }>;
+      status: string;
+      updatedAt: string;
+    };
+  }
+}
+
+function logActivityDebug(message: string, detail?: unknown) {
+  if (window.localStorage.getItem('dbchat:activity-debug') === '1') {
+    console.log(`[dbchat:activity:renderer] ${message}`, detail);
+  }
+}
 
 const leftPanelWidth = 74;
 const rightPanelDefaultWidth = 380;
@@ -388,6 +410,136 @@ function getPanelMaxWidth(shellWidth: number, staticPanelWidth: number, minWidth
   return Math.max(minWidth, Math.min(maxWidth, shellWidth - staticPanelWidth - chatPaneMinWidth));
 }
 
+function activitySummary(activity: ChatActivityStep[], generating: boolean): string {
+  if (!activity.length) {
+    return generating ? 'Preparing answer...' : 'No database checks needed';
+  }
+  const completedQueries = activity.filter((step) => step.status === 'success').length;
+  const blockedQueries = activity.filter((step) => step.status === 'blocked' || step.status === 'error').length;
+  const elapsed = activity.reduce((sum, step) => sum + (step.elapsedMs ?? 0), 0);
+  if (generating) {
+    return activity.at(-1)?.title ?? 'Working...';
+  }
+  if (completedQueries) {
+    return `Checked ${completedQueries} quer${completedQueries === 1 ? 'y' : 'ies'}${elapsed ? ` in ${elapsed} ms` : ''}`;
+  }
+  if (blockedQueries) {
+    return `${blockedQueries} query ${blockedQueries === 1 ? 'was' : 'were'} blocked or failed`;
+  }
+  return activity.at(-1)?.title ?? 'Answer ready';
+}
+
+function activityIcon(step: ChatActivityStep) {
+  if (step.status === 'success' || step.status === 'complete') {
+    return <CheckCircle2 size={14} />;
+  }
+  if (step.status === 'blocked' || step.status === 'error') {
+    return <XCircle size={14} />;
+  }
+  if (step.status === 'running' || step.status === 'thinking') {
+    return <Loader2 className="message-spinner" size={14} />;
+  }
+  return <Clock3 size={14} />;
+}
+
+function mergeActivityStep(activity: ChatActivityStep[], step: ChatActivityStep): ChatActivityStep[] {
+  const existingIndex = step.queryId
+    ? activity.findIndex((current) => current.queryId === step.queryId)
+    : activity.findIndex((current) => !current.queryId && current.title === step.title);
+  if (existingIndex < 0) {
+    const next = [...activity, step];
+    logActivityDebug('merge append', {
+      stepId: step.id,
+      queryId: step.queryId,
+      status: step.status,
+      title: step.title,
+      before: activity.length,
+      after: next.length
+    });
+    return next;
+  }
+  const next = activity.map((current, index) => index === existingIndex ? { ...current, ...step } : current);
+  logActivityDebug('merge update', {
+    stepId: step.id,
+    queryId: step.queryId,
+    status: step.status,
+    title: step.title,
+    existingIndex,
+    before: activity.length,
+    after: next.length
+  });
+  return next;
+}
+
+function ChatActivityPanel({
+  activity,
+  generating,
+  open,
+  onToggle
+}: {
+  activity: ChatActivityStep[];
+  generating: boolean;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const querySteps = activity.filter((step) => step.status !== 'thinking');
+  const visibleSteps = querySteps.length ? querySteps : activity;
+  logActivityDebug('panel render', {
+    generating,
+    open,
+    activityCount: activity.length,
+    visibleCount: visibleSteps.length,
+    latest: activity.at(-1)
+  });
+  return (
+    <div className={`activity-panel ${open ? 'open' : 'collapsed'}`} aria-live="polite" aria-label="Query activity">
+      <button type="button" className="activity-summary" onClick={onToggle} aria-expanded={open}>
+        {generating ? <Loader2 className="message-spinner" size={16} /> : <Sparkles size={16} />}
+        <span>{activitySummary(activity, generating)}</span>
+        <ChevronDown className="activity-chevron" size={16} />
+      </button>
+      <div className="activity-steps" aria-hidden={!open}>
+        {visibleSteps.map((step) => (
+          <div className={`activity-step ${step.status}`} key={step.queryId ?? step.id}>
+            <span className="activity-step-icon">{activityIcon(step)}</span>
+            <div>
+              <div className="activity-step-title">
+                <span>{step.title}</span>
+                <small className={`activity-stage ${step.status}`}>{step.status}</small>
+                {step.rowCount !== undefined && <small>{step.rowCount} rows</small>}
+                {step.elapsedMs !== undefined && <small>{step.elapsedMs} ms</small>}
+              </div>
+              {step.detail && <p>{step.detail}</p>}
+              {step.query && <code>{step.query}</code>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function renderChatActivityPanel({
+  activity,
+  generating,
+  open,
+  onToggle
+}: {
+  activity: ChatActivityStep[];
+  generating: boolean;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <ChatActivityPanel
+      activity={activity}
+      generating={generating}
+      open={open}
+      onToggle={onToggle}
+    />
+  );
+}
+
 export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [connection, setConnection] = useState<ConnectionConfig | null>(null);
   const [schema, setSchema] = useState<DatabaseSchema | null>(null);
@@ -417,6 +569,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [status, setStatus] = useState('Ready');
   const [busy, setBusy] = useState(false);
   const [answerGenerating, setAnswerGenerating] = useState(false);
+  const [chatActivity, setChatActivity] = useState<ChatActivityStep[]>([]);
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [messageActivities, setMessageActivities] = useState<Record<string, ChatActivityStep[]>>({});
+  const [messageActivityOpen, setMessageActivityOpen] = useState<Record<string, boolean>>({});
   const [activeInspector, setActiveInspector] = useState<InspectorTab>('schema');
   const [schemaViewMode, setSchemaViewMode] = useState<SchemaViewMode>('pro');
   const [schemaSearch, setSchemaSearch] = useState('');
@@ -447,7 +603,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const shellRef = useRef<HTMLElement | null>(null);
   const recentChatsRef = useRef<HTMLDivElement | null>(null);
   const schemaPanelRef = useRef<HTMLElement | null>(null);
+  const messagesRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const activeChatTurnIdRef = useRef<string | null>(null);
 
   function appendLog(level: LogLevel, message: string, detail?: string) {
     setLogs((current) => [{
@@ -545,9 +703,54 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     return () => window.clearTimeout(timeout);
   }, [api, query, settings.safeMode]);
 
+  function scrollMessagesToEnd(reason: string) {
+    const messagesElement = messagesRef.current;
+    if (messagesElement) {
+      messagesElement.scrollTo({ top: messagesElement.scrollHeight, behavior: 'auto' });
+    } else {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+    }
+    logActivityDebug('scroll to end', {
+      reason,
+      messages: messages.length,
+      answerGenerating,
+      activityOpen,
+      activityCount: chatActivity.length,
+      latest: chatActivity.at(-1),
+      scrollTop: messagesElement?.scrollTop,
+      scrollHeight: messagesElement?.scrollHeight,
+      clientHeight: messagesElement?.clientHeight
+    });
+  }
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages, answerGenerating]);
+    scrollMessagesToEnd('layout effect');
+    const frame = window.requestAnimationFrame(() => scrollMessagesToEnd('activity frame'));
+    const shortTimer = window.setTimeout(() => scrollMessagesToEnd('activity short timer'), 80);
+    const transitionTimer = window.setTimeout(() => scrollMessagesToEnd('activity transition timer'), 280);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(shortTimer);
+      window.clearTimeout(transitionTimer);
+    };
+  }, [messages, answerGenerating, chatActivity, activityOpen]);
+
+  useEffect(() => {
+    window.__dbchatActivityDebug = {
+      activeTurnId: activeChatTurnIdRef.current,
+      answerGenerating,
+      activityOpen,
+      chatActivity,
+      messages: messages.map((message) => ({
+        id: message.id,
+        role: message.role,
+        content: message.content.slice(0, 160)
+      })),
+      status,
+      updatedAt: new Date().toISOString()
+    };
+    logActivityDebug('state snapshot', window.__dbchatActivityDebug);
+  }, [answerGenerating, activityOpen, chatActivity, messages, status]);
 
   useEffect(() => {
     if (!recentChatsOpen) {
@@ -694,6 +897,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setQuery('');
     setValidation(null);
     setResult(null);
+    setChatActivity([]);
+    setActivityOpen(false);
+    setMessageActivities({});
+    setMessageActivityOpen({});
     setActiveInspector('schema');
     setActiveView('workspace');
     setRecentChatsOpen(false);
@@ -825,6 +1032,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setPrompt('');
     setQuery(session.query ?? '');
     setResult(session.result ?? null);
+    setChatActivity([]);
+    setActivityOpen(false);
+    setMessageActivities({});
+    setMessageActivityOpen({});
     setActiveInspector(session.result ? 'results' : session.query ? 'query' : 'schema');
     setActiveView('workspace');
     setRecentChatsOpen(false);
@@ -877,6 +1088,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setQuery('');
     setValidation(null);
     setResult(null);
+    setChatActivity([]);
+    setActivityOpen(false);
+    setMessageActivities({});
+    setMessageActivityOpen({});
     setActiveInspector('schema');
     setRecentChatsOpen(false);
     await refreshHistories();
@@ -997,8 +1212,20 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
     const userMessage = nowMessage('user', prompt.trim());
     const nextMessages = [...messages, userMessage];
+    const turnId = crypto.randomUUID();
+    activeChatTurnIdRef.current = turnId;
+    const unsubscribeProgress = api.onChatProgress(turnId, (progressEvent) => {
+      if (progressEvent.turnId !== activeChatTurnIdRef.current) {
+        return;
+      }
+      setChatActivity((current) => mergeActivityStep(current, progressEvent.step));
+      setActivityOpen(true);
+      updateStatus(progressEvent.step.title);
+    });
     setMessages((current) => [...current, userMessage]);
     setPrompt('');
+    setChatActivity([]);
+    setActivityOpen(false);
     setBusy(true);
     setAnswerGenerating(true);
     updateStatus('Thinking...');
@@ -1007,28 +1234,47 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         role: message.role,
         content: message.content
       }));
-      const response = await api.sendChat(chatHistory);
+      const response = await api.sendChat(chatHistory, turnId);
       const finalMessages = [...nextMessages, response.message];
       setMessages(finalMessages);
-      if (response.generatedQuery) {
-        setQuery(response.generatedQuery.query);
-        setValidation(response.generatedQuery.validation);
+      const latestQuery = response.generatedQueries?.at(-1) ?? response.generatedQuery;
+      const latestResult = response.queryResults?.at(-1) ?? response.queryResult;
+      const completedActivity = response.activity ?? [];
+      if (completedActivity.length) {
+        setMessageActivities((current) => ({
+          ...current,
+          [response.message.id]: completedActivity
+        }));
+        setMessageActivityOpen((current) => ({
+          ...current,
+          [response.message.id]: false
+        }));
+      }
+      setChatActivity([]);
+      setActivityOpen(false);
+      if (latestQuery) {
+        setQuery(latestQuery.query);
+        setValidation(latestQuery.validation);
         setActiveInspector('query');
       }
-      if (response.queryResult) {
-        setResult(response.queryResult);
+      if (latestResult) {
+        setResult(latestResult);
         setActiveInspector('results');
-        updateStatus(`Returned ${response.queryResult.rowCount} rows in ${response.queryResult.elapsedMs} ms`);
+        updateStatus(`Returned ${latestResult.rowCount} rows in ${latestResult.elapsedMs} ms`);
       } else {
         updateStatus('Response ready');
       }
       await persistChatSession(finalMessages, {
-        query: response.generatedQuery?.query ?? query,
-        result: response.queryResult ?? result ?? undefined
+        query: latestQuery?.query ?? query,
+        result: latestResult ?? result ?? undefined
       });
     } catch (error) {
       reportError('The chat request failed.', error);
     } finally {
+      unsubscribeProgress();
+      if (activeChatTurnIdRef.current === turnId) {
+        activeChatTurnIdRef.current = null;
+      }
       setAnswerGenerating(false);
       setBusy(false);
     }
@@ -1908,7 +2154,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           </div>
         </header>
 
-        <div className="messages">
+        <div className="messages" ref={messagesRef}>
           {hasOnlyWelcomeMessage && (
             <section className="welcome-panel" aria-label="Starter prompts">
               <div>
@@ -1929,19 +2175,37 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
               </div>
             </section>
           )}
-          {!hasOnlyWelcomeMessage && messages.map((message) => (
-            <article className={`message ${message.role}`} key={message.id}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-            </article>
-          ))}
-          {answerGenerating && (
-            <article className="message assistant generating" aria-live="polite" aria-label="Generating answer">
-              <Loader2 className="message-spinner" size={16} aria-hidden="true" />
-              <span>Generating answer</span>
-            </article>
-          )}
+          {!hasOnlyWelcomeMessage && messages.map((message) => {
+            const completedActivity = message.role === 'assistant' ? messageActivities[message.id] : undefined;
+            const shouldShowCompletedActivity = Boolean(completedActivity?.length);
+            return (
+              <article className={`message ${message.role}`} key={message.id}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                {shouldShowCompletedActivity && renderChatActivityPanel({
+                  activity: completedActivity ?? [],
+                  generating: false,
+                  open: messageActivityOpen[message.id] ?? false,
+                  onToggle: () => setMessageActivityOpen((current) => ({
+                    ...current,
+                    [message.id]: !(current[message.id] ?? false)
+                  }))
+                })}
+              </article>
+            );
+          })}
           <div ref={messagesEndRef} />
         </div>
+
+        {answerGenerating && chatActivity.length > 0 && (
+          <div className="live-activity-dock">
+            {renderChatActivityPanel({
+              activity: chatActivity,
+              generating: true,
+              open: activityOpen,
+              onToggle: () => setActivityOpen((current) => !current)
+            })}
+          </div>
+        )}
 
         <form className="composer" onSubmit={(event) => void sendChat(event)}>
           <textarea

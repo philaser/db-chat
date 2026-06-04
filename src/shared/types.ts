@@ -2,6 +2,7 @@ export type DatabaseKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres' | '
 export type ModelProviderKind = 'openrouter' | 'openai';
 export type QueryExecutionMode = 'safe' | 'manual';
 export type ChatRole = 'system' | 'user' | 'assistant';
+export type ChatActivityStatus = 'thinking' | 'validating' | 'running' | 'success' | 'blocked' | 'error' | 'complete';
 
 export interface ConnectionConfig {
   id: string;
@@ -75,10 +76,31 @@ export interface GeneratedQuery {
   validation: QueryValidationResult;
 }
 
+export interface ChatActivityStep {
+  id: string;
+  queryId?: string;
+  status: ChatActivityStatus;
+  title: string;
+  detail?: string;
+  query?: string;
+  validation?: QueryValidationResult;
+  rowCount?: number;
+  elapsedMs?: number;
+  createdAt: string;
+}
+
+export interface ChatProgressEvent {
+  turnId: string;
+  step: ChatActivityStep;
+}
+
 export interface ChatTurnResponse {
   message: ChatMessage;
   generatedQuery?: GeneratedQuery;
   queryResult?: QueryResult;
+  generatedQueries?: GeneratedQuery[];
+  queryResults?: QueryResult[];
+  activity?: ChatActivityStep[];
 }
 
 export interface ConnectionHistoryItem extends ConnectionConfig {
@@ -114,14 +136,43 @@ export interface ModelInfo {
 }
 
 export interface ModelChatMessage {
-  role: ChatRole;
+  role: ChatRole | 'tool';
   content: string;
+  tool_call_id?: string;
+  tool_calls?: ModelToolCall[];
 }
 
 export interface ModelChatOptions {
   model: string;
   apiKey: string;
   temperature?: number;
+  tools?: ModelTool[];
+  toolChoice?: 'auto' | 'none';
+  parallelToolCalls?: boolean;
+}
+
+export interface ModelTool {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    strict?: boolean;
+    parameters: Record<string, unknown>;
+  };
+}
+
+export interface ModelToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export interface ModelProviderResponse {
+  content: string;
+  toolCalls?: ModelToolCall[];
 }
 
 export interface ModelProvider {
@@ -129,6 +180,7 @@ export interface ModelProvider {
   readonly defaultModel: string;
   listModels(apiKey?: string): Promise<ModelInfo[]>;
   sendChat(messages: ModelChatMessage[], options: ModelChatOptions): Promise<string>;
+  sendChatWithTools(messages: ModelChatMessage[], options: ModelChatOptions): Promise<ModelProviderResponse>;
 }
 
 export interface DatabaseConnector {
@@ -146,7 +198,8 @@ export interface DbChatApi {
   getSchema(): Promise<DatabaseSchema | null>;
   validateQuery(query: string, mode: QueryExecutionMode): Promise<QueryValidationResult>;
   executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult>;
-  sendChat(messages: ModelChatMessage[]): Promise<ChatTurnResponse>;
+  sendChat(messages: ModelChatMessage[], turnId?: string): Promise<ChatTurnResponse>;
+  onChatProgress(turnId: string, listener: (event: ChatProgressEvent) => void): () => void;
   loadSettings(): Promise<PersistedSettings & { hasApiKey: boolean }>;
   saveSettings(settings: PersistedSettings): Promise<void>;
   saveApiKey(provider: ModelProviderKind, apiKey: string): Promise<void>;

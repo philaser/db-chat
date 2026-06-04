@@ -1,4 +1,12 @@
-import type { ModelChatMessage, ModelChatOptions, ModelInfo, ModelProvider } from '../../shared/types.js';
+import type {
+  ModelChatMessage,
+  ModelChatOptions,
+  ModelInfo,
+  ModelProvider,
+  ModelProviderResponse,
+  ModelTool,
+  ModelToolCall
+} from '../../shared/types.js';
 import { normalizeApiKey } from './apiKeys.js';
 
 export interface ProviderRequest {
@@ -8,6 +16,9 @@ export interface ProviderRequest {
     model: string;
     messages: ModelChatMessage[];
     temperature: number;
+    tools?: ModelTool[];
+    tool_choice?: 'auto' | 'none';
+    parallel_tool_calls?: boolean;
   };
 }
 
@@ -24,7 +35,10 @@ export function buildOpenRouterRequest(messages: ModelChatMessage[], options: Mo
     body: {
       model: options.model,
       messages,
-      temperature: options.temperature ?? 0.2
+      temperature: options.temperature ?? 0.2,
+      ...(options.tools ? { tools: options.tools } : {}),
+      ...(options.toolChoice ? { tool_choice: options.toolChoice } : {}),
+      ...(options.parallelToolCalls !== undefined ? { parallel_tool_calls: options.parallelToolCalls } : {})
     }
   };
 }
@@ -40,12 +54,15 @@ export function buildOpenAIRequest(messages: ModelChatMessage[], options: ModelC
     body: {
       model: options.model,
       messages,
-      temperature: options.temperature ?? 0.2
+      temperature: options.temperature ?? 0.2,
+      ...(options.tools ? { tools: options.tools } : {}),
+      ...(options.toolChoice ? { tool_choice: options.toolChoice } : {}),
+      ...(options.parallelToolCalls !== undefined ? { parallel_tool_calls: options.parallelToolCalls } : {})
     }
   };
 }
 
-async function sendProviderRequest(request: ProviderRequest): Promise<string> {
+async function sendProviderRequest(request: ProviderRequest): Promise<ModelProviderResponse> {
   const response = await fetch(request.url, {
     method: 'POST',
     headers: request.headers,
@@ -57,12 +74,20 @@ async function sendProviderRequest(request: ProviderRequest): Promise<string> {
     throw new Error(`Model request failed (${response.status}): ${details}`);
   }
 
-  const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const content = payload.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error('Model response did not include assistant content.');
+  const payload = await response.json() as {
+    choices?: Array<{ message?: { content?: string | null; tool_calls?: ModelToolCall[] } }>;
+  };
+  const message = payload.choices?.[0]?.message;
+  const content = message?.content ?? '';
+  const toolCalls = message?.tool_calls;
+  if (!content && !toolCalls?.length) {
+    throw new Error('Model response did not include assistant content or tool calls.');
   }
-  return content;
+  return { content, toolCalls };
+}
+
+async function sendProviderTextRequest(request: ProviderRequest): Promise<string> {
+  return (await sendProviderRequest(request)).content;
 }
 
 const openRouterFallbackModels: ModelInfo[] = [
@@ -112,6 +137,9 @@ export const openRouterProvider: ModelProvider = {
     }
   },
   async sendChat(messages, options): Promise<string> {
+    return sendProviderTextRequest(buildOpenRouterRequest(messages, options));
+  },
+  async sendChatWithTools(messages, options): Promise<ModelProviderResponse> {
     return sendProviderRequest(buildOpenRouterRequest(messages, options));
   }
 };
@@ -126,6 +154,9 @@ export const openAIProvider: ModelProvider = {
     ];
   },
   async sendChat(messages, options): Promise<string> {
+    return sendProviderTextRequest(buildOpenAIRequest(messages, options));
+  },
+  async sendChatWithTools(messages, options): Promise<ModelProviderResponse> {
     return sendProviderRequest(buildOpenAIRequest(messages, options));
   }
 };

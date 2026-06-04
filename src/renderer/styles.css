@@ -1761,6 +1761,293 @@ button:disabled {
   gap: 8px;
 }
 
+.activity-panel {
+  align-self: flex-start;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  border-color: var(--border);
+  color: var(--muted);
+  margin-top: 12px;
+  max-width: min(760px, 96%);
+  overflow: hidden;
+  padding: 0;
+  transition:
+    border-color var(--motion-medium) var(--ease-premium),
+    box-shadow var(--motion-medium) var(--ease-premium),
+    transform var(--motion-fast) var(--ease-snappy);
+}
+
+.messages > .activity-panel {
+  margin-top: 0;
+}
+
+.live-activity-dock {
+  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--surface) 96%, transparent) 34%);
+  display: flex;
+  justify-content: flex-start;
+  min-height: 0;
+  padding: 0 clamp(20px, 4vw, 48px) 10px;
+}
+
+.live-activity-dock .activity-panel {
+  margin-top: 0;
+  max-height: min(300px, 34vh);
+  max-width: min(760px, 100%);
+  width: min(760px, 100%);
+}
+
+.live-activity-dock .activity-steps {
+  max-height: min(220px, 26vh);
+}
+
+.activity-panel.open {
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.08);
+}
+
+.activity-summary {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  gap: 8px;
+  grid-template-columns: 18px minmax(0, 1fr) 18px;
+  padding: 9px 10px;
+  text-align: left;
+  transition:
+    background-color var(--motion-fast) var(--ease-snappy),
+    color var(--motion-fast) var(--ease-snappy);
+  width: 100%;
+}
+
+.activity-summary:hover {
+  background: color-mix(in srgb, var(--surface-2) 60%, transparent);
+}
+
+.activity-summary span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-chevron {
+  transition: transform var(--motion-medium) var(--ease-premium);
+}
+
+.activity-panel.collapsed .activity-chevron {
+  transform: rotate(-90deg);
+}
+
+.activity-steps {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 8px;
+  grid-template-rows: 1fr;
+  max-height: 420px;
+  opacity: 1;
+  overflow-y: auto;
+  padding: 10px;
+  transform: translateY(0);
+  transition:
+    max-height var(--motion-slow) var(--ease-premium),
+    opacity var(--motion-medium) var(--ease-premium),
+    padding var(--motion-medium) var(--ease-premium),
+    transform var(--motion-medium) var(--ease-premium);
+}
+
+.activity-panel.collapsed .activity-steps {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  padding-bottom: 0;
+  padding-top: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+}
+
+.activity-step {
+  animation: activityStepIn 260ms var(--ease-premium) both;
+  border-radius: 7px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  padding: 4px 2px;
+  transition:
+    background-color var(--motion-medium) var(--ease-premium),
+    color var(--motion-medium) var(--ease-premium),
+    opacity var(--motion-medium) var(--ease-premium),
+    transform var(--motion-medium) var(--ease-premium);
+}
+
+.activity-step.running,
+.activity-step.validating,
+.activity-step.thinking {
+  background: color-mix(in srgb, var(--surface-2) 48%, transparent);
+}
+
+.activity-step.success,
+.activity-step.complete {
+  animation: activityStepSettle 360ms var(--ease-premium) both;
+}
+
+.activity-step.blocked,
+.activity-step.error {
+  animation: activityStepAttention 360ms var(--ease-snappy) both;
+}
+
+.activity-step-icon {
+  display: inline-flex;
+  margin-top: 2px;
+  transition:
+    color var(--motion-medium) var(--ease-premium),
+    opacity var(--motion-medium) var(--ease-premium),
+    transform var(--motion-medium) var(--ease-premium);
+}
+
+.activity-step.running .activity-step-icon,
+.activity-step.validating .activity-step-icon,
+.activity-step.thinking .activity-step-icon {
+  opacity: 0.82;
+  transform: scale(1.05);
+}
+
+.activity-step.success .activity-step-icon,
+.activity-step.complete .activity-step-icon {
+  color: var(--success);
+}
+
+.activity-step.blocked .activity-step-icon,
+.activity-step.error .activity-step-icon {
+  color: var(--danger);
+}
+
+.activity-step-title {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.activity-step-title span {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.activity-step-title small {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 1px 6px;
+  transition:
+    background-color var(--motion-medium) var(--ease-premium),
+    border-color var(--motion-medium) var(--ease-premium),
+    color var(--motion-medium) var(--ease-premium),
+    transform var(--motion-fast) var(--ease-snappy);
+}
+
+.activity-stage {
+  text-transform: capitalize;
+}
+
+.activity-stage.running,
+.activity-stage.validating,
+.activity-stage.thinking {
+  animation: activityStagePulse 1.15s var(--ease-premium) infinite;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  color: var(--accent);
+}
+
+.activity-stage.success,
+.activity-stage.complete {
+  background: var(--success-bg);
+  border-color: color-mix(in srgb, var(--success) 36%, var(--border));
+  color: var(--success);
+}
+
+.activity-stage.blocked,
+.activity-stage.error {
+  background: var(--danger-bg);
+  border-color: color-mix(in srgb, var(--danger) 34%, var(--border));
+  color: var(--danger);
+}
+
+.activity-step p {
+  margin: 2px 0 0;
+}
+
+.activity-step code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: block;
+  font-size: 12px;
+  margin-top: 5px;
+  max-height: 96px;
+  overflow: auto;
+  padding: 7px;
+  white-space: pre-wrap;
+  transition:
+    background-color var(--motion-medium) var(--ease-premium),
+    border-color var(--motion-medium) var(--ease-premium),
+    max-height var(--motion-medium) var(--ease-premium);
+}
+
+@keyframes activityStepIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.992);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes activityStepSettle {
+  0% {
+    background: color-mix(in srgb, var(--success-bg) 70%, transparent);
+    transform: translateY(0) scale(1.004);
+  }
+
+  100% {
+    background: transparent;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes activityStepAttention {
+  0% {
+    background: color-mix(in srgb, var(--danger-bg) 80%, transparent);
+    transform: translateX(0);
+  }
+
+  35% {
+    transform: translateX(2px);
+  }
+
+  100% {
+    background: transparent;
+    transform: translateX(0);
+  }
+}
+
+@keyframes activityStagePulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.045);
+  }
+}
+
 .message-spinner {
   animation: spin 0.9s linear infinite, spinnerBreath 1.4s var(--ease-premium) infinite;
   flex: 0 0 auto;
