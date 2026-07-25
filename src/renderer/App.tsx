@@ -14,7 +14,6 @@ import {
   Loader2,
   MessageSquareText,
   Moon,
-  PanelRightClose,
   PanelRightOpen,
   Pencil,
   Play,
@@ -538,6 +537,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const schemaPanelRef = useRef<HTMLDivElement | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const activeChatTurnIdRef = useRef<string | null>(null);
 
   function appendLog(level: LogLevel, message: string, detail?: string) {
@@ -777,6 +777,14 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const hasOnlyWelcomeMessage = messages.length === 1 && messages[0]?.role === 'assistant';
   const activeChatTitle = buildChatTitle(messages, connection);
   const isConstrained = typeof window !== 'undefined' && window.innerWidth < constrainedBreakpoint;
+  const isProjectPage = sidebarMode === 'project' && activeChatId === null && activeView === 'workspace';
+
+  useEffect(() => {
+    if (isProjectPage) {
+      setActiveInspector('schema');
+      setInspectorOpen(true);
+    }
+  }, [isProjectPage]);
 
   // TSV serialization for Copy
   function serializeResultAsTsv(result: QueryResult): string {
@@ -850,7 +858,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }
 
   function resetChat() {
-    setActiveChatId(null);
+    setActiveChatId(crypto.randomUUID());
     setMessages(createInitialMessages());
     setPrompt('');
     setQuery('');
@@ -860,10 +868,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setMessageActivities({});
     setMessageActivityOpen({});
     setActiveInspector('schema');
-    setInspectorOpen(false);
     setActiveView('workspace');
     setShowFlyoutChats(false);
     updateStatus('Ready for a new chat');
+    window.setTimeout(() => composerRef.current?.focus(), 0);
   }
 
   function closeProject() {
@@ -1101,7 +1109,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setMessageActivities({});
     setMessageActivityOpen({});
     setActiveInspector('schema');
-    setInspectorOpen(false);
     setShowFlyoutChats(false);
     await refreshHistories();
     updateStatus('Chat history cleared');
@@ -1532,6 +1539,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }
 
   function closeInspector() {
+    if (isProjectPage) return;
     setInspectorOpen(false);
   }
 
@@ -1779,14 +1787,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       <aside className={inspectorClass} id="inspector-sidebar" aria-label="Inspector">
         <div className="inspector-header">
           <div className="inspector-header-top">
-            <button
-              aria-label="Close inspector"
-              className="inspector-back"
-              onClick={closeInspector}
-              type="button"
-            >
-              <PanelRightClose size={18} />
-            </button>
             <h2 className="inspector-title">
               {activeInspector === 'results' ? 'Data' : activeInspector === 'query' ? 'Query' : 'Schema'}
             </h2>
@@ -2388,82 +2388,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       {/* ARIA live region for announcements */}
       <div id="aria-live-announcer" aria-live="polite" aria-atomic="true" className="visually-hidden" />
 
-      {/* Integrated Toolbar */}
-      <header className="window-toolbar" role="toolbar" aria-label="Application toolbar">
-        <div className="toolbar-traffic-light-reserve" />
-        <button
-          aria-label="Toggle sidebar"
-          className="toolbar-icon-button"
-          onClick={() => {}} /* Sidebar is always visible in Scape design */
-          type="button"
-          title="Toggle sidebar"
-        >
-          <Plus size={16} />
-        </button>
-        <button
-          aria-label="Back"
-          className="toolbar-icon-button"
-          disabled={activeView !== 'history'}
-          onClick={() => openView('workspace')}
-          type="button"
-          title="Back"
-        >
-          <ArrowLeft size={16} />
-        </button>
-        <button
-          aria-label="Forward"
-          className="toolbar-icon-button"
-          disabled
-          type="button"
-          title="Forward"
-        >
-          <ArrowRight size={16} />
-        </button>
-        <div className="toolbar-search">
-          <Search size={14} />
-          <input
-            aria-label="Search"
-            onChange={(event) => setGlobalSearch(event.target.value)}
-            placeholder="Search"
-            type="search"
-            value={globalSearch}
-          />
-          {globalSearch && (
-            <button
-              aria-label="Clear search"
-              className="toolbar-search-clear"
-              onClick={() => setGlobalSearch('')}
-              type="button"
-            >
-              <XCircle size={14} />
-            </button>
-          )}
-        </div>
-        <div className="toolbar-spacer" />
-        <button
-          aria-label="Connection selector"
-          className="connection-selector"
-          onClick={() => { if (!activeProject) openNewProjectModal(); else setSidebarMode('projects'); }}
-          type="button"
-          title={connection ? `Connected: ${connection.label}` : 'No connection'}
-        >
-          <Database size={14} />
-          <span className="connection-selector-label">
-            {connection ? connection.label : 'No database'}
-          </span>
-          <ChevronDown size={12} />
-        </button>
-        <button
-          aria-label="Settings"
-          className="toolbar-icon-button"
-          onClick={() => openView('settings')}
-          type="button"
-          title="Settings"
-        >
-          <Settings size={16} />
-        </button>
-      </header>
-
       {/* Workspace Sidebar */}
       <aside className="workspace-sidebar" aria-label="Database workspace">
         <div className="sidebar-content">
@@ -2545,6 +2469,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         </div>
         <div className="sidebar-spacer" />
         <button
+          aria-label="Settings"
           className={`sidebar-action-row ${activeView === 'settings' ? 'selected' : ''}`}
           onClick={() => openView('settings')}
           type="button"
@@ -2556,23 +2481,27 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
       {/* Conversation Canvas */}
       <section className="conversation-pane" aria-label={activeView === 'workspace' ? 'Chat' : 'Workspace view'}>
-        <button
-          aria-label={inspectorOpen ? 'Hide inspector panel' : 'Show inspector panel'}
-          className="inspector-toggle"
-          onClick={() => { if (inspectorOpen) closeInspector(); else { setActiveInspector('schema'); setInspectorOpen(true); } }}
-          title={inspectorOpen ? 'Hide inspector panel' : 'Show inspector panel'}
-          type="button"
-        >
-          {inspectorOpen ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
-        </button>
         {renderFocusedView() ?? (
           <>
             <div className="conversation-header">
-              <h1 className="conversation-title">{activeChatTitle}</h1>
-              <p className="conversation-date-label">Today</p>
-              <div className="conversation-status">
-                <span>{status}</span>
+              <div className="conversation-header-main">
+                <h1 className="conversation-title">{activeChatTitle}</h1>
+                <p className="conversation-date-label">Today</p>
+                <div className="conversation-status">
+                  <span>{status}</span>
+                </div>
               </div>
+              {!isProjectPage && (
+              <button
+                aria-label={inspectorOpen ? 'Hide inspector panel' : 'Show inspector panel'}
+                className="inspector-toggle"
+                onClick={() => { if (inspectorOpen) closeInspector(); else { setActiveInspector('schema'); setInspectorOpen(true); } }}
+                title={inspectorOpen ? 'Hide inspector panel' : 'Show inspector panel'}
+                type="button"
+              >
+                {inspectorOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+              </button>
+            )}
               <hr className="conversation-divider" />
             </div>
 
@@ -2690,6 +2619,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             <div className="composer-wrapper">
               <form className="composer" onSubmit={(event) => void sendChat(event)}>
                 <textarea
+                  ref={composerRef}
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
                   onKeyDown={(event) => {
@@ -2718,7 +2648,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       </section>
 
       {/* Inspector */}
-      {inspectorOpen ? (
+      {inspectorOpen || isProjectPage ? (
         renderInspector()
       ) : (
         <aside className="panel-rail inspector-rail" id="inspector-sidebar" aria-label="Collapsed inspector sidebar" style={{ gridColumn: 3, borderLeft: '1px solid var(--color-separator)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '14px 9px' }}>

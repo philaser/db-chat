@@ -164,9 +164,8 @@ describe('App', () => {
 
     fireEvent.click(screen.getByLabelText('Expand inspector sidebar'));
     expect(screen.getByLabelText('Inspector')).toBeInTheDocument();
-    expect(screen.getByLabelText('Close inspector')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByLabelText('Close inspector'));
+    fireEvent.click(screen.getByLabelText('Hide inspector panel'));
     expect(screen.getByLabelText('Expand inspector sidebar')).toBeInTheDocument();
   });
 
