@@ -25,6 +25,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
   },
   "dependencies": {
+    "@openrouter/sdk": "^1.1.2",
     "better-sqlite3": "^12.4.6",
     "lucide-react": "^0.561.0",
     "mongodb": "^7.2.0",
