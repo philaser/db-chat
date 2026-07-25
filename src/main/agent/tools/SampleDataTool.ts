@@ -38,7 +38,7 @@ export const sampleDataTool: Tool = {
         ok: true,
         summary: `${result.rowCount} row(s) from "${tableName}"`,
         data: {
-          columns: result.columns.map((c) => c.name),
+          columns: result.columns.map((c: string) => c),
           rows: result.rows.slice(0, safeLimit),
           rowCount: result.rowCount
         }

@@ -3,12 +3,9 @@ import type {
   ConnectionConfig,
   DatabaseConnector,
   DatabaseSchema,
-  QueryExecutionMode,
   QueryResult,
-  QueryValidationResult,
   TableInfo
 } from '../../shared/types.js';
-import { validateSqliteReadOnlyQuery } from './sqliteValidation.js';
 
 export class SQLiteConnector implements DatabaseConnector {
   private db: Database.Database | null = null;
@@ -55,26 +52,18 @@ export class SQLiteConnector implements DatabaseConnector {
     };
   }
 
-  validateQuery(query: string, mode: QueryExecutionMode): QueryValidationResult {
-    return validateSqliteReadOnlyQuery(query, mode);
-  }
-
-  async executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult> {
+  async executeQuery(query: string): Promise<QueryResult> {
     const db = this.requireDb();
-    const validation = this.validateQuery(query, mode);
-    if (!validation.safe) {
-      throw new Error(validation.reason);
-    }
 
     const start = performance.now();
-    const statement = db.prepare(validation.normalizedQuery);
+    const statement = db.prepare(query);
     const rows = statement.reader
       ? statement.all() as Record<string, unknown>[]
       : [writeResultRow(statement.run())];
     const elapsedMs = Math.round(performance.now() - start);
     const columns = rows[0]
       ? Object.keys(rows[0])
-      : this.getColumnsForEmptyResult(validation.normalizedQuery);
+      : this.getColumnsForEmptyResult(query);
 
     return {
       columns,

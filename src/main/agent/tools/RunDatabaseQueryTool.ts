@@ -38,7 +38,7 @@ export const runDatabaseQueryTool: Tool = {
         ok: true,
         summary: `Query returned ${result.rowCount} row(s) in ${elapsedMs}ms`,
         data: {
-          columns: result.columns.map((c) => c.name),
+          columns: result.columns.map((c: string) => c),
           rowCount: result.rowCount,
           elapsedMs,
           preview,

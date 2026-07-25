@@ -1,4 +1,3 @@
-import { OpenRouter } from '@openrouter/sdk';
 import type { ModelInfo } from '../../shared/types';
 
 export interface OpenRouterConfig {
@@ -30,44 +29,95 @@ export interface ToolCallDelta {
   };
 }
 
+const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
+
 export class OpenRouterClient {
-  private client: OpenRouter;
+  private apiKey: string;
 
   constructor(config: OpenRouterConfig) {
-    this.client = new OpenRouter({
-      apiKey: config.apiKey,
-      httpReferer: 'https://github.com/philaser/db-chat',
-      appTitle: 'DB Chat'
-    });
+    this.apiKey = config.apiKey;
   }
 
   async listModels(): Promise<ModelInfo[]> {
     try {
-      const response = await this.client.models.list();
-      return response.data.map((model) => ({
-        id: model.id,
-        name: model.name ?? model.id
-      }));
+      const response = await fetch(`${OPENROUTER_BASE}/models`, {
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          'HTTP-Referer': 'https://github.com/philaser/db-chat',
+          'X-OpenRouter-Title': 'DB Chat'
+        }
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const json = (await response.json()) as { data?: Array<{ id: string; name?: string }> };
+      if (json.data) {
+        return json.data.map((model) => ({ id: model.id, name: model.name ?? model.id }));
+      }
     } catch {
-      return [
-        { id: 'openai/gpt-4.1-mini', name: 'GPT-4.1 Mini' },
-        { id: 'anthropic/claude-sonnet-4-20250514', name: 'Claude Sonnet 4' },
-        { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' }
-      ];
+      // Fallback
     }
+    return [
+      { id: 'openai/gpt-4.1-mini', name: 'GPT-4.1 Mini' },
+      { id: 'anthropic/claude-sonnet-4-20250514', name: 'Claude Sonnet 4' },
+      { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' }
+    ];
   }
 
   async *streamChat(options: ChatOptions): AsyncGenerator<StreamChunk> {
-    const stream = await this.client.chat.stream({
-      model: options.model,
-      messages: options.messages as Array<{ role: string; content: string }>,
-      tools: options.tools as Array<{ type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }> | undefined,
-      temperature: options.temperature,
-      max_tokens: options.maxTokens
+    const response = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.apiKey}`,
+        'HTTP-Referer': 'https://github.com/philaser/db-chat',
+        'X-OpenRouter-Title': 'DB Chat'
+      },
+      body: JSON.stringify({
+        model: options.model,
+        messages: options.messages,
+        tools: options.tools,
+        temperature: options.temperature ?? 0.2,
+        max_tokens: options.maxTokens ?? 4096,
+        stream: true,
+        stream_options: { include_usage: true }
+      })
     });
 
-    for await (const chunk of stream) {
-      yield this.parseChunk(chunk as Record<string, unknown>);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`OpenRouter API error (${response.status}): ${text}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('No response body');
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          const data = trimmed.slice(6);
+          if (data === '[DONE]') return;
+
+          try {
+            const chunk = JSON.parse(data) as Record<string, unknown>;
+            yield this.parseChunk(chunk);
+          } catch {
+            // Skip unparseable chunks
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
     }
   }
 

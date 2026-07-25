@@ -1,4 +1,4 @@
-import type { QueryExecutionMode, QueryValidationResult } from '../../shared/types.js';
+
 
 const MAX_SAFE_SIZE = 500;
 const SAFE_INDEX_PATTERN = /^[A-Za-z0-9._*,-]+$/;
@@ -57,62 +57,14 @@ export function parseElasticsearchSearchQuery(query: string): ElasticsearchSearc
   };
 }
 
-export function validateElasticsearchReadOnlyQuery(query: string, mode: QueryExecutionMode): QueryValidationResult {
-  const trimmed = query.trim();
-  if (!trimmed) {
-    return { safe: false, reason: 'Enter a query before running it.', normalizedQuery: trimmed };
-  }
-
-  try {
-    if (mode === 'manual') {
-      return validateManualElasticsearchQuery(trimmed);
-    }
-
-    const parsed = parseElasticsearchSearchQuery(trimmed);
-    const size = parsed.body.size;
-    if (typeof size === 'number' && size > MAX_SAFE_SIZE) {
-      return {
-        safe: false,
-        reason: `Elasticsearch SAFE mode limits search size to ${MAX_SAFE_SIZE} documents.`,
-        normalizedQuery: JSON.stringify(parsed, null, 2)
-      };
-    }
-
-    const blockedKey = findBlockedKey(parsed.body);
-    if (blockedKey) {
-      return {
-        safe: false,
-        reason: `Elasticsearch SAFE mode blocks "${blockedKey}" in search bodies.`,
-        normalizedQuery: JSON.stringify(parsed, null, 2)
-      };
-    }
-
-    return {
-      safe: true,
-      reason: 'Read-only Elasticsearch search allowed by SAFE mode.',
-      normalizedQuery: JSON.stringify(parsed, null, 2)
-    };
-  } catch (error) {
-    return {
-      safe: false,
-      reason: error instanceof Error ? error.message : 'Elasticsearch query JSON could not be parsed.',
-      normalizedQuery: trimmed
-    };
-  }
-}
-
-export function parseElasticsearchQuery(query: string, mode: QueryExecutionMode): ElasticsearchQuery {
-  if (mode === 'safe') {
-    return parseElasticsearchSearchQuery(query);
-  }
-
+export function parseElasticsearchQuery(query: string): ElasticsearchQuery {
   const parsed = JSON.parse(query) as unknown;
   if (!isRecord(parsed) || typeof parsed.operation !== 'string') {
     return parseElasticsearchSearchQuery(query);
   }
 
   if (parsed.operation !== 'index' && parsed.operation !== 'update' && parsed.operation !== 'delete') {
-    throw new Error('SAFE-off Elasticsearch mode only allows search, index, update, and delete document operations.');
+    throw new Error('Elasticsearch only allows search, index, update, and delete document operations.');
   }
 
   if (typeof parsed.index !== 'string' || !isSafeDocumentIndex(parsed.index)) {
@@ -150,25 +102,6 @@ export function parseElasticsearchQuery(query: string, mode: QueryExecutionMode)
     operation: parsed.operation,
     id,
     body: parsed.body
-  };
-}
-
-function validateManualElasticsearchQuery(trimmed: string): QueryValidationResult {
-  const parsed = parseElasticsearchQuery(trimmed, 'manual');
-  if (!('operation' in parsed)) {
-    const safeValidation = validateElasticsearchReadOnlyQuery(trimmed, 'safe');
-    return safeValidation.safe
-      ? {
-        ...safeValidation,
-        reason: 'Validated Elasticsearch search allowed with SAFE mode off.'
-      }
-      : safeValidation;
-  }
-
-  return {
-    safe: true,
-    reason: `Validated Elasticsearch document ${parsed.operation} allowed with SAFE mode off.`,
-    normalizedQuery: JSON.stringify(parsed, null, 2)
   };
 }
 

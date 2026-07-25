@@ -2,12 +2,9 @@ import type {
   ConnectionConfig,
   DatabaseConnector,
   DatabaseSchema,
-  QueryExecutionMode,
   QueryResult,
-  QueryValidationResult,
   TableInfo
 } from '../../shared/types.js';
-import { validatePostgresqlReadOnlyQuery } from './postgresqlValidation.js';
 
 export class PostgresConnector implements DatabaseConnector {
   private client: unknown = null;
@@ -78,19 +75,11 @@ export class PostgresConnector implements DatabaseConnector {
     };
   }
 
-  validateQuery(query: string, mode: QueryExecutionMode): QueryValidationResult {
-    return validatePostgresqlReadOnlyQuery(query, mode);
-  }
-
-  async executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult> {
+  async executeQuery(query: string): Promise<QueryResult> {
     const client = this.requireClient();
-    const validation = this.validateQuery(query, mode);
-    if (!validation.safe) {
-      throw new Error(validation.reason);
-    }
 
     const start = performance.now();
-    const result = await client.query(validation.normalizedQuery);
+    const result = await client.query(query);
     const elapsedMs = Math.round(performance.now() - start);
     const rows = result.rows as Record<string, unknown>[];
 

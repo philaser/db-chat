@@ -3,17 +3,14 @@ import type {
   ConnectionConfig,
   DatabaseConnector,
   DatabaseSchema,
-  QueryExecutionMode,
   QueryResult,
-  QueryValidationResult,
   TableInfo
 } from '../../shared/types.js';
 import {
   parseMongoDBQuery,
   type MongoDBParsedRequest,
   type MongoDBReadRequest,
-  type MongoDBWriteRequest,
-  validateMongoDBReadOnlyQuery
+  type MongoDBWriteRequest
 } from './mongodbValidation.js';
 
 const DEFAULT_LIMIT = 50;
@@ -67,17 +64,8 @@ export class MongoDBConnector implements DatabaseConnector {
     };
   }
 
-  validateQuery(query: string, mode: QueryExecutionMode): QueryValidationResult {
-    return validateMongoDBReadOnlyQuery(query, mode);
-  }
-
-  async executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult> {
-    const validation = this.validateQuery(query, mode);
-    if (!validation.safe) {
-      throw new Error(validation.reason);
-    }
-
-    const parsed = parseMongoDBQuery(validation.normalizedQuery, mode) as MongoDBParsedRequest;
+  async executeQuery(query: string): Promise<QueryResult> {
+    const parsed = parseMongoDBQuery(query) as MongoDBParsedRequest;
 
     if (parsed.method === 'insertOne' || parsed.method === 'updateOne' || parsed.method === 'deleteOne') {
       return this.executeDocumentWrite(parsed as MongoDBWriteRequest);

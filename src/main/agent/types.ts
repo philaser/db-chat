@@ -1,10 +1,10 @@
-import type { AgentMemory, AgentEvent, AgentToolDefinition, AgentToolResult, ModelChatMessage, QueryResult } from '../../shared/types';
+import type { DatabaseConnector, DatabaseSchema, AgentMemory, AgentEvent, AgentToolDefinition, AgentToolResult, ModelChatMessage, QueryResult } from '../../shared/types';
 
 export interface ToolContext {
   turnId: string;
   controller: import('../ipc').IpcController;
-  connector: import('../connectors').DatabaseConnector | null;
-  schema: import('../../shared/types').DatabaseSchema | null;
+  connector: DatabaseConnector | null;
+  schema: DatabaseSchema | null;
   emitEvent: (event: AgentEvent) => void;
 }
 

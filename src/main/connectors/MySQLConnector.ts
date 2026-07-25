@@ -2,12 +2,9 @@ import type {
   ConnectionConfig,
   DatabaseConnector,
   DatabaseSchema,
-  QueryExecutionMode,
   QueryResult,
-  QueryValidationResult,
   TableInfo
 } from '../../shared/types.js';
-import { validateMysqlReadOnlyQuery } from './mysqlValidation.js';
 
 export class MySQLConnector implements DatabaseConnector {
   private connection: unknown = null;
@@ -74,18 +71,10 @@ export class MySQLConnector implements DatabaseConnector {
     };
   }
 
-  validateQuery(query: string, mode: QueryExecutionMode): QueryValidationResult {
-    return validateMysqlReadOnlyQuery(query, mode);
-  }
-
-  async executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult> {
+  async executeQuery(query: string): Promise<QueryResult> {
     const conn = this.requireConnection();
-    const validation = this.validateQuery(query, mode);
-    if (!validation.safe) {
-      throw new Error(validation.reason);
-    }
 
-    const normalized = validation.normalizedQuery;
+    const normalized = query;
     const isWrite = /^\s*(insert|update|delete|replace)\s/i.test(normalized);
 
     const start = performance.now();

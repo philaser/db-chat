@@ -4,15 +4,12 @@ import type {
   ConnectionConfig,
   DatabaseConnector,
   DatabaseSchema,
-  QueryExecutionMode,
   QueryResult,
-  QueryValidationResult,
   TableInfo
 } from '../../shared/types.js';
 import {
   parseElasticsearchQuery,
-  parseElasticsearchSearchQuery,
-  validateElasticsearchReadOnlyQuery
+  parseElasticsearchSearchQuery
 } from './elasticsearchValidation.js';
 
 export class ElasticsearchConnector implements DatabaseConnector {
@@ -53,17 +50,8 @@ export class ElasticsearchConnector implements DatabaseConnector {
     };
   }
 
-  validateQuery(query: string, mode: QueryExecutionMode): QueryValidationResult {
-    return validateElasticsearchReadOnlyQuery(query, mode);
-  }
-
-  async executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult> {
-    const validation = this.validateQuery(query, mode);
-    if (!validation.safe) {
-      throw new Error(validation.reason);
-    }
-
-    const parsed = parseElasticsearchQuery(validation.normalizedQuery, mode);
+  async executeQuery(query: string): Promise<QueryResult> {
+    const parsed = parseElasticsearchQuery(query);
     if ('operation' in parsed) {
       return this.executeDocumentWrite(parsed);
     }

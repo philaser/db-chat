@@ -58,7 +58,6 @@ import type {
   PersistedChatSession,
   PersistedSettings,
   QueryResult,
-  QueryValidationResult,
   TableInfo
 } from '../shared/types';
 
@@ -466,7 +465,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [messages, setMessages] = useState<ChatMessage[]>(createInitialMessages);
   const [prompt, setPrompt] = useState('');
   const [query, setQuery] = useState('');
-  const [validation, setValidation] = useState<QueryValidationResult | null>(null);
   const [result, setResult] = useState<QueryResult | null>(null);
   const [chatSessions, setChatSessions] = useState<PersistedChatSession[]>([]);
   const [savedConnections, setSavedConnections] = useState<ConnectionHistoryItem[]>([]);
@@ -474,7 +472,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [settings, setSettings] = useState<PersistedSettings & { hasApiKey: boolean }>({
     provider: 'openrouter',
     model: 'openai/gpt-4.1-mini',
-    safeMode: true,
     hasApiKey: false
   });
   const [activeView, setActiveView] = useState<AppView>('workspace');
@@ -488,6 +485,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [apiKey, setApiKey] = useState('');
   const [status, setStatus] = useState('Ready');
   const [busy, setBusy] = useState(false);
+  const [streamingContent, setStreamingContent] = useState('');
   const [answerGenerating, setAnswerGenerating] = useState(false);
   const [chatActivity, setChatActivity] = useState<ChatActivityStep[]>([]);
   const [activityOpen, setActivityOpen] = useState(false);
@@ -613,19 +611,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       schemaPanelRef.current.scrollTop = 0;
     }
   }, [schema]);
-
-  useEffect(() => {
-    if (!api || !query) {
-      setValidation(null);
-      return;
-    }
-    const timeout = window.setTimeout(() => {
-      void api.validateQuery(query, settings.safeMode ? 'safe' : 'manual').then(setValidation).catch((error: Error) => {
-        setValidation({ safe: false, reason: error.message, normalizedQuery: query });
-      });
-    }, 150);
-    return () => window.clearTimeout(timeout);
-  }, [api, query, settings.safeMode]);
 
   function scrollMessagesToEnd() {
     const messagesElement = messagesRef.current;
@@ -858,7 +843,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setMessages(createInitialMessages());
     setPrompt('');
     setQuery('');
-    setValidation(null);
     setResult(null);
     setChatActivity([]);
     setActivityOpen(false);
@@ -1054,7 +1038,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setMessages(createInitialMessages());
     setPrompt('');
     setQuery('');
-    setValidation(null);
     setResult(null);
     setChatActivity([]);
     setActivityOpen(false);
@@ -1210,13 +1193,41 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     const nextMessages = [...messages, userMessage];
     const turnId = crypto.randomUUID();
     activeChatTurnIdRef.current = turnId;
-    const unsubscribeProgress = api.onChatProgress(turnId, (progressEvent) => {
-      if (progressEvent.turnId !== activeChatTurnIdRef.current) {
-        return;
+    let streamedContent = '';
+    let accumulatedThinking = '';
+    const unsubscribeEvents = api.subscribeToAgentEvents(turnId, (event) => {
+      if (event.turnId !== activeChatTurnIdRef.current) return;
+      switch (event.type) {
+        case 'text-delta':
+          streamedContent += String(event.data.delta ?? '');
+          setStreamingContent(streamedContent);
+          break;
+        case 'tool-start':
+          setChatActivity((current) => [
+            ...current,
+            { id: String(event.data.toolName ?? ''), status: 'running', title: String(event.data.purpose ?? event.data.toolName ?? 'Running tool...'), createdAt: event.timestamp }
+          ]);
+          setActivityOpen(true);
+          updateStatus(String(event.data.purpose ?? 'Running tool...'));
+          break;
+        case 'tool-complete':
+          setChatActivity((current) =>
+            current.map((step) =>
+              step.id === event.data.toolName ? { ...step, status: 'success' as const } : step
+            )
+          );
+          break;
+        case 'thinking-delta':
+          accumulatedThinking += String(event.data.delta ?? '');
+          break;
+        case 'status':
+          updateStatus(String(event.data.message ?? ''));
+          break;
+        case 'complete':
+        case 'error':
+        case 'aborted':
+          break;
       }
-      setChatActivity((current) => mergeActivityStep(current, progressEvent.step));
-      setActivityOpen(true);
-      updateStatus(progressEvent.step.title);
     });
     setMessages((current) => [...current, userMessage]);
     setPrompt('');
@@ -1233,43 +1244,17 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       const response = await api.sendChat(chatHistory, turnId);
       const finalMessages = [...nextMessages, response.message];
       setMessages(finalMessages);
-      const latestQuery = response.generatedQueries?.at(-1) ?? response.generatedQuery;
-      const latestResult = response.queryResults?.at(-1) ?? response.queryResult;
-      const completedActivity = response.activity ?? [];
-      if (completedActivity.length) {
-        setMessageActivities((current) => ({
-          ...current,
-          [response.message.id]: completedActivity
-        }));
-        setMessageActivityOpen((current) => ({
-          ...current,
-          [response.message.id]: false
-        }));
-      }
+      setStreamingContent('');
       setChatActivity([]);
       setActivityOpen(false);
-      if (latestQuery) {
-        setQuery(latestQuery.query);
-        setValidation(latestQuery.validation);
-        setActiveInspector('query');
-        setInspectorOpen(true);
-      }
-      if (latestResult) {
-        setResult(latestResult);
-        setActiveInspector('results');
-        setInspectorOpen(true);
-        updateStatus(`Returned ${latestResult.rowCount} rows in ${latestResult.elapsedMs} ms`);
-      } else {
-        updateStatus('Response ready');
-      }
-      await persistChatSession(finalMessages, {
-        query: latestQuery?.query ?? query,
-        result: latestResult ?? result ?? undefined
-      });
+      setAnswerGenerating(false);
+      setBusy(false);
+      updateStatus('Response ready');
+      await persistChatSession(finalMessages);
     } catch (error) {
       reportError('The chat request failed.', error);
     } finally {
-      unsubscribeProgress();
+      unsubscribeEvents();
       if (activeChatTurnIdRef.current === turnId) {
         activeChatTurnIdRef.current = null;
       }
@@ -1281,9 +1266,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   async function runQuery() {
     if (!api || !query.trim()) return;
     setBusy(true);
-    updateStatus(settings.safeMode ? 'Running safe query...' : 'Running validated query...');
+    updateStatus('Running query...');
     try {
-      const nextResult = await api.executeQuery(query, settings.safeMode ? 'safe' : 'manual');
+      const nextResult = await api.executeQuery(query);
       setResult(nextResult);
       setActiveInspector('results');
       setInspectorOpen(true);
@@ -1529,10 +1514,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             placeholder={connection?.kind === 'elasticsearch' || connection?.kind === 'mongodb' ? 'Generated JSON will appear here.' : 'Generated SQL will appear here.'}
             spellCheck={false}
           />
-          <div className={`query-validation ${validation?.safe ? 'safe' : 'blocked'}`}>
-            <ShieldCheck size={16} />
-            <span>{validation ? validation.reason : 'Query validation will appear here.'}</span>
-          </div>
         </div>
       );
     }
@@ -1698,12 +1679,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             </button>
             <button
               className="inspector-footer-action"
-              disabled={busy || !validation?.safe}
+              disabled={busy || !query.trim()}
               onClick={() => void runQuery()}
               type="button"
             >
               <Play size={14} />
-              {settings.safeMode ? 'Run Safe Query' : 'Run Validated Query'}
+              Run Query
             </button>
           </>
         ) : null}
@@ -2111,19 +2092,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         {renderSettingsControls()}
 
         <div className="settings-section">
-          <p className="settings-section-title">Safety</p>
-          <div className="settings-row">
-            <label className="settings-row-label" htmlFor="safe-mode-toggle">SAFE mode</label>
-            <div className="settings-row-control">
-              <label className="safe-toggle-row">
-                <input id="safe-mode-toggle" type="checkbox" checked={settings.safeMode} onChange={(event) => void saveSettings({ ...settings, safeMode: event.target.checked })} />
-                <span>{settings.safeMode ? 'On — only read-only queries are allowed' : 'Off — validated reads and writes are allowed'}</span>
-              </label>
-            </div>
-          </div>
-        </div>
-
-        <div className="settings-section">
           <p className="settings-section-title">Appearance</p>
           {(['light', 'dark'] as const).map((group) => {
             const groupThemes = themeRegistry.filter((entry) => entry.group === group);
@@ -2367,9 +2335,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                   <div>
                     <h3>Ask about the data.</h3>
                     <p>
-                      {settings.safeMode
-                        ? 'Connect a database and DB Chat will run safe read-only analysis from the conversation.'
-                        : 'Connect a database and DB Chat will run validated reads and table or document writes from the conversation.'}
+                      Connect a database and DB Chat will analyze your data through the conversation.
                     </p>
                   </div>
                   <div className="starter-list">
