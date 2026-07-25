@@ -2,6 +2,7 @@ import { BrowserWindow, dialog, type WebContents } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
+  AuditEntry,
   ConnectionConfig,
   ConnectionHistoryItem,
   DatabaseConnector,
@@ -37,6 +38,7 @@ export class IpcController {
   private approvalManager = new ApprovalManager();
   private auditStore = new AuditStore();
   private activeAbortController: AbortController | null = null;
+  private currentConnectionId: string | null = null;
 
   constructor(private readonly store: AppStore) {
     this.loadMemories();
@@ -44,6 +46,10 @@ export class IpcController {
 
   getConnector(): DatabaseConnector | null {
     return this.connector;
+  }
+
+  getConnectionId(): string {
+    return this.currentConnectionId ?? 'unknown';
   }
 
   async chooseSqliteFile(): Promise<ConnectionConfig | null> {
@@ -80,6 +86,7 @@ export class IpcController {
     const connector = createConnector(hydratedConfig.kind);
     await connector.connect(hydratedConfig);
     this.connector = connector;
+    this.currentConnectionId = hydratedConfig.id;
     this.schema = await connector.introspect();
     this.store.saveConnection(hydratedConfig);
     return this.schema;
@@ -221,6 +228,10 @@ export class IpcController {
 
   getAuditLog(): unknown[] {
     return this.auditStore.getEntries(200);
+  }
+
+  audit(entry: Omit<AuditEntry, 'id' | 'timestamp'>): void {
+    this.auditStore.log(entry);
   }
 
   requireConnector(): DatabaseConnector {

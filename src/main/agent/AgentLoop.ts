@@ -158,6 +158,14 @@ export async function runAgentLoop(
             purpose: (input.purpose as string) ?? toolName,
             result: denyResult
           });
+          config.controller.audit({
+            turnId,
+            connectionId: config.controller.getConnectionId(),
+            toolName,
+            toolInput: input,
+            permissionDecision: 'deny',
+            queryPreview: (input.query as string) ?? undefined
+          });
           totalToolCalls++;
           continue;
         }
@@ -183,6 +191,15 @@ export async function runAgentLoop(
 
           const approved = await config.approvalManager.waitForDecision(interruption.id);
           activity.approvalResolved(interruption.id, approved);
+
+          config.controller.audit({
+            turnId,
+            connectionId: config.controller.getConnectionId(),
+            toolName,
+            toolInput: input,
+            permissionDecision: approved ? 'approved' : 'denied',
+            queryPreview: (input.query as string) ?? undefined
+          });
 
           if (approved) {
             await executeToolAndRecord(toolName, input, call.id, toolContext, config.toolRegistry, activity, conversation, allToolCalls);
@@ -312,9 +329,11 @@ async function executeToolAndRecord(
   conversation: ModelChatMessage[],
   allToolCalls: Array<{ query: string; purpose: string; result: unknown }>
 ): Promise<void> {
+  const startTime = performance.now();
   activity.toolStart(toolName, input.purpose as string);
 
   const result = await toolRegistry.execute(toolName, input, toolContext);
+  const elapsedMs = Math.round(performance.now() - startTime);
 
   const toolMessage: ModelChatMessage = {
     role: 'tool',
@@ -329,6 +348,16 @@ async function executeToolAndRecord(
     query: (input.query as string) ?? JSON.stringify(input),
     purpose: (input.purpose as string) ?? toolName,
     result
+  });
+
+  toolContext.controller.audit({
+    turnId: toolContext.turnId,
+    connectionId: toolContext.controller.getConnectionId(),
+    toolName,
+    toolInput: input,
+    permissionDecision: 'allow',
+    queryPreview: (input.query as string) ?? undefined,
+    elapsedMs
   });
 }
 

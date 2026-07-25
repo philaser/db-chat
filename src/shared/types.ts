@@ -221,9 +221,11 @@ export interface AuditEntry {
   turnId: string;
   connectionId: string;
   toolName: string;
+  toolInput?: Record<string, unknown>;
   permissionDecision: string;
   queryPreview?: string;
   risk?: string;
+  elapsedMs?: number;
 }
 
 export interface DbChatApi {
