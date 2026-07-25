@@ -2712,49 +2712,55 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
             {/* Composer */}
             <div className="composer-wrapper">
-              <div className="effort-bar">
-                <span className="effort-bar-label">Reasoning</span>
-                {(['none', 'low', 'medium', 'high', 'max'] as EffortLevel[]).map((level) => (
-                  <button
-                    key={level}
-                    type="button"
-                    className={`effort-chip ${effortLevel === level ? 'active' : ''}`}
-                    onClick={() => {
-                      setEffortLevel(level);
-                      setSettings((current) => ({ ...current, effortLevel: level }));
-                      void api?.saveSettings({ ...settings, effortLevel: level });
-                    }}
-                    title={`${level === 'none' ? 'No reasoning' : level === 'low' ? 'Minimal' : level === 'medium' ? 'Balanced' : level === 'high' ? 'Deep' : 'Maximum'} reasoning effort`}
-                  >
-                    {level === 'none' ? 'Fast' : level.charAt(0).toUpperCase() + level.slice(1)}
-                  </button>
-                ))}
-                {connection && (
-                  <button
-                    type="button"
-                    className="safety-badge"
-                    onClick={async () => {
-                      const levels: SafetyLevel[] = ['safe', 'standard', 'unrestricted'];
-                      const current = safetyLevel;
-                      const idx = levels.indexOf(current);
-                      const next = levels[(idx + 1) % levels.length];
-                      setSafetyLevelState(next);
-                      if (api && connection) {
-                        await api.setSafetyLevel(connection.id, next);
-                        await refreshHistories();
-                      }
-                    }}
-                    title={`Safety level: ${safetyLevel === 'safe' ? 'Read-only' : safetyLevel === 'standard' ? 'Standard (writes need approval)' : 'Unrestricted'}. Click to change.`}
-                    style={{
-                      color: safetyLevel === 'safe' ? 'var(--color-success)' : safetyLevel === 'unrestricted' ? 'var(--color-danger)' : 'var(--color-warning)'
-                    }}
-                  >
-                    <ShieldCheck size={13} />
-                    {safetyLevel === 'safe' ? 'Safe' : safetyLevel === 'unrestricted' ? 'Unrestricted' : 'Standard'}
-                  </button>
-                )}
-              </div>
               <form className="composer" onSubmit={(event) => void sendChat(event)}>
+                <div className="composer-toolbar">
+                  <div className="composer-toolbar-group">
+                    <span className="composer-toolbar-label">Reasoning</span>
+                    <div className="composer-toolbar-chips" role="radiogroup" aria-label="Reasoning effort">
+                      {(['none', 'low', 'medium', 'high', 'max'] as EffortLevel[]).map((level) => (
+                        <button
+                          key={level}
+                          type="button"
+                          role="radio"
+                          aria-checked={effortLevel === level}
+                          className={`composer-chip ${effortLevel === level ? 'active' : ''}`}
+                          onClick={() => {
+                            setEffortLevel(level);
+                            setSettings((current) => ({ ...current, effortLevel: level }));
+                            void api?.saveSettings({ ...settings, effortLevel: level });
+                          }}
+                          title={`${level === 'none' ? 'No reasoning' : level === 'low' ? 'Minimal' : level === 'medium' ? 'Balanced' : level === 'high' ? 'Deep' : 'Maximum'} reasoning effort`}
+                        >
+                          {level === 'none' ? 'Fast' : level.charAt(0).toUpperCase() + level.slice(1)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {connection && (
+                    <div className="composer-toolbar-group">
+                      <button
+                        type="button"
+                        className="composer-safety-badge"
+                        data-level={safetyLevel}
+                        onClick={async () => {
+                          const levels: SafetyLevel[] = ['safe', 'standard', 'unrestricted'];
+                          const current = safetyLevel;
+                          const idx = levels.indexOf(current);
+                          const next = levels[(idx + 1) % levels.length];
+                          setSafetyLevelState(next);
+                          if (api && connection) {
+                            await api.setSafetyLevel(connection.id, next);
+                            await refreshHistories();
+                          }
+                        }}
+                        title={`Safety level: ${safetyLevel === 'safe' ? 'Read-only' : safetyLevel === 'standard' ? 'Standard (writes need approval)' : 'Unrestricted'}. Click to change.`}
+                      >
+                        <ShieldCheck size={13} />
+                        <span>{safetyLevel === 'safe' ? 'Safe' : safetyLevel === 'unrestricted' ? 'Unrestricted' : 'Standard'}</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <textarea
                   ref={composerRef}
                   value={prompt}
