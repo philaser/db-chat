@@ -572,7 +572,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     let active = true;
     setModelsLoading(true);
     setSettingsStatus('Loading models...');
-    void api.listModels(settings.provider)
+    void api.listModels()
       .then((nextModels) => {
         if (!active) return;
         setModels(nextModels);

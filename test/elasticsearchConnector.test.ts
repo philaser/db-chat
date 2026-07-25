@@ -66,7 +66,7 @@ describe('ElasticsearchConnector', () => {
         size: 10,
         query: { match_all: {} }
       }
-    }), 'safe');
+    }));
 
     expect(result.rows).toEqual([{
       _index: 'orders',
@@ -149,7 +149,7 @@ describe('ElasticsearchConnector', () => {
       operation: 'update',
       id: '1',
       body: { doc: { status: 'paid' } }
-    }), 'manual');
+    }));
 
     expect(result.rows).toEqual([{
       operation: 'update',

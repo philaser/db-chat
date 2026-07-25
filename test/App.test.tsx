@@ -1,24 +1,19 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/renderer/App';
-import type { ChatProgressEvent, DatabaseSchema, DbChatApi } from '../src/shared/types';
+import type { AgentEvent, DatabaseSchema, DbChatApi } from '../src/shared/types';
 
 type TestDbChatApi = DbChatApi & {
-  emitProgress: (event: ChatProgressEvent) => void;
+  emitEvent: (event: AgentEvent) => void;
 };
 
 function makeApi(): TestDbChatApi {
-  let progressListener: ((event: ChatProgressEvent) => void) | null = null;
+  let eventListener: ((event: AgentEvent) => void) | null = null;
   let subscribedTurnId: string | null = null;
   const api: DbChatApi = {
     chooseSqliteFile: vi.fn(),
     connect: vi.fn(),
     getSchema: vi.fn(),
-    validateQuery: vi.fn(async (query) => ({
-      safe: !/drop/i.test(query),
-      reason: /drop/i.test(query) ? 'SAFE mode blocks statements that can change database state.' : 'Read-only query allowed by SAFE mode.',
-      normalizedQuery: query
-    })),
     executeQuery: vi.fn(async () => ({
       columns: ['name'],
       rows: [{ name: 'Ada' }],
@@ -31,49 +26,30 @@ function makeApi(): TestDbChatApi {
         role: 'assistant' as const,
         content: 'I found Ada in the users table.',
         createdAt: new Date().toISOString()
-      },
-      generatedQuery: {
-        query: 'select name from users;',
-        explanation: 'Generated test query.',
-        validation: {
-          safe: true,
-          reason: 'Read-only query allowed by SAFE mode.',
-          normalizedQuery: 'select name from users;'
-        }
-      },
-      queryResult: {
-        columns: ['name'],
-        rows: [{ name: 'Ada' }],
-        rowCount: 1,
-        elapsedMs: 1
       }
     })),
-    onChatProgress: vi.fn((turnId, listener) => {
+    subscribeToAgentEvents: vi.fn((turnId, listener) => {
       subscribedTurnId = turnId;
-      progressListener = listener;
+      eventListener = listener;
       return vi.fn(() => {
         if (subscribedTurnId === turnId) {
           subscribedTurnId = null;
-          progressListener = null;
+          eventListener = null;
         }
       });
     }),
+    abortChat: vi.fn(),
     loadSettings: vi.fn(async () => ({
       provider: 'openrouter' as const,
       model: 'openai/gpt-4.1-mini',
-      safeMode: true,
       hasApiKey: false
     })),
     saveSettings: vi.fn(),
     saveApiKey: vi.fn(),
-    listModels: vi.fn(async (provider: 'openrouter' | 'openai') => (
-      provider === 'openrouter'
-        ? [
-          { id: 'openai/gpt-4.1-mini', name: 'OpenAI GPT-4.1 Mini' },
-          { id: 'deepseek/deepseek-chat-v3.1', name: 'DeepSeek V3.1' }
-        ]
-        : [{ id: 'gpt-4.1-mini', name: 'GPT-4.1 Mini' }]
-    )),
+    listModels: vi.fn(async () => [
+      { id: 'openai/gpt-4.1-mini', name: 'OpenAI GPT-4.1 Mini' },
+      { id: 'deepseek/deepseek-chat-v3.1', name: 'DeepSeek V3.1' }
+    ]),
     listChatSessions: vi.fn(async () => []),
     saveChatSession: vi.fn(async (session) => session),
     deleteChatSession: vi.fn(),
@@ -84,7 +60,7 @@ function makeApi(): TestDbChatApi {
   };
   return {
     ...api,
-    emitProgress: (event: ChatProgressEvent) => progressListener?.({
+    emitEvent: (event: AgentEvent) => eventListener?.({
       ...event,
       turnId: event.turnId === 'active-turn' && subscribedTurnId ? subscribedTurnId : event.turnId
     })
@@ -97,33 +73,6 @@ describe('App', () => {
     Element.prototype.scrollTo = vi.fn();
     window.localStorage.clear();
     document.documentElement.removeAttribute('data-theme');
-  });
-
-  it('places generated SQL in the query inspector and renders automatic result rows', async () => {
-    const api = makeApi();
-    render(<App api={api} />);
-
-    fireEvent.change(screen.getByPlaceholderText('Ask a follow-up'), {
-      target: { value: 'show users' }
-    });
-    fireEvent.click(screen.getByLabelText('Send message'));
-
-    expect(await screen.findByLabelText('Data results')).toBeInTheDocument();
-    expect(await screen.findByText('Ada')).toBeInTheDocument();
-
-    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Query' }));
-    expect(await screen.findByDisplayValue('select name from users;')).toBeInTheDocument();
-    expect(api.sendChat).toHaveBeenCalledWith(expect.arrayContaining([
-      expect.objectContaining({ role: 'user', content: 'show users' })
-    ]), expect.any(String));
-    await waitFor(() => {
-      expect(api.saveChatSession).toHaveBeenCalledWith(expect.objectContaining({
-        title: 'show users',
-        query: 'select name from users;',
-        result: expect.objectContaining({ rowCount: 1 })
-      }));
-    });
-    expect(api.executeQuery).not.toHaveBeenCalled();
   });
 
   it('renders markdown in chat messages', async () => {
@@ -175,21 +124,6 @@ describe('App', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Done.')).toBeInTheDocument();
-    });
-  });
-
-  it('shows blocked validation for unsafe SQL', async () => {
-    const api = makeApi();
-    render(<App api={api} />);
-
-    fireEvent.click(screen.getByLabelText('Expand inspector sidebar'));
-    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Query' }));
-    fireEvent.change(screen.getByPlaceholderText('Generated SQL will appear here.'), {
-      target: { value: 'drop table users;' }
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText('SAFE mode blocks statements that can change database state.')).toBeInTheDocument();
     });
   });
 
@@ -321,27 +255,6 @@ describe('App', () => {
     fireEvent.scroll(schemaPanel);
     fireEvent.click(screen.getByLabelText('Return to top of schema'));
     expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' });
-  });
-
-  it('lets the inspector switch tabs and selects results after a manual safe query', async () => {
-    const api = makeApi();
-    render(<App api={api} />);
-
-    fireEvent.click(screen.getByLabelText('Expand inspector sidebar'));
-    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Query' }));
-    fireEvent.change(screen.getByPlaceholderText('Generated SQL will appear here.'), {
-      target: { value: 'select name from users;' }
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText('Read-only query allowed by SAFE mode.')).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Run Safe Query' }));
-
-    expect(await screen.findByLabelText('Data results')).toBeInTheDocument();
-    expect(await screen.findByText('Ada')).toBeInTheDocument();
-    expect(api.executeQuery).toHaveBeenCalledWith('select name from users;', 'safe');
   });
 
   it('loads chat and connection histories, restores sessions, and deletes items', async () => {
@@ -775,39 +688,6 @@ describe('App', () => {
       expect(api.connect).toHaveBeenCalledWith(connection);
     });
     expect(screen.queryByLabelText('MySQL connection')).not.toBeInTheDocument();
-  });
-
-  it('renders Copy and Export CSV footer in the results inspector', async () => {
-    const api = makeApi();
-    render(<App api={api} />);
-
-    fireEvent.change(screen.getByPlaceholderText('Ask a follow-up'), {
-      target: { value: 'show users' }
-    });
-    fireEvent.click(screen.getByLabelText('Send message'));
-
-    expect(await screen.findByLabelText('Data results')).toBeInTheDocument();
-
-    expect(screen.getByLabelText('Copy')).toBeInTheDocument();
-    expect(screen.getByLabelText('Export CSV')).toBeInTheDocument();
-  });
-
-  it('copy button copies TSV to clipboard', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.assign(navigator, { clipboard: { writeText } });
-
-    const api = makeApi();
-    render(<App api={api} />);
-
-    fireEvent.change(screen.getByPlaceholderText('Ask a follow-up'), {
-      target: { value: 'show users' }
-    });
-    fireEvent.click(screen.getByLabelText('Send message'));
-
-    expect(await screen.findByLabelText('Data results')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByLabelText('Copy'));
-    expect(writeText).toHaveBeenCalledWith('name\nAda');
   });
 
   it('footer actions are disabled without results', async () => {

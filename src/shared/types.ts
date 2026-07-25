@@ -219,7 +219,7 @@ export interface DbChatApi {
   loadSettings(): Promise<PersistedSettings & { hasApiKey: boolean }>;
   saveSettings(settings: PersistedSettings): Promise<void>;
   saveApiKey(provider: ModelProviderKind, apiKey: string): Promise<void>;
-  listModels(provider: ModelProviderKind): Promise<ModelInfo[]>;
+  listModels(): Promise<ModelInfo[]>;
   listChatSessions(): Promise<PersistedChatSession[]>;
   saveChatSession(session: PersistedChatSession): Promise<PersistedChatSession>;
   deleteChatSession(id: string): Promise<void>;
