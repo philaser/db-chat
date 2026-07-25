@@ -1784,9 +1784,14 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           <input id="es-remember" type="checkbox" checked={elasticsearchRememberPassword} onChange={(event) => setElasticsearchRememberPassword(event.target.checked)} />
           <label htmlFor="es-remember">Remember password</label>
         </div>
-        <button type="submit" className="primary-button connection-form-submit" disabled={busy || !elasticsearchHost.trim() || !elasticsearchPort.trim()}>
-          Connect
-        </button>
+        <div className="connection-form-actions">
+          <button type="submit" className="primary-button connection-form-submit" disabled={busy || !elasticsearchHost.trim() || !elasticsearchPort.trim()}>
+            Connect
+          </button>
+          <button type="button" className="connection-form-cancel" onClick={closeConnectionForm}>
+            Cancel
+          </button>
+        </div>
       </form>
     );
   }
@@ -1834,9 +1839,14 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           <input id="db-remember" type="checkbox" checked={dbFormRememberPassword} onChange={(event) => setDbFormRememberPassword(event.target.checked)} />
           <label htmlFor="db-remember">Remember password</label>
         </div>
-        <button type="submit" className="primary-button connection-form-submit" disabled={busy || !dbFormHost.trim() || !dbFormPort.trim()}>
-          Connect
-        </button>
+        <div className="connection-form-actions">
+          <button type="submit" className="primary-button connection-form-submit" disabled={busy || !dbFormHost.trim() || !dbFormPort.trim()}>
+            Connect
+          </button>
+          <button type="button" className="connection-form-cancel" onClick={closeConnectionForm}>
+            Cancel
+          </button>
+        </div>
       </form>
     );
   }
