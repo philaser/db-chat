@@ -250,4 +250,5 @@ export interface DbChatApi {
   setSafetyLevel(connectionId: string, level: SafetyLevel): Promise<void>;
   getAuditLog(): Promise<AuditEntry[]>;
   saveCsvFile(request: { content: string; defaultName: string }): Promise<void>;
+  rendererLog(level: string, message: string): Promise<void>;
 }

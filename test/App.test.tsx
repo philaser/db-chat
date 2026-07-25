@@ -61,7 +61,8 @@ function makeApi(): TestDbChatApi {
     renameConnection: vi.fn(),
     setSafetyLevel: vi.fn(),
     getAuditLog: vi.fn(async () => []),
-    saveCsvFile: vi.fn()
+    saveCsvFile: vi.fn(),
+    rendererLog: vi.fn()
   };
   return {
     ...api,

@@ -596,6 +596,31 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     };
   }, []);
 
+  // Bridge renderer console to main process for terminal visibility
+  useEffect(() => {
+    if (!api) return;
+    const origError = console.error;
+    const origWarn = console.warn;
+    const origLog = console.log;
+    console.log = (...args) => {
+      origLog(...args);
+      void api.rendererLog('log', args.map(String).join(' '));
+    };
+    console.warn = (...args) => {
+      origWarn(...args);
+      void api.rendererLog('warn', args.map(String).join(' '));
+    };
+    console.error = (...args) => {
+      origError(...args);
+      void api.rendererLog('error', args.map(String).join(' '));
+    };
+    return () => {
+      console.log = origLog;
+      console.warn = origWarn;
+      console.error = origError;
+    };
+  }, [api]);
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem(themeStorageKey, theme);

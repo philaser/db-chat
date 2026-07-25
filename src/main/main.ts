@@ -69,6 +69,10 @@ function registerIpc(): void {
   ipcMain.handle('dbchat:set-safety-level', (_event, connectionId: string, level: string) => controller.setSafetyLevel(connectionId, level as SafetyLevel));
   ipcMain.handle('dbchat:get-audit-log', () => controller.getAuditLog());
   ipcMain.handle('dbchat:save-csv-file', (_event, request: { content: string; defaultName: string }) => controller.saveCsvFile(request));
+  ipcMain.handle('dbchat:renderer-log', (_event, level: string, message: string) => {
+    const method = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
+    method(`[dbchat:renderer] ${message}`);
+  });
 }
 
 void app.whenReady().then(() => {

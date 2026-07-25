@@ -43,7 +43,8 @@ const api: DbChatApi = {
   renameConnection: (id: string, label: string) => ipcRenderer.invoke('dbchat:rename-connection', id, label),
   setSafetyLevel: (connectionId: string, level: string) => ipcRenderer.invoke('dbchat:set-safety-level', connectionId, level),
   getAuditLog: () => ipcRenderer.invoke('dbchat:get-audit-log'),
-  saveCsvFile: (request) => ipcRenderer.invoke('dbchat:save-csv-file', request)
+  saveCsvFile: (request) => ipcRenderer.invoke('dbchat:save-csv-file', request),
+  rendererLog: (level: string, message: string) => ipcRenderer.invoke('dbchat:renderer-log', level, message)
 };
 
 contextBridge.exposeInMainWorld('dbchat', api);
