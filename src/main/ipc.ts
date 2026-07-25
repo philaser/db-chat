@@ -98,7 +98,10 @@ export class IpcController {
     const apiKey = this.store.getApiKey(settings.provider);
     const id = turnId ?? crypto.randomUUID();
 
+    console.log(`[dbchat:main] sendChat turn=${id}, model=${settings.model}, effort=${settings.effortLevel}, messages=${messages.length}`);
+
     if (!apiKey) {
+      console.log('[dbchat:main] sendChat: no API key, returning placeholder');
       return {
         message: {
           id: `msg-${id}`,
@@ -208,10 +211,12 @@ export class IpcController {
   }
 
   setSafetyLevel(_connectionId: string, level: SafetyLevel): void {
+    console.log(`[dbchat:main] setSafetyLevel connection=${_connectionId}, level=${level}`);
     if (this.connector) {
       this.connector.setSafetyLevel(level);
     }
     this.permissionManager?.setSafetyLevel(level);
+    console.log(`[dbchat:main] setSafetyLevel done`);
   }
 
   getAuditLog(): unknown[] {

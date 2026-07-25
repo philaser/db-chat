@@ -5,6 +5,14 @@ import { AppStore } from './storage/AppStore.js';
 import { IpcController } from './ipc.js';
 import type { ConnectionConfig, ModelProviderKind, PersistedChatSession, PersistedSettings, SafetyLevel } from '../shared/types.js';
 
+process.on('uncaughtException', (error) => {
+  console.error('[dbchat:main:crash] Uncaught exception:', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[dbchat:main:crash] Unhandled rejection:', reason);
+});
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.VITE_DEV_SERVER_URL || !app.isPackaged;
 

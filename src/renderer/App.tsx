@@ -557,13 +557,16 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const activeChatTurnIdRef = useRef<string | null>(null);
 
   function appendLog(level: LogLevel, message: string, detail?: string) {
-    setLogs((current) => [{
+    const entry = {
       id: crypto.randomUUID(),
       level,
       message,
       detail,
       timestamp: new Date().toISOString()
-    }, ...current].slice(0, 150));
+    };
+    setLogs((current) => [entry, ...current].slice(0, 150));
+    const prefix = level === 'error' ? '❌' : '📋';
+    console.log(`[dbchat:${level}] ${message}${detail ? ' — ' + detail : ''}`);
   }
 
   function updateStatus(message: string) {
@@ -573,8 +576,25 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
   function reportError(message: string, error: unknown) {
     setStatus(message);
-    appendLog('error', message, logDetail(error));
+    const detail = logDetail(error);
+    appendLog('error', message, detail);
+    console.error(`[dbchat:crash] ${message}`, error);
   }
+
+  useEffect(() => {
+    function handleGlobalError(event: ErrorEvent) {
+      reportError('Unhandled renderer error', event.error ?? event.message);
+    }
+    function handleRejection(event: PromiseRejectionEvent) {
+      reportError('Unhandled promise rejection', event.reason);
+    }
+    window.addEventListener('error', handleGlobalError);
+    window.addEventListener('unhandledrejection', handleRejection);
+    return () => {
+      window.removeEventListener('error', handleGlobalError);
+      window.removeEventListener('unhandledrejection', handleRejection);
+    };
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1367,12 +1387,15 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setBusy(true);
     setAnswerGenerating(true);
     updateStatus('Thinking...');
+    appendLog('info', `sendChat starting turn=${turnId}, effort=${effortLevel}, safety=${safetyLevel}, prompt="${prompt.trim().slice(0, 80)}..."`);
     try {
       const chatHistory: ModelChatMessage[] = nextMessages.map((message) => ({
         role: message.role,
         content: message.content
       }));
+      appendLog('info', 'Calling api.sendChat...');
       const response = await api.sendChat(chatHistory, turnId);
+      appendLog('info', `sendChat completed, message id=${response.message.id}`);
       const finalMessages = [...nextMessages, response.message];
       setMessages(finalMessages);
       setStreamingContent('');
@@ -2773,6 +2796,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                               role="menuitem"
                               className={`composer-select-item ${effortLevel === level ? 'active' : ''}`}
                               onClick={() => {
+                                appendLog('info', `Reasoning level changed to ${level}`);
                                 setEffortLevel(level);
                                 setSettings((current) => ({ ...current, effortLevel: level }));
                                 void api?.saveSettings({ ...settings, effortLevel: level });
@@ -2810,10 +2834,17 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                                 role="menuitem"
                                 className={`composer-select-item ${safetyLevel === level ? 'active' : ''}`}
                                 onClick={async () => {
+                                  appendLog('info', `Safety level changed to ${level}`);
                                   setSafetyLevelState(level);
                                   if (api && connection) {
-                                    await api.setSafetyLevel(connection.id, level);
-                                    await refreshHistories();
+                                    appendLog('info', `Calling api.setSafetyLevel(${connection.id}, ${level})`);
+                                    try {
+                                      await api.setSafetyLevel(connection.id, level);
+                                      appendLog('info', `Safety level saved, refreshing histories`);
+                                      await refreshHistories();
+                                    } catch (err) {
+                                      reportError('Failed to set safety level', err);
+                                    }
                                   }
                                   setOpenDropdown(null);
                                 }}
