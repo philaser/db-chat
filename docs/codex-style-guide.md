@@ -1,5 +1,12 @@
 # DB Chat Codex Style Guide
 
+> [!WARNING]
+> This document is superseded for all new UI implementation by
+> [`docs/scape-redesign/README.md`](./scape-redesign/README.md) and its linked
+> design pack. Do not use the Codex-inspired visual direction when implementing
+> the Scape/macOS redesign. This file remains only as historical context for the
+> current pre-redesign implementation.
+
 ## Goal
 
 Make DB Chat feel like a focused Codex desktop surface for talking with data:

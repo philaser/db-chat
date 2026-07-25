@@ -210,4 +210,5 @@ export interface DbChatApi {
   clearChatSessions(): Promise<void>;
   listConnections(): Promise<ConnectionHistoryItem[]>;
   deleteConnection(id: string): Promise<void>;
+  saveCsvFile(request: { content: string; defaultName: string }): Promise<void>;
 }

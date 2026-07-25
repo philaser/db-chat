@@ -1,13 +1,14 @@
 import {
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock3,
   Copy,
   Database,
-  ArrowUp,
-  KeyRound,
-  List,
+  Download,
   Loader2,
   MessageSquareText,
   Moon,
@@ -15,11 +16,10 @@ import {
   PanelRightOpen,
   Play,
   Plus,
+  Search,
   Send,
   Settings,
   ShieldCheck,
-  Sparkles,
-  Search,
   Sun,
   Table2,
   Trash2,
@@ -117,33 +117,13 @@ type ResizeDrag = {
   staticPanelWidth: number;
 };
 
-declare global {
-  interface Window {
-    __dbchatActivityDebug?: {
-      activeTurnId: string | null;
-      answerGenerating: boolean;
-      activityOpen: boolean;
-      chatActivity: ChatActivityStep[];
-      messages: Array<{ id: string; role: ChatMessage['role']; content: string }>;
-      status: string;
-      updatedAt: string;
-    };
-  }
-}
-
-function logActivityDebug(message: string, detail?: unknown) {
-  if (window.localStorage.getItem('dbchat:activity-debug') === '1') {
-    console.log(`[dbchat:activity:renderer] ${message}`, detail);
-  }
-}
-
 const leftPanelWidth = 74;
-const rightPanelDefaultWidth = 380;
-const rightPanelMinWidth = 300;
-const rightPanelMaxWidth = 520;
-const panelRailWidth = 54;
-const chatPaneMinWidth = 540;
+const rightPanelDefaultWidth = 384;
+const rightPanelMinWidth = 320;
+const rightPanelMaxWidth = 480;
+const chatPaneMinWidth = 560;
 const keyboardResizeStep = 24;
+const constrainedBreakpoint = 1180;
 
 const starterPrompts = [
   {
@@ -315,14 +295,22 @@ function schemaStarterPrompts(label: string, kind: string): string[] {
   ].map((prompt) => kind === 'index' ? prompt.replace('data quality issues', 'unusual patterns') : prompt);
 }
 
-function ConnectionLogo({ kind }: { kind: ConnectionLogoKind }) {
+function ConnectionLogo({ kind, monochrome = false }: { kind: ConnectionLogoKind; monochrome?: boolean }) {
   const icon = connectionLogos[kind];
   return (
     <svg aria-hidden="true" className="connection-logo" viewBox="0 0 24 24">
-      <path d={icon.path} fill={`#${icon.hex}`} />
+      <path d={icon.path} fill={monochrome ? 'currentColor' : `#${icon.hex}`} />
     </svg>
   );
 }
+
+const connectionKindOptions: { kind: ConnectionLogoKind; label: string }[] = [
+  { kind: 'sqlite', label: 'SQLite' },
+  { kind: 'elasticsearch', label: 'Elasticsearch' },
+  { kind: 'mysql', label: 'MySQL' },
+  { kind: 'postgres', label: 'PostgreSQL' },
+  { kind: 'mongodb', label: 'MongoDB' },
+];
 
 function loadInitialTheme(): ThemeMode {
   if (typeof window === 'undefined') {
@@ -367,6 +355,17 @@ function dbKindLabel(kind: 'mysql' | 'postgres' | 'mongodb'): string {
     case 'mysql': return 'MySQL';
     case 'postgres': return 'PostgreSQL';
     case 'mongodb': return 'MongoDB';
+  }
+}
+
+function dbKindDisplayName(kind: string): string {
+  switch (kind) {
+    case 'sqlite': return 'SQLite';
+    case 'mysql': return 'MySQL';
+    case 'postgres': return 'PostgreSQL';
+    case 'mongodb': return 'MongoDB';
+    case 'elasticsearch': return 'Elasticsearch';
+    default: return kind;
   }
 }
 
@@ -448,96 +447,17 @@ function mergeActivityStep(activity: ChatActivityStep[], step: ChatActivityStep)
     : activity.findIndex((current) => !current.queryId && current.title === step.title);
   if (existingIndex < 0) {
     const next = [...activity, step];
-    logActivityDebug('merge append', {
-      stepId: step.id,
-      queryId: step.queryId,
-      status: step.status,
-      title: step.title,
-      before: activity.length,
-      after: next.length
-    });
     return next;
   }
   const next = activity.map((current, index) => index === existingIndex ? { ...current, ...step } : current);
-  logActivityDebug('merge update', {
-    stepId: step.id,
-    queryId: step.queryId,
-    status: step.status,
-    title: step.title,
-    existingIndex,
-    before: activity.length,
-    after: next.length
-  });
   return next;
 }
 
-function ChatActivityPanel({
-  activity,
-  generating,
-  open,
-  onToggle
-}: {
-  activity: ChatActivityStep[];
-  generating: boolean;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  const querySteps = activity.filter((step) => step.status !== 'thinking');
-  const visibleSteps = querySteps.length ? querySteps : activity;
-  logActivityDebug('panel render', {
-    generating,
-    open,
-    activityCount: activity.length,
-    visibleCount: visibleSteps.length,
-    latest: activity.at(-1)
-  });
-  return (
-    <div className={`activity-panel ${open ? 'open' : 'collapsed'}`} aria-live="polite" aria-label="Query activity">
-      <button type="button" className="activity-summary" onClick={onToggle} aria-expanded={open}>
-        {generating ? <Loader2 className="message-spinner" size={16} /> : <Sparkles size={16} />}
-        <span>{activitySummary(activity, generating)}</span>
-        <ChevronDown className="activity-chevron" size={16} />
-      </button>
-      <div className="activity-steps" aria-hidden={!open}>
-        {visibleSteps.map((step) => (
-          <div className={`activity-step ${step.status}`} key={step.queryId ?? step.id}>
-            <span className="activity-step-icon">{activityIcon(step)}</span>
-            <div>
-              <div className="activity-step-title">
-                <span>{step.title}</span>
-                <small className={`activity-stage ${step.status}`}>{step.status}</small>
-                {step.rowCount !== undefined && <small>{step.rowCount} rows</small>}
-                {step.elapsedMs !== undefined && <small>{step.elapsedMs} ms</small>}
-              </div>
-              {step.detail && <p>{step.detail}</p>}
-              {step.query && <code>{step.query}</code>}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function renderChatActivityPanel({
-  activity,
-  generating,
-  open,
-  onToggle
-}: {
-  activity: ChatActivityStep[];
-  generating: boolean;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <ChatActivityPanel
-      activity={activity}
-      generating={generating}
-      open={open}
-      onToggle={onToggle}
-    />
-  );
+function formatTimestamp(iso: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit'
+  }).format(new Date(iso));
 }
 
 export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
@@ -558,7 +478,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     hasApiKey: false
   });
   const [activeView, setActiveView] = useState<AppView>('workspace');
-  const [recentChatsOpen, setRecentChatsOpen] = useState(false);
+  const [showFlyoutChats, setShowFlyoutChats] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logs, setLogs] = useState<AppLogEntry[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -574,11 +494,13 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [messageActivities, setMessageActivities] = useState<Record<string, ChatActivityStep[]>>({});
   const [messageActivityOpen, setMessageActivityOpen] = useState<Record<string, boolean>>({});
   const [activeInspector, setActiveInspector] = useState<InspectorTab>('schema');
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [schemaViewMode, setSchemaViewMode] = useState<SchemaViewMode>('pro');
   const [schemaSearch, setSchemaSearch] = useState('');
   const [expandedSchemaItems, setExpandedSchemaItems] = useState<Record<string, boolean>>({});
   const [schemaScrolled, setSchemaScrolled] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(loadInitialTheme);
+  const [connectionKindMenuOpen, setConnectionKindMenuOpen] = useState(false);
   const [elasticsearchFormOpen, setElasticsearchFormOpen] = useState(false);
   const [elasticsearchHost, setElasticsearchHost] = useState('localhost');
   const [elasticsearchPort, setElasticsearchPort] = useState('9200');
@@ -598,11 +520,13 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [dbFormRememberPassword, setDbFormRememberPassword] = useState(false);
   const [dbFormAuthDatabase, setDbFormAuthDatabase] = useState('');
   const [rightPanelWidth, setRightPanelWidth] = useState(rightPanelDefaultWidth);
-  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [resizeDrag, setResizeDrag] = useState<ResizeDrag | null>(null);
+  const [copiedFeedback, setCopiedFeedback] = useState(false);
+  const [exportingCsv, setExportingCsv] = useState(false);
+  const [globalSearch, setGlobalSearch] = useState('');
   const shellRef = useRef<HTMLElement | null>(null);
   const recentChatsRef = useRef<HTMLDivElement | null>(null);
-  const schemaPanelRef = useRef<HTMLElement | null>(null);
+  const schemaPanelRef = useRef<HTMLDivElement | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const activeChatTurnIdRef = useRef<string | null>(null);
@@ -703,31 +627,20 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     return () => window.clearTimeout(timeout);
   }, [api, query, settings.safeMode]);
 
-  function scrollMessagesToEnd(reason: string) {
+  function scrollMessagesToEnd() {
     const messagesElement = messagesRef.current;
     if (messagesElement) {
       messagesElement.scrollTo({ top: messagesElement.scrollHeight, behavior: 'auto' });
     } else {
       messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
     }
-    logActivityDebug('scroll to end', {
-      reason,
-      messages: messages.length,
-      answerGenerating,
-      activityOpen,
-      activityCount: chatActivity.length,
-      latest: chatActivity.at(-1),
-      scrollTop: messagesElement?.scrollTop,
-      scrollHeight: messagesElement?.scrollHeight,
-      clientHeight: messagesElement?.clientHeight
-    });
   }
 
   useEffect(() => {
-    scrollMessagesToEnd('layout effect');
-    const frame = window.requestAnimationFrame(() => scrollMessagesToEnd('activity frame'));
-    const shortTimer = window.setTimeout(() => scrollMessagesToEnd('activity short timer'), 80);
-    const transitionTimer = window.setTimeout(() => scrollMessagesToEnd('activity transition timer'), 280);
+    scrollMessagesToEnd();
+    const frame = window.requestAnimationFrame(() => scrollMessagesToEnd());
+    const shortTimer = window.setTimeout(() => scrollMessagesToEnd(), 80);
+    const transitionTimer = window.setTimeout(() => scrollMessagesToEnd(), 280);
     return () => {
       window.cancelAnimationFrame(frame);
       window.clearTimeout(shortTimer);
@@ -736,37 +649,50 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }, [messages, answerGenerating, chatActivity, activityOpen]);
 
   useEffect(() => {
-    window.__dbchatActivityDebug = {
-      activeTurnId: activeChatTurnIdRef.current,
-      answerGenerating,
-      activityOpen,
-      chatActivity,
-      messages: messages.map((message) => ({
-        id: message.id,
-        role: message.role,
-        content: message.content.slice(0, 160)
-      })),
-      status,
-      updatedAt: new Date().toISOString()
-    };
-    logActivityDebug('state snapshot', window.__dbchatActivityDebug);
-  }, [answerGenerating, activityOpen, chatActivity, messages, status]);
-
-  useEffect(() => {
-    if (!recentChatsOpen) {
+    if (!showFlyoutChats) {
       return;
     }
 
-    function closeRecentChats(event: PointerEvent) {
+    function closeFlyout(event: PointerEvent) {
       if (event.target instanceof Node && recentChatsRef.current?.contains(event.target)) {
         return;
       }
-      setRecentChatsOpen(false);
+      setShowFlyoutChats(false);
     }
 
-    window.addEventListener('pointerdown', closeRecentChats);
-    return () => window.removeEventListener('pointerdown', closeRecentChats);
-  }, [recentChatsOpen]);
+    window.addEventListener('pointerdown', closeFlyout);
+    return () => window.removeEventListener('pointerdown', closeFlyout);
+  }, [showFlyoutChats]);
+
+  useEffect(() => {
+    if (!connectionKindMenuOpen) {
+      return;
+    }
+
+    function closeMenu(event: PointerEvent) {
+      const target = event.target as Node;
+      if (!target || !(target instanceof Node)) {
+        return;
+      }
+      const root = document.querySelector('.connection-kind-select');
+      if (root && !root.contains(target)) {
+        setConnectionKindMenuOpen(false);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setConnectionKindMenuOpen(false);
+      }
+    }
+
+    document.addEventListener('pointerdown', closeMenu);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', closeMenu);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [connectionKindMenuOpen]);
 
   useEffect(() => {
     if (!resizeDrag) {
@@ -833,11 +759,11 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }, [schema]);
 
   const filteredModels = useMemo(() => {
-    const query = modelSearch.trim().toLowerCase();
-    if (!query) {
+    const q = modelSearch.trim().toLowerCase();
+    if (!q) {
       return models;
     }
-    return models.filter((model) => `${model.id} ${model.name}`.toLowerCase().includes(query));
+    return models.filter((model) => `${model.id} ${model.name}`.toLowerCase().includes(q));
   }, [modelSearch, models]);
 
   const schemaTables = useMemo(() => sortSchemaTables(schema?.tables ?? []), [schema]);
@@ -854,6 +780,43 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
   const hasOnlyWelcomeMessage = messages.length === 1 && messages[0]?.role === 'assistant';
   const activeChatTitle = buildChatTitle(messages, connection);
+  const isConstrained = typeof window !== 'undefined' && window.innerWidth < constrainedBreakpoint;
+
+  // TSV serialization for Copy
+  function serializeResultAsTsv(result: QueryResult): string {
+    const header = result.columns.join('\t');
+    const rows = result.rows.map((row) =>
+      result.columns.map((col) => {
+        const val = row[col];
+        if (val === null || val === undefined) return '';
+        const str = String(val);
+        if (str.includes('\t') || str.includes('\n') || str.includes('"')) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      }).join('\t')
+    );
+    return [header, ...rows].join('\n');
+  }
+
+  // CSV serialization for export
+  function serializeResultAsCsv(result: QueryResult): string {
+    function quoteField(value: string): string {
+      if (value.includes(',') || value.includes('"') || value.includes('\r') || value.includes('\n')) {
+        return `"${value.replace(/"/g, '""')}"`;
+      }
+      return value;
+    }
+    const header = result.columns.map(quoteField).join(',');
+    const rows = result.rows.map((row) =>
+      result.columns.map((col) => {
+        const val = row[col];
+        if (val === null || val === undefined) return '';
+        return quoteField(String(val));
+      }).join(',')
+    );
+    return '\uFEFF' + [header, ...rows].join('\r\n');
+  }
 
   async function refreshHistories(nextApi = api) {
     if (!nextApi) return;
@@ -902,14 +865,15 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setMessageActivities({});
     setMessageActivityOpen({});
     setActiveInspector('schema');
+    setInspectorOpen(false);
     setActiveView('workspace');
-    setRecentChatsOpen(false);
+    setShowFlyoutChats(false);
     updateStatus('Ready for a new chat');
   }
 
   function openView(view: AppView) {
     setActiveView(view);
-    setRecentChatsOpen(false);
+    setShowFlyoutChats(false);
   }
 
   async function connectSqlite() {
@@ -931,6 +895,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       setConnection(config);
       setSchema(nextSchema);
       setActiveInspector('schema');
+      setInspectorOpen(true);
       setActiveView('workspace');
       setMessages((current) => [
         ...current,
@@ -981,6 +946,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       setConnection(config);
       setSchema(nextSchema);
       setActiveInspector('schema');
+      setInspectorOpen(true);
       setActiveView('workspace');
       setElasticsearchFormOpen(false);
       setMessages((current) => [
@@ -1015,6 +981,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       setConnection(config);
       setSchema(nextSchema);
       setActiveInspector('schema');
+      setInspectorOpen(true);
       setActiveView('workspace');
       updateStatus(`Connected to ${config.label}`);
       await refreshHistories();
@@ -1037,8 +1004,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setMessageActivities({});
     setMessageActivityOpen({});
     setActiveInspector(session.result ? 'results' : session.query ? 'query' : 'schema');
+    setInspectorOpen(Boolean(session.result || session.query));
     setActiveView('workspace');
-    setRecentChatsOpen(false);
+    setShowFlyoutChats(false);
     updateStatus(`Opened ${session.title}`);
 
     if (session.connection) {
@@ -1093,7 +1061,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setMessageActivities({});
     setMessageActivityOpen({});
     setActiveInspector('schema');
-    setRecentChatsOpen(false);
+    setInspectorOpen(false);
+    setShowFlyoutChats(false);
     await refreshHistories();
     updateStatus('Chat history cleared');
   }
@@ -1103,25 +1072,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     await api.deleteConnection(id);
     await refreshHistories();
     updateStatus('Saved connection deleted');
-  }
-
-  function prepareElasticsearchReconnect(config: ConnectionConfig, nextStatus: string) {
-    const values = elasticsearchHistoryValues(config);
-    setDbFormOpen(false);
-    setElasticsearchHost(values.host);
-    setElasticsearchPort(values.port);
-    setElasticsearchUseSsl(values.useSsl);
-    setElasticsearchVerifyCerts(values.verifyCerts);
-    setElasticsearchUsername(config.elasticsearchUsername ?? '');
-    setElasticsearchPassword('');
-    setElasticsearchRememberPassword(Boolean(config.elasticsearchHasSavedPassword || config.elasticsearchRememberPassword));
-    setElasticsearchFormOpen(true);
-    updateStatus(nextStatus);
-  }
-
-  function openElasticsearchForm() {
-    setDbFormOpen(false);
-    setElasticsearchFormOpen((current) => !current);
   }
 
   function openDbForm(kind: 'mysql' | 'postgres' | 'mongodb') {
@@ -1138,6 +1088,50 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setDbFormOpen(true);
   }
 
+  function prepareElasticsearchReconnect(config: ConnectionConfig, nextStatus: string) {
+    const values = elasticsearchHistoryValues(config);
+    setDbFormOpen(false);
+    setElasticsearchHost(values.host);
+    setElasticsearchPort(values.port);
+    setElasticsearchUseSsl(values.useSsl);
+    setElasticsearchVerifyCerts(values.verifyCerts);
+    setElasticsearchUsername(config.elasticsearchUsername ?? '');
+    setElasticsearchPassword('');
+    setElasticsearchRememberPassword(Boolean(config.elasticsearchHasSavedPassword || config.elasticsearchRememberPassword));
+    setElasticsearchFormOpen(true);
+    setActiveView('connections');
+    updateStatus(nextStatus);
+  }
+
+  function closeConnectionForm() {
+    setElasticsearchFormOpen(false);
+    setDbFormOpen(false);
+  }
+
+  function selectConnectionKind(kind: ConnectionLogoKind) {
+    setConnectionKindMenuOpen(false);
+    if (kind === 'sqlite') {
+      setElasticsearchFormOpen(false);
+      setDbFormOpen(false);
+      void connectSqlite();
+      return;
+    }
+    if (kind === 'elasticsearch') {
+      setDbFormOpen(false);
+      setElasticsearchHost('localhost');
+      setElasticsearchPort('9200');
+      setElasticsearchUseSsl(false);
+      setElasticsearchVerifyCerts(true);
+      setElasticsearchUsername('');
+      setElasticsearchPassword('');
+      setElasticsearchRememberPassword(false);
+      setElasticsearchFormOpen(true);
+      return;
+    }
+    setElasticsearchFormOpen(false);
+    openDbForm(kind);
+  }
+
   function prepareDbReconnect(config: ConnectionConfig, kind: 'mysql' | 'postgres' | 'mongodb', nextStatus: string) {
     setElasticsearchFormOpen(false);
     setDbFormKind(kind);
@@ -1150,6 +1144,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setDbFormRememberPassword(Boolean(config.hasSavedPassword || config.rememberPassword));
     setDbFormAuthDatabase(config.authDatabase ?? '');
     setDbFormOpen(true);
+    setActiveView('connections');
     updateStatus(nextStatus);
   }
 
@@ -1190,6 +1185,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       setConnection(config);
       setSchema(nextSchema);
       setActiveInspector('schema');
+      setInspectorOpen(true);
       setActiveView('workspace');
       setDbFormOpen(false);
       const tableLabel = dbFormKind === 'mongodb' ? 'collections' : 'tables';
@@ -1256,10 +1252,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         setQuery(latestQuery.query);
         setValidation(latestQuery.validation);
         setActiveInspector('query');
+        setInspectorOpen(true);
       }
       if (latestResult) {
         setResult(latestResult);
         setActiveInspector('results');
+        setInspectorOpen(true);
         updateStatus(`Returned ${latestResult.rowCount} rows in ${latestResult.elapsedMs} ms`);
       } else {
         updateStatus('Response ready');
@@ -1288,12 +1286,52 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       const nextResult = await api.executeQuery(query, settings.safeMode ? 'safe' : 'manual');
       setResult(nextResult);
       setActiveInspector('results');
+      setInspectorOpen(true);
       updateStatus(`Returned ${nextResult.rowCount} rows in ${nextResult.elapsedMs} ms`);
       await persistChatSession(messages, { query, result: nextResult });
     } catch (error) {
       reportError('The query could not be run.', error);
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Copy implementation
+  async function copyResult() {
+    if (!result) return;
+    try {
+      const tsv = serializeResultAsTsv(result);
+      await navigator.clipboard.writeText(tsv);
+      setCopiedFeedback(true);
+      setTimeout(() => setCopiedFeedback(false), 1500);
+      announce('Copied');
+    } catch {
+      announce('Copy failed');
+    }
+  }
+
+  // Export CSV implementation
+  async function exportCsv() {
+    if (!result || !api) return;
+    setExportingCsv(true);
+    try {
+      const csv = serializeResultAsCsv(result);
+      const filename = activeChatTitle.replace(/[^a-zA-Z0-9-_\s]/g, '').replace(/\s+/g, '-').toLowerCase()
+        + `-${new Date().toISOString().slice(0, 10)}.csv`;
+      await api.saveCsvFile({ content: csv, defaultName: filename });
+      announce('CSV exported');
+    } catch (error) {
+      announce('Export failed');
+      appendLog('error', 'CSV export failed', logDetail(error));
+    } finally {
+      setExportingCsv(false);
+    }
+  }
+
+  function announce(message: string) {
+    const announcer = document.getElementById('aria-live-announcer');
+    if (announcer) {
+      announcer.textContent = message;
     }
   }
 
@@ -1420,34 +1458,51 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setRightPanelWidth((current) => clampPanelWidth(current + widthDelta, rightPanelMinWidth, maxWidth));
   }
 
-  function renderInspector() {
+  function openOrFocusInspector(tab: InspectorTab) {
+    setActiveInspector(tab);
+    setInspectorOpen(true);
+    announce('Inspector opened');
+  }
+
+  function closeInspector() {
+    setInspectorOpen(false);
+  }
+
+  // ----- Render Helpers -----
+
+  function renderInspectorContent() {
     if (activeInspector === 'results') {
       return (
-        <section className="inspector-body" aria-label="Data results">
+        <div className="inspector-body" aria-label="Data results">
           {result ? (
             <>
-              <div className="result-summary">
-                <div className="result-metric">
-                  <strong>{result.rowCount}</strong>
-                  <span>{result.rowCount === 1 ? 'row' : 'rows'}</span>
-                </div>
-                <div className="result-metric">
-                  <strong>{result.columns.length}</strong>
-                  <span>{result.columns.length === 1 ? 'column' : 'columns'}</span>
-                </div>
-                <p>Returned in {result.elapsedMs} ms</p>
+              <div className="result-metadata">
+                <span>{result.rowCount} {result.rowCount === 1 ? 'row' : 'rows'} · {result.columns.length} {result.columns.length === 1 ? 'column' : 'columns'}</span>
+                {result.elapsedMs > 0 && <span> · {result.elapsedMs} ms</span>}
               </div>
-              <div className="table-wrap">
-                <table>
+              <div className="result-table-wrap">
+                <table className="result-table">
                   <thead>
                     <tr>
-                      {result.columns.map((column) => <th key={column}>{column}</th>)}
+                      {result.columns.map((column) => {
+                        const isNumeric = result.rows.some((row) => typeof row[column] === 'number');
+                        return <th key={column} className={isNumeric ? 'numeric' : ''} scope="col">{column}</th>;
+                      })}
                     </tr>
                   </thead>
                   <tbody>
                     {result.rows.map((row, index) => (
                       <tr key={index}>
-                        {result.columns.map((column) => <td key={column}>{String(row[column] ?? '')}</td>)}
+                        {result.columns.map((column) => {
+                          const val = row[column];
+                          const isNumeric = typeof val === 'number';
+                          const isNull = val === null || val === undefined;
+                          return (
+                            <td key={column} className={`${isNumeric ? 'numeric' : ''} ${isNull ? 'null' : ''}`}>
+                              {isNull ? '\u2014' : String(val)}
+                            </td>
+                          );
+                        })}
                       </tr>
                     ))}
                   </tbody>
@@ -1455,170 +1510,139 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
               </div>
             </>
           ) : (
-            <div className="empty-state">
-              <Table2 size={22} />
+            <div className="schema-empty">
+              <Table2 size={20} />
               <span>Ask a data question to see rows here.</span>
             </div>
           )}
-        </section>
+        </div>
       );
     }
 
     if (activeInspector === 'query') {
       return (
-        <section className="inspector-body query-inspector" aria-label="Query editor">
+        <div className="inspector-body query-view" aria-label="Query editor">
           <textarea
             className="query-editor"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-              placeholder={connection?.kind === 'elasticsearch' || connection?.kind === 'mongodb' ? 'Generated JSON will appear here.' : 'Generated SQL will appear here.'}
+            placeholder={connection?.kind === 'elasticsearch' || connection?.kind === 'mongodb' ? 'Generated JSON will appear here.' : 'Generated SQL will appear here.'}
             spellCheck={false}
           />
-          <div className={`validation ${validation?.safe ? 'safe' : 'blocked'}`}>
+          <div className={`query-validation ${validation?.safe ? 'safe' : 'blocked'}`}>
             <ShieldCheck size={16} />
             <span>{validation ? validation.reason : 'Query validation will appear here.'}</span>
           </div>
-          <div className="query-actions">
-            <button type="button" onClick={() => void navigator.clipboard.writeText(query)} disabled={!query.trim()}>
-              <Copy size={16} />
-              Copy
-            </button>
-            <button type="button" className="primary-button" onClick={() => void runQuery()} disabled={busy || !validation?.safe}>
-              <Play size={16} />
-              {settings.safeMode ? 'Run Safe Query' : 'Run Validated Query'}
-            </button>
-          </div>
-        </section>
+        </div>
       );
     }
 
     return (
-      <section className="inspector-body schema-panel" aria-label="Schema" onScroll={handleSchemaScroll} ref={schemaPanelRef}>
+      <div className="inspector-body schema-view" aria-label="Schema" onScroll={handleSchemaScroll} ref={schemaPanelRef}>
         {schema ? (
           <>
-            <div className="schema-summary">
-              <Database size={18} />
-              <div>
-                <strong>{connection?.label ?? schema.label ?? 'Database'}</strong>
-                <span>{schemaSummary}</span>
-              </div>
+            <div className="schema-search-field">
+              <Search size={14} />
+              <input
+                aria-label="Search schema"
+                onChange={(event) => setSchemaSearch(event.target.value)}
+                placeholder={`Search ${schemaObjectPlural(schema.kind)} or fields`}
+                type="search"
+                value={schemaSearch}
+              />
             </div>
-            <div className="schema-toolbar">
-              <label className="schema-search">
-                <Search size={14} />
-                <input
-                  aria-label="Search schema"
-                  onChange={(event) => setSchemaSearch(event.target.value)}
-                  placeholder={`Search ${schemaObjectPlural(schema.kind)} or fields`}
-                  type="search"
-                  value={schemaSearch}
-                />
-              </label>
-              <div className="schema-view-toggle" aria-label="Schema view">
-                {(['pro', 'raw'] as const).map((mode) => (
-                  <button
-                    aria-pressed={schemaViewMode === mode}
-                    className={schemaViewMode === mode ? 'active' : ''}
-                    key={mode}
-                    onClick={() => setSchemaViewMode(mode)}
-                    type="button"
-                  >
-                    {mode === 'pro' ? 'Pro' : 'Raw'}
-                  </button>
-                ))}
-              </div>
+            <div className="schema-view-toggle">
+              {(['pro', 'raw'] as const).map((mode) => (
+                <button
+                  aria-pressed={schemaViewMode === mode}
+                  className={schemaViewMode === mode ? 'active' : ''}
+                  key={mode}
+                  onClick={() => setSchemaViewMode(mode)}
+                  type="button"
+                >
+                  {mode === 'pro' ? 'Pro' : 'Raw'}
+                </button>
+              ))}
               {!schemaSearchActive && filteredSchemaTables.length > 0 && (
-                <button type="button" className="schema-expand-all" onClick={toggleAllSchemaItems}>
+                <button type="button" onClick={toggleAllSchemaItems} style={{ marginLeft: 'auto', fontSize: '11px', height: '26px', padding: '0 8px' }}>
                   {allSchemaItemsExpanded ? 'Collapse all' : 'Expand all'}
                 </button>
               )}
             </div>
-            {filteredSchemaTables.length ? (
-              <div className="schema-list">
-                {filteredSchemaTables.map((table) => {
+            <div className="schema-list">
+              {filteredSchemaTables.length ? (
+                filteredSchemaTables.map((table) => {
                   const objectKind = schemaObjectKind(schema.kind);
                   const friendlyName = humanizeIdentifier(table.name);
                   const displayName = schemaViewMode === 'pro' ? friendlyName : table.name;
                   const expanded = schemaSearchActive || Boolean(expandedSchemaItems[table.name]);
                   return (
-                    <article className={`schema-card ${expanded ? 'expanded' : ''}`} key={table.name}>
+                    <div className="schema-item" key={table.name}>
                       <button
                         aria-expanded={expanded}
-                        className="schema-card-header"
+                        className={`schema-item-header ${expanded ? 'expanded' : ''}`}
                         onClick={() => toggleSchemaItem(table.name)}
                         type="button"
                       >
-                        <ChevronDown size={15} />
-                        <span>
-                          <strong>{displayName}</strong>
-                          {schemaViewMode === 'pro' && table.name !== friendlyName && <small>{table.name}</small>}
-                        </span>
-                        <em>{objectKind}</em>
-                        <b>{table.columns.length} {table.columns.length === 1 ? 'field' : 'fields'}</b>
+                        <ChevronRight size={14} />
+                        <span className="schema-item-name">{displayName}</span>
+                        <span className="schema-item-type">{objectKind}</span>
+                        <span className="schema-item-count">{table.columns.length} {table.columns.length === 1 ? 'field' : 'fields'}</span>
                       </button>
-                      <p>{schemaFieldPreview(table.columns, schemaViewMode)}</p>
                       {expanded && (
-                        <div className="schema-card-detail">
+                        <div className="schema-item-fields">
                           {schemaViewMode === 'pro' ? (
                             <>
-                              <div className="schema-prompt-row">
+                              <div className="schema-prompt-row" style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', padding: '4px 4px 8px 24px' }}>
                                 {schemaStarterPrompts(friendlyName, objectKind).map((starterPrompt) => (
-                                  <button type="button" onClick={() => chooseSchemaPrompt(starterPrompt)} key={starterPrompt}>
+                                  <button type="button" onClick={() => chooseSchemaPrompt(starterPrompt)} key={starterPrompt} style={{ fontSize: '11px', height: 'auto', minHeight: '26px', padding: '4px 7px', justifyContent: 'flex-start' }}>
                                     {starterPrompt}
                                   </button>
                                 ))}
                               </div>
                               {groupedSchemaFields(table.columns).map((group) => (
-                                <section className="schema-field-group" key={group.group}>
-                                  <h3>{group.group}</h3>
-                                  <div className="schema-field-list">
-                                    {group.fields.map((column) => (
-                                      <div className="schema-field-row" key={column.name}>
-                                        <span>
-                                          <strong>{humanizeIdentifier(column.name)}</strong>
-                                          <small>{column.name}</small>
-                                        </span>
-                                        <em>{column.type}</em>
-                                        {column.primaryKey && <b>Primary</b>}
-                                      </div>
-                                    ))}
-                                  </div>
-                                </section>
+                                <div key={group.group}>
+                                  <div style={{ color: 'var(--color-text-tertiary)', fontSize: '10px', fontWeight: 700, letterSpacing: '0.5px', padding: '6px 4px 2px 24px' }}>{group.group.toUpperCase()}</div>
+                                  {group.fields.map((column) => (
+                                    <div className="schema-field-row" key={column.name}>
+                                      <span className="schema-field-name" style={{ fontWeight: 600 }}>{humanizeIdentifier(column.name)}</span>
+                                      <span className="schema-field-type" style={{ fontSize: '10px' }}>{column.name}</span>
+                                      <span className="schema-field-type">{column.type}</span>
+                                      {column.primaryKey && <span className="schema-field-type" style={{ color: 'var(--color-accent)' }}>Primary</span>}
+                                    </div>
+                                  ))}
+                                </div>
                               ))}
                             </>
                           ) : (
-                            <div className="schema-field-list raw">
-                              {table.columns.map((column) => (
-                                <div className="schema-field-row" key={column.name}>
-                                  <span>
-                                    <strong>{column.name}</strong>
-                                    <small>{fieldGroup(column)}</small>
-                                  </span>
-                                  <em>{column.type}</em>
-                                  {column.primaryKey && <b>Primary</b>}
-                                  <b>{column.nullable ? 'Nullable' : 'Required'}</b>
-                                </div>
-                              ))}
-                            </div>
+                            table.columns.map((column) => (
+                              <div className="schema-field-row" key={column.name}>
+                                <span className="schema-field-name" style={{ fontWeight: 600 }}>{column.name}</span>
+                                <span className="schema-field-type">{fieldGroup(column)}</span>
+                                <span className="schema-field-type">{column.type}</span>
+                                {column.primaryKey && <span className="schema-field-type" style={{ color: 'var(--color-accent)' }}>Primary</span>}
+                                <span className="schema-field-type">{column.nullable ? 'Nullable' : 'Required'}</span>
+                              </div>
+                            ))
                           )}
                         </div>
                       )}
-                    </article>
+                    </div>
                   );
-                })}
-              </div>
-            ) : (
-              <div className="empty-state schema-empty">
-                <Search size={22} />
-                <span>No schema matches found.</span>
-              </div>
-            )}
+                })
+              ) : (
+                <div className="schema-empty">
+                  <Search size={20} />
+                  <span>No schema matches found.</span>
+                </div>
+              )}
+            </div>
             {schemaScrolled && (
               <button
                 aria-label="Return to top of schema"
-                className="schema-return-top"
                 onClick={scrollSchemaToTop}
                 type="button"
+                style={{ position: 'sticky', bottom: 8, alignSelf: 'flex-end', zIndex: 10, fontSize: '11px', height: '28px', gap: '5px' }}
               >
                 <ArrowUp size={14} />
                 Top
@@ -1626,12 +1650,132 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             )}
           </>
         ) : (
-          <div className="empty-state">
-            <Database size={22} />
+          <div className="schema-empty">
+            <Database size={20} />
             <span>Connect a database to inspect its schema.</span>
           </div>
         )}
-      </section>
+      </div>
+    );
+  }
+
+  function renderInspector() {
+    const inspectorFooter = (
+      <div className="inspector-footer">
+        {activeInspector === 'results' ? (
+          <>
+            <button
+              className="inspector-footer-action"
+              disabled={!result}
+              onClick={() => void copyResult()}
+              type="button"
+              aria-label={copiedFeedback ? 'Copied' : 'Copy'}
+            >
+              <Copy size={14} />
+              {copiedFeedback ? 'Copied' : 'Copy'}
+            </button>
+            <button
+              className="inspector-footer-action"
+              disabled={!result || exportingCsv}
+              onClick={() => void exportCsv()}
+              type="button"
+              aria-label={exportingCsv ? 'Exporting…' : 'Export CSV'}
+            >
+              <Download size={14} />
+              {exportingCsv ? 'Exporting\u2026' : 'Export CSV'}
+            </button>
+          </>
+        ) : activeInspector === 'query' ? (
+          <>
+            <button
+              className="inspector-footer-action"
+              disabled={!query.trim()}
+              onClick={() => void navigator.clipboard.writeText(query)}
+              type="button"
+            >
+              <Copy size={14} />
+              Copy Query
+            </button>
+            <button
+              className="inspector-footer-action"
+              disabled={busy || !validation?.safe}
+              onClick={() => void runQuery()}
+              type="button"
+            >
+              <Play size={14} />
+              {settings.safeMode ? 'Run Safe Query' : 'Run Validated Query'}
+            </button>
+          </>
+        ) : null}
+      </div>
+    );
+
+    const inspectorClass = isConstrained && inspectorOpen ? 'inspector-overlay' : 'inspector';
+
+    return (
+      <aside className={inspectorClass} id="inspector-sidebar" aria-label="Inspector">
+        <div className="inspector-header">
+          <div className="inspector-header-top">
+            <button
+              aria-label="Close inspector"
+              className="inspector-back"
+              onClick={closeInspector}
+              type="button"
+            >
+              <PanelRightClose size={18} />
+            </button>
+            <h2 className="inspector-title">
+              {activeInspector === 'results' ? 'Data' : activeInspector === 'query' ? 'Query' : 'Schema'}
+            </h2>
+          </div>
+          {connection && (
+            <div className="inspector-source">
+              <Database size={14} />
+              <span>{connection.label}</span>
+            </div>
+          )}
+        </div>
+        <div className="inspector-tabs" role="tablist" aria-label="Inspector views">
+          <button
+            className={`inspector-tab ${activeInspector === 'results' ? 'selected' : ''}`}
+            onClick={() => setActiveInspector('results')}
+            role="tab"
+            aria-selected={activeInspector === 'results'}
+            aria-controls="inspector-results-panel"
+            type="button"
+          >
+            Results
+          </button>
+          <button
+            className={`inspector-tab ${activeInspector === 'query' ? 'selected' : ''}`}
+            onClick={() => setActiveInspector('query')}
+            role="tab"
+            aria-selected={activeInspector === 'query'}
+            aria-controls="inspector-query-panel"
+            type="button"
+          >
+            Query
+          </button>
+          <button
+            className={`inspector-tab ${activeInspector === 'schema' ? 'selected' : ''}`}
+            onClick={() => setActiveInspector('schema')}
+            role="tab"
+            aria-selected={activeInspector === 'schema'}
+            aria-controls="inspector-schema-panel"
+            type="button"
+          >
+            Schema
+          </button>
+        </div>
+        <div
+          id={`inspector-${activeInspector}-panel`}
+          role="tabpanel"
+          style={{ display: 'contents' }}
+        >
+          {renderInspectorContent()}
+        </div>
+        {inspectorFooter}
+      </aside>
     );
   }
 
@@ -1641,58 +1785,43 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     }
 
     return (
-      <form className="elasticsearch-form" aria-label="Elasticsearch connection" onSubmit={(event) => void connectElasticsearch(event)}>
-        <label>
-          <span>Host</span>
-          <input
-            value={elasticsearchHost}
-            onChange={(event) => setElasticsearchHost(event.target.value)}
-            placeholder="localhost"
-          />
-        </label>
-        <label>
-          <span>Port</span>
-          <input
-            value={elasticsearchPort}
-            onChange={(event) => setElasticsearchPort(event.target.value)}
-            inputMode="numeric"
-            type="number"
-            min={1}
-            max={65535}
-          />
-        </label>
-        <label>
-          <span>Username</span>
-          <input value={elasticsearchUsername} onChange={(event) => setElasticsearchUsername(event.target.value)} />
-        </label>
-        <label>
-          <span>Password</span>
-          <input type="password" value={elasticsearchPassword} onChange={(event) => setElasticsearchPassword(event.target.value)} />
-        </label>
-        <label className="elasticsearch-checkbox">
-          <input type="checkbox" checked={elasticsearchUseSsl} onChange={(event) => setElasticsearchUseSsl(event.target.checked)} />
-          <span>Use HTTPS</span>
-        </label>
-        <label className="elasticsearch-checkbox">
-          <input
-            type="checkbox"
-            checked={elasticsearchVerifyCerts}
-            onChange={(event) => setElasticsearchVerifyCerts(event.target.checked)}
-            disabled={!elasticsearchUseSsl}
-          />
-          <span>Verify TLS certificates</span>
-        </label>
-        <label className="elasticsearch-checkbox">
-          <input
-            type="checkbox"
-            checked={elasticsearchRememberPassword}
-            onChange={(event) => setElasticsearchRememberPassword(event.target.checked)}
-          />
-          <span>Remember password</span>
-        </label>
-        <button type="submit" className="primary-button" disabled={busy || !elasticsearchHost.trim() || !elasticsearchPort.trim()}>
-          Connect
-        </button>
+      <form className="connection-form" aria-label="Elasticsearch connection" onSubmit={(event) => void connectElasticsearch(event)}>
+        <div className="connection-form-row">
+          <label htmlFor="es-host">Host</label>
+          <input id="es-host" value={elasticsearchHost} onChange={(event) => setElasticsearchHost(event.target.value)} placeholder="localhost" />
+        </div>
+        <div className="connection-form-row">
+          <label htmlFor="es-port">Port</label>
+          <input id="es-port" value={elasticsearchPort} onChange={(event) => setElasticsearchPort(event.target.value)} inputMode="numeric" type="number" min={1} max={65535} />
+        </div>
+        <div className="connection-form-row">
+          <label htmlFor="es-user">Username</label>
+          <input id="es-user" value={elasticsearchUsername} onChange={(event) => setElasticsearchUsername(event.target.value)} />
+        </div>
+        <div className="connection-form-row">
+          <label htmlFor="es-pass">Password</label>
+          <input id="es-pass" type="password" value={elasticsearchPassword} onChange={(event) => setElasticsearchPassword(event.target.value)} />
+        </div>
+        <div className="connection-form-checkbox">
+          <input id="es-ssl" type="checkbox" checked={elasticsearchUseSsl} onChange={(event) => setElasticsearchUseSsl(event.target.checked)} />
+          <label htmlFor="es-ssl">Use HTTPS</label>
+        </div>
+        <div className="connection-form-checkbox">
+          <input id="es-certs" type="checkbox" checked={elasticsearchVerifyCerts} onChange={(event) => setElasticsearchVerifyCerts(event.target.checked)} disabled={!elasticsearchUseSsl} />
+          <label htmlFor="es-certs">Verify TLS certificates</label>
+        </div>
+        <div className="connection-form-checkbox">
+          <input id="es-remember" type="checkbox" checked={elasticsearchRememberPassword} onChange={(event) => setElasticsearchRememberPassword(event.target.checked)} />
+          <label htmlFor="es-remember">Remember password</label>
+        </div>
+        <div className="connection-form-actions">
+          <button type="submit" className="primary-button connection-form-submit" disabled={busy || !elasticsearchHost.trim() || !elasticsearchPort.trim()}>
+            Connect
+          </button>
+          <button type="button" className="connection-form-cancel" onClick={closeConnectionForm}>
+            Cancel
+          </button>
+        </div>
       </form>
     );
   }
@@ -1705,59 +1834,49 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     const label = dbKindLabel(dbFormKind);
 
     return (
-      <form className="elasticsearch-form" aria-label={`${label} connection`} onSubmit={(event) => void connectDb(event)}>
-        <label>
-          <span>Host</span>
-          <input
-            value={dbFormHost}
-            onChange={(event) => setDbFormHost(event.target.value)}
-            placeholder="localhost"
-          />
-        </label>
-        <label>
-          <span>Port</span>
-          <input
-            value={dbFormPort}
-            onChange={(event) => setDbFormPort(event.target.value)}
-            inputMode="numeric"
-            type="number"
-            min={1}
-            max={65535}
-          />
-        </label>
-        <label>
-          <span>Database</span>
-          <input value={dbFormDatabase} onChange={(event) => setDbFormDatabase(event.target.value)} placeholder="mydb" />
-        </label>
-        <label>
-          <span>Username</span>
-          <input value={dbFormUsername} onChange={(event) => setDbFormUsername(event.target.value)} />
-        </label>
-        <label>
-          <span>Password</span>
-          <input type="password" value={dbFormPassword} onChange={(event) => setDbFormPassword(event.target.value)} />
-        </label>
+      <form className="connection-form" aria-label={`${label} connection`} onSubmit={(event) => void connectDb(event)}>
+        <div className="connection-form-row">
+          <label htmlFor="db-host">Host</label>
+          <input id="db-host" value={dbFormHost} onChange={(event) => setDbFormHost(event.target.value)} placeholder="localhost" />
+        </div>
+        <div className="connection-form-row">
+          <label htmlFor="db-port">Port</label>
+          <input id="db-port" value={dbFormPort} onChange={(event) => setDbFormPort(event.target.value)} inputMode="numeric" type="number" min={1} max={65535} />
+        </div>
+        <div className="connection-form-row">
+          <label htmlFor="db-name">Database</label>
+          <input id="db-name" value={dbFormDatabase} onChange={(event) => setDbFormDatabase(event.target.value)} placeholder="mydb" />
+        </div>
+        <div className="connection-form-row">
+          <label htmlFor="db-user">Username</label>
+          <input id="db-user" value={dbFormUsername} onChange={(event) => setDbFormUsername(event.target.value)} />
+        </div>
+        <div className="connection-form-row">
+          <label htmlFor="db-pass">Password</label>
+          <input id="db-pass" type="password" value={dbFormPassword} onChange={(event) => setDbFormPassword(event.target.value)} />
+        </div>
         {dbFormKind === 'mongodb' && (
-          <label>
-            <span>Auth database</span>
-            <input value={dbFormAuthDatabase} onChange={(event) => setDbFormAuthDatabase(event.target.value)} placeholder="admin" />
-          </label>
+          <div className="connection-form-row">
+            <label htmlFor="db-auth">Auth database</label>
+            <input id="db-auth" value={dbFormAuthDatabase} onChange={(event) => setDbFormAuthDatabase(event.target.value)} placeholder="admin" />
+          </div>
         )}
-        <label className="elasticsearch-checkbox">
-          <input type="checkbox" checked={dbFormSsl} onChange={(event) => setDbFormSsl(event.target.checked)} />
-          <span>Use SSL/TLS</span>
-        </label>
-        <label className="elasticsearch-checkbox">
-          <input
-            type="checkbox"
-            checked={dbFormRememberPassword}
-            onChange={(event) => setDbFormRememberPassword(event.target.checked)}
-          />
-          <span>Remember password</span>
-        </label>
-        <button type="submit" className="primary-button" disabled={busy || !dbFormHost.trim() || !dbFormPort.trim()}>
-          Connect
-        </button>
+        <div className="connection-form-checkbox">
+          <input id="db-ssl" type="checkbox" checked={dbFormSsl} onChange={(event) => setDbFormSsl(event.target.checked)} />
+          <label htmlFor="db-ssl">Use SSL/TLS</label>
+        </div>
+        <div className="connection-form-checkbox">
+          <input id="db-remember" type="checkbox" checked={dbFormRememberPassword} onChange={(event) => setDbFormRememberPassword(event.target.checked)} />
+          <label htmlFor="db-remember">Remember password</label>
+        </div>
+        <div className="connection-form-actions">
+          <button type="submit" className="primary-button connection-form-submit" disabled={busy || !dbFormHost.trim() || !dbFormPort.trim()}>
+            Connect
+          </button>
+          <button type="button" className="connection-form-cancel" onClick={closeConnectionForm}>
+            Cancel
+          </button>
+        </div>
       </form>
     );
   }
@@ -1765,59 +1884,48 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   function renderSettingsControls() {
     return (
       <>
-        <div className="settings-grid">
-          <label>
-            <span>Provider</span>
-            <select
-              value={settings.provider}
-              onChange={(event) => void changeProvider(event.target.value as ModelProviderKind)}
-              aria-label="Model provider"
-            >
-              <option value="openrouter">OpenRouter</option>
-              <option value="openai">OpenAI</option>
-            </select>
-          </label>
-
-          <label>
-            <span>Model</span>
-            <div className="model-select-wrap">
-              <input
-                value={modelSearch}
-                onChange={(event) => void changeModelSearch(event.target.value)}
-                list="model-options"
-                disabled={modelsLoading || !models.length}
-                aria-label="Model name"
-                placeholder={modelsLoading ? 'Loading models...' : 'Search models'}
-              />
-              <datalist id="model-options">
-                {filteredModels.map((model) => (
-                  <option value={model.id} key={model.id}>{model.name}</option>
-                ))}
-              </datalist>
-              {modelsLoading && <Loader2 className="spin" size={16} aria-label="Loading models" />}
+        <div className="settings-section">
+          <p className="settings-section-title">Model provider</p>
+          <div className="settings-row">
+            <label className="settings-row-label" htmlFor="provider-select">Provider</label>
+            <div className="settings-row-control">
+              <select id="provider-select" value={settings.provider} onChange={(event) => void changeProvider(event.target.value as ModelProviderKind)} aria-label="Model provider">
+                <option value="openrouter">OpenRouter</option>
+                <option value="openai">OpenAI</option>
+              </select>
             </div>
-          </label>
-
-          <label className="api-key-field">
-            <span>{settings.provider} API key</span>
-            <div className="api-key-box">
-              <KeyRound size={15} />
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(event) => setApiKey(event.target.value)}
-                placeholder={settings.hasApiKey ? 'API key saved' : 'Paste API key'}
-                aria-label="API key"
-              />
-              <button type="button" onClick={() => void saveApiKey()} disabled={!apiKey.trim()}>
-                Save
-              </button>
+          </div>
+          <div className="settings-row">
+            <label className="settings-row-label" htmlFor="model-input">Model</label>
+            <div className="settings-row-control">
+              <div className="model-select-wrap">
+                <input id="model-input" value={modelSearch} onChange={(event) => void changeModelSearch(event.target.value)} list="model-options" disabled={modelsLoading || !models.length} aria-label="Model name" placeholder={modelsLoading ? 'Loading models...' : 'Search models'} />
+                <datalist id="model-options">
+                  {filteredModels.map((model) => (
+                    <option value={model.id} key={model.id}>{model.name}</option>
+                  ))}
+                </datalist>
+                {modelsLoading && <Loader2 className="spin" size={16} aria-label="Loading models" />}
+              </div>
             </div>
-          </label>
+          </div>
         </div>
-        <div className={`settings-status ${settings.hasApiKey ? 'saved' : ''}`}>
-          {settings.hasApiKey && <CheckCircle2 size={15} />}
-          {settingsStatus || (settings.hasApiKey ? 'API key saved.' : 'Settings are stored locally.')}
+        <div className="settings-section">
+          <p className="settings-section-title">API key</p>
+          <div className="settings-row">
+            <label className="settings-row-label" htmlFor="api-key-input">{settings.provider} API key</label>
+            <div className="settings-row-control">
+              <div className="api-key-row">
+                <input id="api-key-input" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={settings.hasApiKey ? 'API key saved' : 'Paste API key'} aria-label="API key" />
+                <button type="button" className="primary-button" onClick={() => void saveApiKey()} disabled={!apiKey.trim()}>Save</button>
+              </div>
+            </div>
+          </div>
+          <p className="settings-help">Keys are stored locally and never sent to the server.</p>
+          <div className={`settings-status ${settings.hasApiKey ? 'saved' : ''}`}>
+            {settings.hasApiKey && <CheckCircle2 size={15} />}
+            {settingsStatus || (settings.hasApiKey ? 'API key saved.' : 'No API key saved.')}
+          </div>
         </div>
       </>
     );
@@ -1828,10 +1936,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     return (
       <div className="history-list">
         {sessions.length ? sessions.map((session) => (
-          <article className={`history-item ${activeChatId === session.id ? 'active' : ''}`} key={session.id}>
+          <div className={`history-item ${activeChatId === session.id ? 'active' : ''}`} key={session.id}>
             <button type="button" className="history-main" onClick={() => void openChatSession(session)}>
               <MessageSquareText size={15} />
-              <span>
+              <span className="history-main-info">
                 <strong>{session.title}</strong>
                 <small>{formatHistoryDate(session.updatedAt)}</small>
               </span>
@@ -1839,7 +1947,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             <button type="button" className="history-delete" onClick={() => void deleteChatSession(session.id)} aria-label={`Delete chat ${session.title}`}>
               <Trash2 size={14} />
             </button>
-          </article>
+          </div>
         )) : (
           <p className="history-empty">Saved chats will appear here.</p>
         )}
@@ -1856,71 +1964,94 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       return (
         <section className="focus-view" aria-label="Connections">
           <header className="focus-header">
-            <div>
+            <div className="focus-header-title">
               <p>Database access</p>
               <h2>Connections</h2>
             </div>
-            <button type="button" onClick={() => openView('workspace')}>Back to chat</button>
+            <button type="button" className="focus-back-button" onClick={() => openView('workspace')}>Back to chat</button>
           </header>
-          <div className="focus-grid connections-view">
-            <section className="focus-panel" aria-label="Connection status">
-              <div className="connection-kicker">
-                <span className={connection ? 'status-dot connected' : 'status-dot'} />
-                <p>{connection ? 'Active connection' : 'No active connection'}</p>
-              </div>
-              <div className="connection-copy">
-                <strong>{connection ? connection.label : 'Choose a database'}</strong>
-                <span>{schemaSummary}</span>
-              </div>
-              <div className="connection-actions">
-                <button type="button" className="secondary-button" onClick={connectSqlite} disabled={busy || !api}>
-                  <ConnectionLogo kind="sqlite" />
-                  SQLite
-                </button>
-                <button type="button" className="secondary-button" onClick={openElasticsearchForm} disabled={busy || !api}>
-                  <ConnectionLogo kind="elasticsearch" />
-                  Elasticsearch
-                </button>
-                <button type="button" className="secondary-button" onClick={() => openDbForm('mysql')} disabled={busy || !api}>
-                  <ConnectionLogo kind="mysql" />
-                  MySQL
-                </button>
-                <button type="button" className="secondary-button" onClick={() => openDbForm('postgres')} disabled={busy || !api}>
-                  <ConnectionLogo kind="postgres" />
-                  PostgreSQL
-                </button>
-                <button type="button" className="secondary-button" onClick={() => openDbForm('mongodb')} disabled={busy || !api}>
-                  <ConnectionLogo kind="mongodb" />
-                  MongoDB
-                </button>
-              </div>
+
+          <div className="connections-section">
+            <p className="connections-section-title">Current connection</p>
+            <div className="connection-status-row">
+              <span className={connection ? 'status-dot connected' : 'status-dot'} />
+              <span className="connection-status-label">{connection ? connection.label : 'No active connection'}</span>
+              <span className="connection-status-detail">{schemaSummary}</span>
+            </div>
+          </div>
+
+          <div className="connections-section">
+            <p className="connections-section-title">New connection</p>
+            <div className="connection-kind-select">
+              <button
+                type="button"
+                className={`connection-kind-trigger${connectionKindMenuOpen ? ' open' : ''}`}
+                onClick={() => setConnectionKindMenuOpen((current) => !current)}
+                aria-expanded={connectionKindMenuOpen}
+                aria-haspopup="listbox"
+                disabled={busy || !api}
+              >
+                <Database size={16} />
+                <span>Choose connection type…</span>
+                <ChevronDown size={14} className={connectionKindMenuOpen ? 'open' : ''} />
+              </button>
+              {connectionKindMenuOpen && (
+                <div className="connection-kind-menu" role="listbox">
+                  {connectionKindOptions.map((option) => (
+                    <button
+                      key={option.kind}
+                      type="button"
+                      className="connection-kind-option"
+                      role="option"
+                      onClick={() => selectConnectionKind(option.kind)}
+                    >
+                      <ConnectionLogo kind={option.kind} monochrome />
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className={`connection-form-panel${elasticsearchFormOpen || dbFormOpen ? ' open' : ''}`}>
               {renderElasticsearchForm()}
               {renderDbForm()}
-            </section>
-            <section className="focus-panel history-section" aria-label="Connection history">
-              <div className="history-heading">
-                <span>Saved connections</span>
-                <Clock3 size={14} aria-hidden="true" />
-              </div>
+            </div>
+          </div>
+
+          <div className="connections-section">
+            <p className="connections-section-title">Saved connections</p>
+            {savedConnections.length ? (
               <div className="history-list">
-                {savedConnections.length ? savedConnections.map((item) => (
-                  <article className="history-item" key={item.id}>
-                    <button type="button" className="history-main" onClick={() => void connectFromHistory(item)} disabled={busy}>
-                      <Database size={15} />
-                      <span>
-                        <strong>{item.label}</strong>
-                        <small>{formatHistoryDate(item.lastConnectedAt)}</small>
-                      </span>
-                    </button>
-                    <button type="button" className="history-delete" onClick={() => void deleteConnection(item.id)} aria-label={`Delete connection ${item.label}`}>
-                      <Trash2 size={14} />
-                    </button>
-                  </article>
-                )) : (
-                  <p className="history-empty">Connected databases will appear here.</p>
-                )}
+                {savedConnections.map((item) => {
+                  const isActive = connection?.id === item.id;
+                  return (
+                    <div className={`saved-connection-row ${isActive ? 'active' : ''}`} key={item.id}>
+                      <button
+                        type="button"
+                        className="saved-connection-main"
+                        onClick={() => void connectFromHistory(item)}
+                        disabled={busy}
+                        aria-current={isActive ? 'true' : undefined}
+                      >
+                        <ConnectionLogo kind={item.kind} monochrome />
+                        <span className="saved-connection-label">{item.label}</span>
+                        <span className="saved-connection-date">{formatHistoryDate(item.lastConnectedAt)}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="saved-connection-delete"
+                        onClick={() => void deleteConnection(item.id)}
+                        aria-label={`Delete connection ${item.label}`}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
-            </section>
+            ) : (
+              <p className="history-empty">Connected databases will appear here.</p>
+            )}
           </div>
         </section>
       );
@@ -1930,12 +2061,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       return (
         <section className="focus-view" aria-label="Chat history">
           <header className="focus-header">
-            <div>
+            <div className="focus-header-title">
               <p>Saved conversations</p>
               <h2>History</h2>
             </div>
             <div className="focus-header-actions">
-              <button type="button" className="secondary-button" onClick={() => void clearChatHistory()} disabled={!chatSessions.length || !api}>
+              <button type="button" onClick={() => void clearChatHistory()} disabled={!chatSessions.length || !api}>
                 <Trash2 size={16} />
                 Clear all
               </button>
@@ -1945,7 +2076,24 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
               </button>
             </div>
           </header>
-          <section className="focus-panel history-section">{renderChatHistory()}</section>
+          <div className="history-list">
+            {chatSessions.length ? chatSessions.map((session) => (
+              <div className={`history-item ${activeChatId === session.id ? 'active' : ''}`} key={session.id}>
+                <button type="button" className="history-main" onClick={() => void openChatSession(session)}>
+                  <MessageSquareText size={15} />
+                  <span className="history-main-info">
+                    <strong>{session.title}</strong>
+                    <small>{formatHistoryDate(session.updatedAt)}</small>
+                  </span>
+                </button>
+                <button type="button" className="history-delete" onClick={() => void deleteChatSession(session.id)} aria-label={`Delete chat ${session.title}`}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            )) : (
+              <p className="history-empty">Saved chats will appear here.</p>
+            )}
+          </div>
         </section>
       );
     }
@@ -1953,334 +2101,428 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     return (
       <section className="focus-view" aria-label="Settings">
         <header className="focus-header">
-          <div>
+          <div className="focus-header-title">
             <p>Model and safety</p>
             <h2>Settings</h2>
           </div>
-          <button type="button" onClick={() => openView('workspace')}>Back to chat</button>
+          <button type="button" className="focus-back-button" onClick={() => openView('workspace')}>Back to chat</button>
         </header>
-        <div className="focus-grid settings-view">
-          <section className="focus-panel settings-panel">{renderSettingsControls()}</section>
-          <section className="focus-panel preferences-panel" aria-label="Workspace preferences">
-            <label className="safe-toggle">
-              <input
-                type="checkbox"
-                checked={settings.safeMode}
-                onChange={(event) => void saveSettings({ ...settings, safeMode: event.target.checked })}
-                aria-label="SAFE mode"
-              />
-              <ShieldCheck size={16} />
-              SAFE mode
-            </label>
-            <div className="theme-picker" aria-label="Theme">
-              {(['light', 'dark'] as const).map((group) => {
-                const groupThemes = themeRegistry.filter((entry) => entry.group === group);
-                const selectedId = groupThemes.some((entry) => entry.id === theme)
-                  ? theme
-                  : groupThemes[0]?.id ?? theme;
-                return (
-                  <div className="theme-group" key={group}>
-                    <div className="theme-group-label">
-                      {group === 'light' ? <Sun size={14} /> : <Moon size={14} />}
-                      <span>{group === 'light' ? 'Light' : 'Dark'}</span>
-                    </div>
-                    <select
-                      className="theme-select"
-                      value={selectedId}
-                      onChange={(event) => setTheme(event.target.value as ThemeMode)}
-                      aria-label={`${group === 'light' ? 'Light' : 'Dark'} theme`}
-                    >
-                      {groupThemes.map((entry) => (
-                        <option key={entry.id} value={entry.id}>{entry.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                );
-              })}
+
+        {renderSettingsControls()}
+
+        <div className="settings-section">
+          <p className="settings-section-title">Safety</p>
+          <div className="settings-row">
+            <label className="settings-row-label" htmlFor="safe-mode-toggle">SAFE mode</label>
+            <div className="settings-row-control">
+              <label className="safe-toggle-row">
+                <input id="safe-mode-toggle" type="checkbox" checked={settings.safeMode} onChange={(event) => void saveSettings({ ...settings, safeMode: event.target.checked })} />
+                <span>{settings.safeMode ? 'On — only read-only queries are allowed' : 'Off — validated reads and writes are allowed'}</span>
+              </label>
             </div>
-            <div className="provider-card">
-              <span>{settings.provider}</span>
-              <strong>{settings.model}</strong>
-              <p>{settings.hasApiKey ? 'API key saved locally' : 'API key not saved'}</p>
-            </div>
-            <button
-              aria-expanded={logsOpen}
-              className="logs-button"
-              onClick={() => setLogsOpen((current) => !current)}
-              type="button"
-            >
-              <List size={17} />
-              {logsOpen ? 'Hide logs' : 'View logs'}
-            </button>
-          </section>
+          </div>
         </div>
-        {logsOpen && (
-          <section className="focus-panel logs-viewer" aria-label="Application logs">
-            <div className="logs-heading">
-              <div>
-                <p>Recent activity</p>
-                <h3>Logs</h3>
+
+        <div className="settings-section">
+          <p className="settings-section-title">Appearance</p>
+          {(['light', 'dark'] as const).map((group) => {
+            const groupThemes = themeRegistry.filter((entry) => entry.group === group);
+            const selectedId = groupThemes.some((entry) => entry.id === theme)
+              ? theme
+              : groupThemes[0]?.id ?? theme;
+            return (
+              <div className="theme-row" key={group}>
+                <div className="theme-row-label">
+                  {group === 'light' ? <Sun size={14} /> : <Moon size={14} />}
+                  {group === 'light' ? 'Light' : 'Dark'}
+                </div>
+                <select className="theme-select" value={selectedId} onChange={(event) => setTheme(event.target.value as ThemeMode)} aria-label={`${group === 'light' ? 'Light' : 'Dark'} theme`}>
+                  {groupThemes.map((entry) => (
+                    <option key={entry.id} value={entry.id}>{entry.label}</option>
+                  ))}
+                </select>
               </div>
-              <button type="button" onClick={() => setLogs([])} disabled={!logs.length}>Clear</button>
-            </div>
-            <div className="logs-list">
-              {logs.length ? logs.map((entry) => (
-                <article className={`log-entry ${entry.level}`} key={entry.id}>
-                  <div>
-                    <strong>{entry.message}</strong>
-                    <time>{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time>
-                  </div>
-                  {entry.detail && <pre>{entry.detail}</pre>}
-                </article>
-              )) : (
-                <p className="history-empty">App activity and error details will appear here.</p>
+            );
+          })}
+        </div>
+
+        <div className="settings-section">
+          <p className="settings-section-title">Provider status</p>
+          <div className="provider-summary">
+            <strong>{settings.provider}</strong>
+            <span>{settings.model}</span>
+            <span>{settings.hasApiKey ? 'API key saved locally' : 'API key not saved'}</span>
+          </div>
+        </div>
+
+        <div className="settings-section">
+          <p className="settings-section-title">Application logs</p>
+          <button type="button" className="logs-toggle" onClick={() => setLogsOpen((current) => !current)} aria-expanded={logsOpen}>
+            {logsOpen ? 'Hide logs' : 'View logs'}
+          </button>
+          {logsOpen && (
+            <div className="logs-section">
+              <div className="logs-list">
+                {logs.length ? logs.map((entry) => (
+                  <article className={`log-entry ${entry.level}`} key={entry.id}>
+                    <div className="log-entry-header">
+                      <strong>{entry.message}</strong>
+                      <time>{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time>
+                    </div>
+                    {entry.detail && <pre>{entry.detail}</pre>}
+                  </article>
+                )) : (
+                  <p className="log-entry-empty">App activity and error details will appear here.</p>
+                )}
+              </div>
+              {logs.length > 0 && (
+                <button type="button" className="focus-back-button" onClick={() => setLogs([])} style={{ marginTop: '12px' }}>Clear logs</button>
               )}
             </div>
-          </section>
-        )}
+          )}
+        </div>
       </section>
     );
   }
 
   const shellStyle = {
-    '--left-panel-width': `${leftPanelWidth}px`,
-    '--right-panel-width': `${rightPanelCollapsed ? panelRailWidth : rightPanelWidth}px`
+    '--sidebar-width': `${inspectorOpen ? (isConstrained ? '220px' : '240px') : (isConstrained ? '220px' : '240px')}`,
+    '--inspector-width': inspectorOpen ? `${isConstrained ? '0px' : `${rightPanelWidth}px`}` : '0px'
   } as CSSProperties;
 
   return (
     <main
       className={`app-shell${resizeDrag ? ' resizing-panels' : ''}`}
-      data-theme={theme}
       ref={shellRef}
       style={shellStyle}
     >
-      <aside className="sidebar workspace-rail-open" id="workspace-sidebar" aria-label="Database workspace">
-          <nav className="icon-rail" aria-label="Workspace destinations">
+      {/* ARIA live region for announcements */}
+      <div id="aria-live-announcer" aria-live="polite" aria-atomic="true" className="visually-hidden" />
+
+      {/* Integrated Toolbar */}
+      <header className="window-toolbar" role="toolbar" aria-label="Application toolbar">
+        <div className="toolbar-traffic-light-reserve" />
+        <button
+          aria-label="Toggle sidebar"
+          className="toolbar-icon-button"
+          onClick={() => {}} /* Sidebar is always visible in Scape design */
+          type="button"
+          title="Toggle sidebar"
+        >
+          <Plus size={16} />
+        </button>
+        <button
+          aria-label="Back"
+          className="toolbar-icon-button"
+          disabled={activeView !== 'history'}
+          onClick={() => openView('workspace')}
+          type="button"
+          title="Back"
+        >
+          <ArrowLeft size={16} />
+        </button>
+        <button
+          aria-label="Forward"
+          className="toolbar-icon-button"
+          disabled
+          type="button"
+          title="Forward"
+        >
+          <ArrowRight size={16} />
+        </button>
+        <div className="toolbar-search">
+          <Search size={14} />
+          <input
+            aria-label="Search"
+            onChange={(event) => setGlobalSearch(event.target.value)}
+            placeholder="Search"
+            type="search"
+            value={globalSearch}
+          />
+          {globalSearch && (
             <button
-              aria-label="Chat workspace"
-              className={`rail-action brand-action ${activeView === 'workspace' ? 'active' : ''}`}
-              onClick={() => openView('workspace')}
+              aria-label="Clear search"
+              className="toolbar-search-clear"
+              onClick={() => setGlobalSearch('')}
               type="button"
             >
-              <span className="brand-mark" aria-hidden="true">DB</span>
-              <span className="rail-tooltip">Chat workspace</span>
+              <XCircle size={14} />
             </button>
-            <button aria-label="New chat" className="rail-action" onClick={resetChat} type="button">
-              <Plus size={19} />
-              <span className="rail-tooltip">New chat</span>
-            </button>
-            <div className="recent-anchor" ref={recentChatsRef}>
-              <button
-                aria-expanded={recentChatsOpen}
-                aria-label="Recent chats"
-                className={`rail-action ${activeView === 'history' || recentChatsOpen ? 'active' : ''}`}
-                onClick={() => {
-                  if (activeView !== 'workspace') {
-                    openView('history');
-                    return;
-                  }
-                  setRecentChatsOpen((current) => !current);
-                }}
-                type="button"
-              >
-                <Clock3 size={19} />
-                <span className="rail-tooltip">Recent chats</span>
-              </button>
-              {activeView === 'workspace' && recentChatsOpen && (
-                <section className="recent-flyout" aria-label="Recent chats flyout">
-                  <div className="history-heading">
-                    <span>Recent chats</span>
-                    <button type="button" onClick={() => openView('history')}>All history</button>
-                  </div>
-                  {renderChatHistory(4)}
-                </section>
-              )}
-            </div>
+          )}
+        </div>
+        <div className="toolbar-spacer" />
+        <button
+          aria-label="Connection selector"
+          className="connection-selector"
+          onClick={() => openView('connections')}
+          type="button"
+          title={connection ? `Connected: ${connection.label}` : 'No connection'}
+        >
+          <Database size={14} />
+          <span className="connection-selector-label">
+            {connection ? connection.label : 'No database'}
+          </span>
+          <ChevronDown size={12} />
+        </button>
+        <button
+          aria-label="Settings"
+          className="toolbar-icon-button"
+          onClick={() => openView('settings')}
+          type="button"
+          title="Settings"
+        >
+          <Settings size={16} />
+        </button>
+      </header>
+
+      {/* Workspace Sidebar */}
+      <aside className="workspace-sidebar" aria-label="Database workspace">
+        <div className="sidebar-content">
+          <div className="sidebar-section-label" style={{ marginTop: 0 }}>Navigation</div>
+          <button
+            aria-label="New chat"
+            className="sidebar-action-row"
+            onClick={resetChat}
+            type="button"
+          >
+            <Plus size={16} />
+            <span className="sidebar-action-row-label">New chat</span>
+          </button>
+
+          <div className="sidebar-section-label">Connections</div>
+          {savedConnections.length > 0 ? savedConnections.slice(0, 4).map((conn) => (
             <button
-              aria-label="Connections"
-              className={`rail-action ${activeView === 'connections' ? 'active' : ''}`}
+              className={`sidebar-action-row ${connection?.id === conn.id ? 'selected' : ''}`}
+              key={conn.id}
+              onClick={() => void connectFromHistory(conn)}
+              type="button"
+            >
+              <span
+                className="sidebar-source-dot"
+                style={{ backgroundColor: conn.kind === 'sqlite' ? 'var(--source-neutral)' : conn.kind === 'postgres' ? 'var(--source-analytics)' : conn.kind === 'mysql' ? 'var(--source-customer)' : conn.kind === 'mongodb' ? 'var(--source-operations)' : 'var(--source-marketing)' }}
+              />
+              <span className="sidebar-action-row-label">{conn.label}</span>
+            </button>
+          )) : (
+            <button
+              className="sidebar-action-row"
               onClick={() => openView('connections')}
               type="button"
             >
-              <Database size={19} />
-              {connection && <span className="rail-status-dot" aria-hidden="true" />}
-              <span className="rail-tooltip">Connections</span>
+              <Database size={16} />
+              <span className="sidebar-action-row-label">Add connection</span>
             </button>
+          )}
+
+          <div className="sidebar-section-label">Chats</div>
+          {chatSessions.slice(0, 6).map((session) => (
             <button
-              aria-label="Settings"
-              className={`rail-action ${activeView === 'settings' ? 'active' : ''}`}
-              onClick={() => openView('settings')}
+              className={`sidebar-action-row ${activeChatId === session.id ? 'selected' : ''}`}
+              key={session.id}
+              onClick={() => void openChatSession(session)}
               type="button"
             >
-              <Settings size={19} />
-              {settings.hasApiKey && <CheckCircle2 className="rail-saved" size={12} aria-label="API key saved" />}
-              <span className="rail-tooltip">Settings</span>
+              <MessageSquareText size={16} />
+              <span className="sidebar-action-row-label">{session.title}</span>
             </button>
-          </nav>
-        </aside>
+          ))}
+          {chatSessions.length > 6 && (
+            <button
+              className="sidebar-action-row"
+              onClick={() => openView('history')}
+              type="button"
+            >
+              <span className="sidebar-action-row-label" style={{ color: 'var(--color-text-tertiary)', fontSize: '12px' }}>Show more</span>
+              <ChevronDown size={14} />
+            </button>
+          )}
+        </div>
+        <div className="sidebar-spacer" />
+        <button
+          className={`sidebar-action-row ${activeView === 'settings' ? 'selected' : ''}`}
+          onClick={() => openView('settings')}
+          type="button"
+        >
+          <Settings size={16} />
+          <span className="sidebar-action-row-label">Settings</span>
+        </button>
+      </aside>
 
-      <section className="chat-pane" aria-label={activeView === 'workspace' ? 'Chat' : 'Workspace view'}>
+      {/* Conversation Canvas */}
+      <section className="conversation-pane" aria-label={activeView === 'workspace' ? 'Chat' : 'Workspace view'}>
         {renderFocusedView() ?? (
           <>
-        <header className="chat-header">
-          <div className="chat-heading">
-            <div className="chat-title-row">
-              <h2>{activeChatTitle}</h2>
-              <div className="workspace-context">
-                <button
-                  aria-label="Open connections"
-                  className="context-chip connection-chip"
-                  onClick={() => openView('connections')}
-                  title={connection ? `Connected database: ${connection.label}` : 'Open connections'}
-                  type="button"
-                >
-                  <Database size={14} />
-                  <span className="context-label">{connection ? connection.label : 'No database connected'}</span>
-                </button>
-                <span
-                  aria-label={settings.safeMode ? 'Safe reads on' : 'SAFE mode off'}
-                  className={`context-chip ${settings.safeMode ? 'safe' : 'warning'}`}
-                  title={settings.safeMode ? 'Safe reads on' : 'SAFE mode off'}
-                >
-                  <ShieldCheck size={14} />
-                  <span className="context-label">{settings.safeMode ? 'Safe reads on' : 'SAFE mode off'}</span>
-                </span>
+            <div className="conversation-header">
+              <h1 className="conversation-title">{activeChatTitle}</h1>
+              <p className="conversation-date-label">Today</p>
+              <div className="conversation-status">
+                <span>{status}</span>
               </div>
+              <hr className="conversation-divider" />
             </div>
-            <div className="chat-status" title={status}>
-              <Sparkles size={14} />
-              <span>{status}</span>
-            </div>
-          </div>
-        </header>
 
-        <div className="messages" ref={messagesRef}>
-          {hasOnlyWelcomeMessage && (
-            <section className="welcome-panel" aria-label="Starter prompts">
-              <div>
-                <h3>Ask about the data.</h3>
-                <p>
-                  {settings.safeMode
-                    ? 'Connect a database and DB Chat will run safe read-only analysis from the conversation.'
-                    : 'Connect a database and DB Chat will run validated reads and table or document writes from the conversation.'}
-                </p>
-              </div>
-              <div className="starter-grid">
-                {starterPrompts.map((starter) => (
-                  <button type="button" className="starter-card" onClick={() => chooseStarter(starter.prompt)} key={starter.title}>
-                    <span>{starter.title}</span>
-                    <ChevronRight size={17} />
+            <div className="transcript" ref={messagesRef}>
+              {hasOnlyWelcomeMessage && (
+                <section className="welcome-panel" aria-label="Starter prompts">
+                  <div>
+                    <h3>Ask about the data.</h3>
+                    <p>
+                      {settings.safeMode
+                        ? 'Connect a database and DB Chat will run safe read-only analysis from the conversation.'
+                        : 'Connect a database and DB Chat will run validated reads and table or document writes from the conversation.'}
+                    </p>
+                  </div>
+                  <div className="starter-list">
+                    {starterPrompts.map((starter) => (
+                      <button type="button" className="starter-row" onClick={() => chooseStarter(starter.prompt)} key={starter.title}>
+                        <span className="sidebar-action-row-label">{starter.title}</span>
+                        <ChevronRight size={16} />
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              )}
+              {messages.length > 1 && (
+                <div className="transcript-grid">
+                  {messages.map((message) => {
+                    const completedActivity = message.role === 'assistant' ? messageActivities[message.id] : undefined;
+                    const shouldShowCompletedActivity = Boolean(completedActivity?.length);
+                    return (
+                      <div className="transcript-row" key={message.id}>
+                        <div className="transcript-actor">
+                          {message.role === 'assistant' ? 'DB Chat' : 'You'}
+                        </div>
+                        <div className="transcript-content">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                          {message.role === 'assistant' && result && (
+                            <button
+                              className="result-link"
+                              onClick={() => openOrFocusInspector('results')}
+                              type="button"
+                            >
+                              View {result.rowCount} {result.rowCount === 1 ? 'row' : 'rows'}
+                            </button>
+                          )}
+                          {shouldShowCompletedActivity && (
+                            <div className="inline-activity">
+                              <button
+                                type="button"
+                                onClick={() => setMessageActivityOpen((current) => ({
+                                  ...current,
+                                  [message.id]: !(current[message.id] ?? false)
+                                }))}
+                                style={{ background: 'none', border: 'none', color: 'var(--color-text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', padding: '4px 0', height: 'auto' }}
+                                aria-expanded={messageActivityOpen[message.id] ?? false}
+                              >
+                                <ChevronDown size={14} style={{ transition: 'transform 120ms', transform: messageActivityOpen[message.id] ? 'rotate(0deg)' : 'rotate(-90deg)' }} />
+                                <span>{activitySummary(completedActivity ?? [], false)}</span>
+                              </button>
+                              {(messageActivityOpen[message.id] ?? false) && (
+                                <div className="inline-activity-steps">
+                                  {completedActivity?.map((step) => (
+                                    <div className="inline-activity-step" key={step.id}>
+                                      <span className="activity-step-icon">{activityIcon(step)}</span>
+                                      <span>{step.title}</span>
+                                      {step.status && <span style={{ color: 'var(--color-text-tertiary)', fontSize: '11px' }}>{step.status}</span>}
+                                      {step.rowCount !== undefined && <span style={{ color: 'var(--color-text-tertiary)', fontSize: '11px' }}>{step.rowCount} rows</span>}
+                                      {step.elapsedMs !== undefined && <span style={{ color: 'var(--color-text-tertiary)', fontSize: '11px' }}>{step.elapsedMs} ms</span>}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        <div className="transcript-time">{formatTimestamp(message.createdAt)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+
+              {/* Live activity */}
+              {answerGenerating && chatActivity.length > 0 && (
+                <div className="inline-activity" style={{ paddingTop: '12px' }}>
+                  <div className="inline-activity-row">
+                    <Loader2 className="inline-activity-spinner" size={14} />
+                    <span className="inline-activity-text">{activitySummary(chatActivity, true)}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActivityOpen((current) => !current)}
+                    style={{ background: 'none', border: 'none', color: 'var(--color-text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', padding: '2px 0', height: 'auto', marginLeft: '20px' }}
+                    aria-expanded={activityOpen}
+                  >
+                    <ChevronDown size={14} style={{ transition: 'transform 120ms', transform: activityOpen ? 'rotate(0deg)' : 'rotate(-90deg)' }} />
+                    <span>Details</span>
                   </button>
-                ))}
-              </div>
-            </section>
-          )}
-          {!hasOnlyWelcomeMessage && messages.map((message) => {
-            const completedActivity = message.role === 'assistant' ? messageActivities[message.id] : undefined;
-            const shouldShowCompletedActivity = Boolean(completedActivity?.length);
-            return (
-              <article className={`message ${message.role}`} key={message.id}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                {shouldShowCompletedActivity && renderChatActivityPanel({
-                  activity: completedActivity ?? [],
-                  generating: false,
-                  open: messageActivityOpen[message.id] ?? false,
-                  onToggle: () => setMessageActivityOpen((current) => ({
-                    ...current,
-                    [message.id]: !(current[message.id] ?? false)
-                  }))
-                })}
-              </article>
-            );
-          })}
-          <div ref={messagesEndRef} />
-        </div>
-
-        {answerGenerating && chatActivity.length > 0 && (
-          <div className="live-activity-dock">
-            {renderChatActivityPanel({
-              activity: chatActivity,
-              generating: true,
-              open: activityOpen,
-              onToggle: () => setActivityOpen((current) => !current)
-            })}
-          </div>
-        )}
-
-        <form className="composer" onSubmit={(event) => void sendChat(event)}>
-          <textarea
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            placeholder="Ask about the connected database..."
-            rows={3}
-          />
-          <div className="composer-footer">
-            <div className="composer-meta">
-              <span>{connection ? connection.label : 'SQLite connection needed'}</span>
-              <span>{prompt.length} / 3,000</span>
+                  {activityOpen && (
+                    <div className="inline-activity-steps">
+                      {chatActivity.map((step) => (
+                        <div className="inline-activity-step" key={step.id}>
+                          <span className="activity-step-icon">{activityIcon(step)}</span>
+                          <span>{step.title}</span>
+                          {step.status && <span style={{ color: 'var(--color-text-tertiary)', fontSize: '11px' }}>{step.status}</span>}
+                          {step.query && <code style={{ fontSize: '11px', background: 'var(--color-control)', padding: '1px 4px', borderRadius: '4px' }}>{step.query}</code>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            <button type="submit" disabled={busy || !prompt.trim()} aria-label="Send message">
-              <Send size={18} />
-            </button>
-          </div>
-        </form>
+
+            {/* Composer */}
+            <div className="composer-wrapper">
+              <form className="composer" onSubmit={(event) => void sendChat(event)}>
+                <textarea
+                  value={prompt}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault();
+                      const form = event.currentTarget.closest('form');
+                      if (form) form.requestSubmit();
+                    }
+                  }}
+                  placeholder="Ask a follow-up"
+                  aria-label="Message input"
+                />
+                <button
+                  type="submit"
+                  className="composer-send"
+                  disabled={busy || !prompt.trim()}
+                  aria-label="Send message"
+                  title="Send message"
+                >
+                  {answerGenerating ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
+                </button>
+              </form>
+            </div>
           </>
         )}
       </section>
 
-      {rightPanelCollapsed ? (
-        <aside className="panel-rail inspector-rail" id="inspector-sidebar" aria-label="Collapsed inspector sidebar">
+      {/* Inspector */}
+      {inspectorOpen ? (
+        renderInspector()
+      ) : (
+        <aside className="panel-rail inspector-rail" id="inspector-sidebar" aria-label="Collapsed inspector sidebar" style={{ gridColumn: 3, borderLeft: '1px solid var(--color-separator)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '14px 9px' }}>
           <button
             aria-label="Expand inspector sidebar"
-            className="panel-rail-button"
-            onClick={() => setRightPanelCollapsed(false)}
+            className="toolbar-icon-button"
+            onClick={() => { setInspectorOpen(true); }}
             title="Expand inspector sidebar"
             type="button"
           >
             <PanelRightOpen size={18} />
           </button>
         </aside>
-      ) : (
-        <aside className="inspector" id="inspector-sidebar" aria-label="Inspector">
-          <header className="inspector-header">
-            <div className="inspector-heading-row">
-              <div>
-                <p>
-                  {activeInspector === 'results'
-                    ? 'Executed output'
-                    : activeInspector === 'query'
-                      ? `Generated ${connection?.kind === 'elasticsearch' || connection?.kind === 'mongodb' ? 'JSON' : 'SQL'}`
-                      : 'Database map'}
-                </p>
-                <h2>{activeInspector === 'results' ? 'Results' : activeInspector === 'query' ? 'Query' : 'Schema'}</h2>
-              </div>
-              <button
-                aria-label="Collapse inspector sidebar"
-                className="panel-collapse-button"
-                onClick={() => setRightPanelCollapsed(true)}
-                title="Collapse inspector sidebar"
-                type="button"
-              >
-                <PanelRightClose size={18} />
-              </button>
-            </div>
-            <div className="inspector-tabs" role="tablist" aria-label="Inspector views">
-              <button type="button" className={activeInspector === 'results' ? 'active' : ''} onClick={() => setActiveInspector('results')}>
-                Results
-              </button>
-              <button type="button" className={activeInspector === 'query' ? 'active' : ''} onClick={() => setActiveInspector('query')}>
-                Query
-              </button>
-              <button type="button" className={activeInspector === 'schema' ? 'active' : ''} onClick={() => setActiveInspector('schema')}>
-                Schema
-              </button>
-            </div>
-          </header>
-          {renderInspector()}
-        </aside>
       )}
 
-      {!rightPanelCollapsed && (
+      {/* Resize handle */}
+      {inspectorOpen && !isConstrained && (
         <div
           aria-controls="inspector-sidebar"
           aria-label="Resize inspector sidebar"
@@ -2296,7 +2538,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           tabIndex={0}
         />
       )}
-
     </main>
   );
 }
