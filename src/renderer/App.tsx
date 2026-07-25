@@ -2757,13 +2757,14 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                         <option value="high">High</option>
                         <option value="max">Max</option>
                       </select>
-                      <ChevronDown size={12} aria-hidden="true" />
+                      <ChevronDown size={12} className="chevron" aria-hidden="true" />
                     </div>
                   </div>
                   {connection && (
                     <div className="composer-footer-group">
                       <label htmlFor="safety-select" className="composer-footer-label">Safety</label>
                       <div className="composer-select composer-select--safety" data-level={safetyLevel}>
+                        <ShieldCheck size={13} aria-hidden="true" />
                         <select
                           id="safety-select"
                           value={safetyLevel}
@@ -2781,8 +2782,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                           <option value="standard">Standard</option>
                           <option value="unrestricted">Unrestricted</option>
                         </select>
-                        <ShieldCheck size={13} aria-hidden="true" />
-                        <ChevronDown size={12} aria-hidden="true" />
+                        <ChevronDown size={12} className="chevron" aria-hidden="true" />
                       </div>
                     </div>
                   )}
