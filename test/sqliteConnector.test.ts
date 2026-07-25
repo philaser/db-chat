@@ -26,7 +26,7 @@ describe('SQLiteConnector', () => {
     expect(schema.tables[0].name).toBe('users');
     expect(schema.tables[0].columns.map((column) => column.name)).toContain('name');
 
-    const result = await connector.executeQuery('select name from users order by id;', 'safe');
+    const result = await connector.executeQuery('select name from users order by id;');
     expect(result.rows).toEqual([{ name: 'Ada' }, { name: 'Grace' }]);
     connector.close();
   });
@@ -47,10 +47,10 @@ describe('SQLiteConnector', () => {
       createdAt: new Date().toISOString()
     });
 
-    const writeResult = await connector.executeQuery("insert into users(name) values ('Ada');", 'manual');
+    const writeResult = await connector.executeQuery("insert into users(name) values ('Ada');");
     expect(writeResult.rows).toEqual([{ changes: 1, lastInsertRowid: '1' }]);
 
-    const result = await connector.executeQuery('select name from users;', 'safe');
+    const result = await connector.executeQuery('select name from users;');
     expect(result.rows).toEqual([{ name: 'Ada' }]);
     connector.close();
   });

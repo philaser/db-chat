@@ -1,17 +1,16 @@
+import { QueryValidator, type SafetyLevel } from './QueryValidator.js';
 import type {
   ConnectionConfig,
   DatabaseConnector,
   DatabaseSchema,
-  QueryExecutionMode,
   QueryResult,
-  QueryValidationResult,
   TableInfo
 } from '../../shared/types.js';
-import { validatePostgresqlReadOnlyQuery } from './postgresqlValidation.js';
 
 export class PostgresConnector implements DatabaseConnector {
   private client: unknown = null;
   private config: ConnectionConfig | null = null;
+  private safetyLevel: SafetyLevel = 'standard';
 
   async connect(config: ConnectionConfig): Promise<void> {
     const { Client } = await import('pg');
@@ -78,19 +77,21 @@ export class PostgresConnector implements DatabaseConnector {
     };
   }
 
-  validateQuery(query: string, mode: QueryExecutionMode): QueryValidationResult {
-    return validatePostgresqlReadOnlyQuery(query, mode);
+  setSafetyLevel(level: SafetyLevel): void {
+    this.safetyLevel = level;
   }
 
-  async executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult> {
+  async executeQuery(query: string): Promise<QueryResult> {
     const client = this.requireClient();
-    const validation = this.validateQuery(query, mode);
-    if (!validation.safe) {
-      throw new Error(validation.reason);
+
+    const validation = QueryValidator.validate(query, this.safetyLevel);
+    if (!validation.ok) {
+      throw new Error(validation.reason ?? 'Query validation failed.');
     }
+    const effectiveQuery = validation.modifiedQuery ?? query;
 
     const start = performance.now();
-    const result = await client.query(validation.normalizedQuery);
+    const result = await client.query(effectiveQuery);
     const elapsedMs = Math.round(performance.now() - start);
     const rows = result.rows as Record<string, unknown>[];
 

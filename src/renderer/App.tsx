@@ -2,8 +2,10 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  Check,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Clock3,
   Copy,
@@ -12,24 +14,31 @@ import {
   Loader2,
   MessageSquareText,
   Moon,
-  PanelRightClose,
   PanelRightOpen,
+  Pencil,
   Play,
   Plus,
   Search,
   Send,
   Settings,
+  Shield,
+  ShieldAlert,
   ShieldCheck,
+  ShieldX,
   Sun,
   Table2,
   Trash2,
+  X,
   XCircle
 } from 'lucide-react';
 import {
+  Component,
   FormEvent,
+  useCallback,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
   type UIEvent as ReactUIEvent,
   useEffect,
   useMemo,
@@ -47,26 +56,29 @@ import {
   type SimpleIcon
 } from 'simple-icons';
 import type {
+  AuditEntry,
   ChatMessage,
   ChatActivityStep,
   ConnectionConfig,
   ConnectionHistoryItem,
   DatabaseSchema,
+  EffortLevel,
   ModelChatMessage,
   ModelInfo,
   ModelProviderKind,
   PersistedChatSession,
   PersistedSettings,
   QueryResult,
-  QueryValidationResult,
+  SafetyLevel,
   TableInfo
 } from '../shared/types';
 
 const fallbackApi = typeof window !== 'undefined' ? window.dbchat : undefined;
 const themeStorageKey = 'dbchat:theme';
 
-type InspectorTab = 'results' | 'query' | 'schema';
-type AppView = 'workspace' | 'connections' | 'history' | 'settings';
+type InspectorTab = 'results' | 'query' | 'schema' | 'audit';
+type AppView = 'workspace' | 'history' | 'settings';
+type SidebarMode = 'projects' | 'project';
 type ConnectionLogoKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres' | 'mongodb';
 type SchemaViewMode = 'pro' | 'raw';
 type ThemeMode =
@@ -320,8 +332,8 @@ function loadInitialTheme(): ThemeMode {
   return stored && validThemeIds.has(stored) ? stored as ThemeMode : 'light';
 }
 
-function createInitialMessages(): ChatMessage[] {
-  return [nowMessage('assistant', initialAssistantMessage)];
+function createInitialMessages(connected = false): ChatMessage[] {
+  return connected ? [] : [nowMessage('assistant', initialAssistantMessage)];
 }
 
 function buildChatTitle(messages: ChatMessage[], connection: ConnectionConfig | null): string {
@@ -460,13 +472,55 @@ function formatTimestamp(iso: string): string {
   }).format(new Date(iso));
 }
 
+class ErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: { componentStack: string }) {
+    console.error('[dbchat:error-boundary]', error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: '40px', textAlign: 'center', color: 'var(--color-text-primary)' }}>
+          <h2 style={{ marginBottom: '12px' }}>Something went wrong</h2>
+          <p style={{ color: 'var(--color-text-secondary)', marginBottom: '16px' }}>
+            {this.state.error.message}
+          </p>
+          <button
+            type="button"
+            onClick={() => { this.setState({ error: null }); window.location.reload(); }}
+            style={{
+              padding: '8px 16px',
+              borderRadius: '8px',
+              border: '1px solid var(--color-separator)',
+              background: 'var(--color-control)',
+              cursor: 'pointer',
+              color: 'var(--color-text-primary)'
+            }}
+          >
+            Reload
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [connection, setConnection] = useState<ConnectionConfig | null>(null);
   const [schema, setSchema] = useState<DatabaseSchema | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>(createInitialMessages);
   const [prompt, setPrompt] = useState('');
   const [query, setQuery] = useState('');
-  const [validation, setValidation] = useState<QueryValidationResult | null>(null);
   const [result, setResult] = useState<QueryResult | null>(null);
   const [chatSessions, setChatSessions] = useState<PersistedChatSession[]>([]);
   const [savedConnections, setSavedConnections] = useState<ConnectionHistoryItem[]>([]);
@@ -474,10 +528,11 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [settings, setSettings] = useState<PersistedSettings & { hasApiKey: boolean }>({
     provider: 'openrouter',
     model: 'openai/gpt-4.1-mini',
-    safeMode: true,
     hasApiKey: false
   });
   const [activeView, setActiveView] = useState<AppView>('workspace');
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>('projects');
+  const [activeProject, setActiveProject] = useState<ConnectionConfig | null>(null);
   const [showFlyoutChats, setShowFlyoutChats] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logs, setLogs] = useState<AppLogEntry[]>([]);
@@ -488,6 +543,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [apiKey, setApiKey] = useState('');
   const [status, setStatus] = useState('Ready');
   const [busy, setBusy] = useState(false);
+  const [streamingContent, setStreamingContent] = useState('');
   const [answerGenerating, setAnswerGenerating] = useState(false);
   const [chatActivity, setChatActivity] = useState<ChatActivityStep[]>([]);
   const [activityOpen, setActivityOpen] = useState(false);
@@ -501,6 +557,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [schemaScrolled, setSchemaScrolled] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(loadInitialTheme);
   const [connectionKindMenuOpen, setConnectionKindMenuOpen] = useState(false);
+  const [showNewProjectModal, setShowNewProjectModal] = useState(false);
+  const [connectingProjectId, setConnectingProjectId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
+  const [chatRenameValue, setChatRenameValue] = useState('');
   const [elasticsearchFormOpen, setElasticsearchFormOpen] = useState(false);
   const [elasticsearchHost, setElasticsearchHost] = useState('localhost');
   const [elasticsearchPort, setElasticsearchPort] = useState('9200');
@@ -524,21 +586,38 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [copiedFeedback, setCopiedFeedback] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
+  const [pendingApproval, setPendingApproval] = useState<{
+    id: string;
+    toolName: string;
+    purpose: string;
+    queryPreview?: string;
+    risk: 'none' | 'low' | 'medium' | 'high';
+  } | null>(null);
+  const [auditEntries, setAuditEntries] = useState<Array<{ id: string; timestamp: string; toolName: string; permissionDecision: string; queryPreview?: string; risk?: string }>>([]);
+  const [effortLevel, setEffortLevel] = useState<EffortLevel>('medium');
+  const [safetyLevel, setSafetyLevelState] = useState<SafetyLevel>('standard');
+  const [pendingSafetyConfirm, setPendingSafetyConfirm] = useState(false);
+  const [openDropdown, setOpenDropdown] = useState<string | null>(null);
+  const dropdownRef = useRef<HTMLDivElement | null>(null);
   const shellRef = useRef<HTMLElement | null>(null);
   const recentChatsRef = useRef<HTMLDivElement | null>(null);
   const schemaPanelRef = useRef<HTMLDivElement | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const activeChatTurnIdRef = useRef<string | null>(null);
 
   function appendLog(level: LogLevel, message: string, detail?: string) {
-    setLogs((current) => [{
+    const entry = {
       id: crypto.randomUUID(),
       level,
       message,
       detail,
       timestamp: new Date().toISOString()
-    }, ...current].slice(0, 150));
+    };
+    setLogs((current) => [entry, ...current].slice(0, 150));
+    const prefix = level === 'error' ? '❌' : '📋';
+    console.log(`[dbchat:${level}] ${message}${detail ? ' — ' + detail : ''}`);
   }
 
   function updateStatus(message: string) {
@@ -548,8 +627,50 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
   function reportError(message: string, error: unknown) {
     setStatus(message);
-    appendLog('error', message, logDetail(error));
+    const detail = logDetail(error);
+    appendLog('error', message, detail);
+    console.error(`[dbchat:crash] ${message}`, error);
   }
+
+  useEffect(() => {
+    function handleGlobalError(event: ErrorEvent) {
+      reportError('Unhandled renderer error', event.error ?? event.message);
+    }
+    function handleRejection(event: PromiseRejectionEvent) {
+      reportError('Unhandled promise rejection', event.reason);
+    }
+    window.addEventListener('error', handleGlobalError);
+    window.addEventListener('unhandledrejection', handleRejection);
+    return () => {
+      window.removeEventListener('error', handleGlobalError);
+      window.removeEventListener('unhandledrejection', handleRejection);
+    };
+  }, []);
+
+  // Bridge renderer console to main process for terminal visibility
+  useEffect(() => {
+    if (!api) return;
+    const origError = console.error;
+    const origWarn = console.warn;
+    const origLog = console.log;
+    console.log = (...args) => {
+      origLog(...args);
+      void api.rendererLog('log', args.map(String).join(' '));
+    };
+    console.warn = (...args) => {
+      origWarn(...args);
+      void api.rendererLog('warn', args.map(String).join(' '));
+    };
+    console.error = (...args) => {
+      origError(...args);
+      void api.rendererLog('error', args.map(String).join(' '));
+    };
+    return () => {
+      console.log = origLog;
+      console.warn = origWarn;
+      console.error = origError;
+    };
+  }, [api]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -557,11 +678,27 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }, [theme]);
 
   useEffect(() => {
+    if (connection?.safetyLevel) {
+      setSafetyLevelState(connection.safetyLevel);
+    }
+  }, [connection?.id, connection?.safetyLevel]);
+
+  useEffect(() => {
     if (!api) {
       updateStatus('Desktop app bridge unavailable. Run DB Chat in Electron to connect databases.');
       return;
     }
-    void api.loadSettings().then(setSettings).catch((error) => reportError('Settings could not be loaded. Defaults are in use.', error));
+    void api.loadSettings().then((s) => { 
+      setSettings(s); 
+      if (s.effortLevel) {
+        setEffortLevel(s.effortLevel);
+      } else {
+        const defaults = { ...s, effortLevel: 'medium' as EffortLevel };
+        setEffortLevel('medium');
+        setSettings(defaults);
+        void api.saveSettings(defaults);
+      }
+    }).catch((error) => reportError('Settings could not be loaded. Defaults are in use.', error));
     void refreshHistories(api);
   }, [api]);
 
@@ -574,7 +711,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     let active = true;
     setModelsLoading(true);
     setSettingsStatus('Loading models...');
-    void api.listModels(settings.provider)
+    void api.listModels()
       .then((nextModels) => {
         if (!active) return;
         setModels(nextModels);
@@ -606,6 +743,17 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }, [settings.model]);
 
   useEffect(() => {
+    if (!openDropdown) return;
+    function handlePointerDown(event: PointerEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setOpenDropdown(null);
+      }
+    }
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [openDropdown]);
+
+  useEffect(() => {
     setSchemaSearch('');
     setExpandedSchemaItems({});
     setSchemaScrolled(false);
@@ -613,19 +761,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       schemaPanelRef.current.scrollTop = 0;
     }
   }, [schema]);
-
-  useEffect(() => {
-    if (!api || !query) {
-      setValidation(null);
-      return;
-    }
-    const timeout = window.setTimeout(() => {
-      void api.validateQuery(query, settings.safeMode ? 'safe' : 'manual').then(setValidation).catch((error: Error) => {
-        setValidation({ safe: false, reason: error.message, normalizedQuery: query });
-      });
-    }, 150);
-    return () => window.clearTimeout(timeout);
-  }, [api, query, settings.safeMode]);
 
   function scrollMessagesToEnd() {
     const messagesElement = messagesRef.current;
@@ -781,6 +916,14 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const hasOnlyWelcomeMessage = messages.length === 1 && messages[0]?.role === 'assistant';
   const activeChatTitle = buildChatTitle(messages, connection);
   const isConstrained = typeof window !== 'undefined' && window.innerWidth < constrainedBreakpoint;
+  const isProjectPage = sidebarMode === 'project' && activeChatId === null && activeView === 'workspace';
+
+  useEffect(() => {
+    if (isProjectPage) {
+      setActiveInspector('schema');
+      setInspectorOpen(true);
+    }
+  }, [isProjectPage]);
 
   // TSV serialization for Copy
   function serializeResultAsTsv(result: QueryResult): string {
@@ -854,11 +997,31 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }
 
   function resetChat() {
+    setActiveChatId(crypto.randomUUID());
+    setMessages(createInitialMessages(!connection));
+    setPrompt('');
+    setQuery('');
+    setResult(null);
+    setChatActivity([]);
+    setActivityOpen(false);
+    setMessageActivities({});
+    setMessageActivityOpen({});
+    setActiveInspector('schema');
+    setActiveView('workspace');
+    setShowFlyoutChats(false);
+    updateStatus('Ready for a new chat');
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
+  function closeProject() {
+    setConnection(null);
+    setSchema(null);
+    setActiveProject(null);
+    setSidebarMode('projects');
     setActiveChatId(null);
     setMessages(createInitialMessages());
     setPrompt('');
     setQuery('');
-    setValidation(null);
     setResult(null);
     setChatActivity([]);
     setActivityOpen(false);
@@ -868,7 +1031,20 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setInspectorOpen(false);
     setActiveView('workspace');
     setShowFlyoutChats(false);
-    updateStatus('Ready for a new chat');
+    updateStatus('Closed project');
+  }
+
+  function openNewProjectModal() {
+    setShowNewProjectModal(true);
+    setElasticsearchFormOpen(false);
+    setDbFormOpen(false);
+  }
+
+  function closeNewProjectModal() {
+    setShowNewProjectModal(false);
+    setElasticsearchFormOpen(false);
+    setDbFormOpen(false);
+    setConnectionKindMenuOpen(false);
   }
 
   function openView(view: AppView) {
@@ -893,6 +1069,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       }
       const nextSchema = await api.connect(config);
       setConnection(config);
+      setActiveProject(config);
+      setSidebarMode('project');
+      setShowNewProjectModal(false);
       setSchema(nextSchema);
       setActiveInspector('schema');
       setInspectorOpen(true);
@@ -944,6 +1123,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       };
       const nextSchema = await api.connect(config);
       setConnection(config);
+      setActiveProject(config);
+      setSidebarMode('project');
+      setShowNewProjectModal(false);
       setSchema(nextSchema);
       setActiveInspector('schema');
       setInspectorOpen(true);
@@ -974,11 +1156,14 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       prepareDbReconnect(config, config.kind, `Enter the password to reconnect ${config.label}.`);
       return;
     }
+    setConnectingProjectId(config.id);
     setBusy(true);
     updateStatus(`Connecting to ${config.label}...`);
     try {
       const nextSchema = await api.connect(config);
       setConnection(config);
+      setActiveProject(config);
+      setSidebarMode('project');
       setSchema(nextSchema);
       setActiveInspector('schema');
       setInspectorOpen(true);
@@ -989,6 +1174,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       reportError('Could not connect to the saved database.', error);
     } finally {
       setBusy(false);
+      setConnectingProjectId(null);
     }
   }
 
@@ -1010,6 +1196,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     updateStatus(`Opened ${session.title}`);
 
     if (session.connection) {
+      setActiveProject(session.connection);
+      setSidebarMode('project');
       if (session.connection.kind === 'elasticsearch'
         && !session.connection.elasticsearchPassword
         && !session.connection.elasticsearchHasSavedPassword) {
@@ -1054,14 +1242,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setMessages(createInitialMessages());
     setPrompt('');
     setQuery('');
-    setValidation(null);
     setResult(null);
     setChatActivity([]);
     setActivityOpen(false);
     setMessageActivities({});
     setMessageActivityOpen({});
     setActiveInspector('schema');
-    setInspectorOpen(false);
     setShowFlyoutChats(false);
     await refreshHistories();
     updateStatus('Chat history cleared');
@@ -1070,8 +1256,48 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   async function deleteConnection(id: string) {
     if (!api) return;
     await api.deleteConnection(id);
+    if (connection?.id === id) {
+      closeProject();
+    }
     await refreshHistories();
     updateStatus('Saved connection deleted');
+  }
+
+  function startRename(id: string, currentLabel: string) {
+    setRenamingId(id);
+    setRenameValue(currentLabel);
+  }
+
+  async function commitRename(id: string, label: string) {
+    if (!api || !label.trim()) {
+      setRenamingId(null);
+      return;
+    }
+    await api.renameConnection(id, label.trim());
+    setRenamingId(null);
+    await refreshHistories();
+    updateStatus('Connection renamed');
+  }
+
+  function startChatRename(session: PersistedChatSession) {
+    setRenamingChatId(session.id);
+    setChatRenameValue(session.title);
+  }
+
+  async function commitChatRename(id: string) {
+    if (!api || !chatRenameValue.trim()) {
+      setRenamingChatId(null);
+      return;
+    }
+    const session = chatSessions.find((s) => s.id === id);
+    if (!session) {
+      setRenamingChatId(null);
+      return;
+    }
+    await api.saveChatSession({ ...session, title: chatRenameValue.trim() });
+    setRenamingChatId(null);
+    await refreshHistories();
+    updateStatus('Chat renamed');
   }
 
   function openDbForm(kind: 'mysql' | 'postgres' | 'mongodb') {
@@ -1099,7 +1325,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setElasticsearchPassword('');
     setElasticsearchRememberPassword(Boolean(config.elasticsearchHasSavedPassword || config.elasticsearchRememberPassword));
     setElasticsearchFormOpen(true);
-    setActiveView('connections');
+    setShowNewProjectModal(true);
     updateStatus(nextStatus);
   }
 
@@ -1144,7 +1370,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setDbFormRememberPassword(Boolean(config.hasSavedPassword || config.rememberPassword));
     setDbFormAuthDatabase(config.authDatabase ?? '');
     setDbFormOpen(true);
-    setActiveView('connections');
+    setShowNewProjectModal(true);
     updateStatus(nextStatus);
   }
 
@@ -1183,6 +1409,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       };
       const nextSchema = await api.connect(config);
       setConnection(config);
+      setActiveProject(config);
+      setSidebarMode('project');
+      setShowNewProjectModal(false);
       setSchema(nextSchema);
       setActiveInspector('schema');
       setInspectorOpen(true);
@@ -1210,13 +1439,58 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     const nextMessages = [...messages, userMessage];
     const turnId = crypto.randomUUID();
     activeChatTurnIdRef.current = turnId;
-    const unsubscribeProgress = api.onChatProgress(turnId, (progressEvent) => {
-      if (progressEvent.turnId !== activeChatTurnIdRef.current) {
-        return;
+    let streamedContent = '';
+    let accumulatedThinking = '';
+    const unsubscribeEvents = api.subscribeToAgentEvents(turnId, (event) => {
+      if (event.turnId !== activeChatTurnIdRef.current) return;
+      switch (event.type) {
+        case 'text-delta':
+          streamedContent += String(event.data.delta ?? '');
+          setStreamingContent(streamedContent);
+          break;
+        case 'tool-start':
+          setChatActivity((current) => [
+            ...current,
+            { id: String(event.data.toolName ?? ''), status: 'running', title: String(event.data.purpose ?? event.data.toolName ?? 'Running tool...'), createdAt: event.timestamp }
+          ]);
+          setActivityOpen(true);
+          updateStatus(String(event.data.purpose ?? 'Running tool...'));
+          break;
+        case 'tool-complete':
+          setChatActivity((current) =>
+            current.map((step) =>
+              step.id === event.data.toolName ? { ...step, status: 'success' as const } : step
+            )
+          );
+          break;
+        case 'thinking-delta':
+          accumulatedThinking += String(event.data.delta ?? '');
+          break;
+        case 'status':
+          updateStatus(String(event.data.message ?? ''));
+          break;
+        case 'approval-required': {
+          const d = event.data;
+          const src = (d.interruption as Record<string, unknown> | undefined) ?? d;
+          const risk = (src.risk as string) || 'low';
+          appendLog('info', `Approval required: toolName=${String(src.toolName)}, risk=${risk}, dataKeys=${Object.keys(d).join(',')}`);
+          setPendingApproval({
+            id: String(src.id ?? ''),
+            toolName: String(src.toolName ?? ''),
+            purpose: String(src.purpose ?? ''),
+            queryPreview: src.queryPreview as string | undefined,
+            risk: risk as 'none' | 'low' | 'medium' | 'high'
+          });
+          break;
+        }
+        case 'approval-resolved':
+          setPendingApproval(null);
+          break;
+        case 'complete':
+        case 'error':
+        case 'aborted':
+          break;
       }
-      setChatActivity((current) => mergeActivityStep(current, progressEvent.step));
-      setActivityOpen(true);
-      updateStatus(progressEvent.step.title);
     });
     setMessages((current) => [...current, userMessage]);
     setPrompt('');
@@ -1225,51 +1499,28 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setBusy(true);
     setAnswerGenerating(true);
     updateStatus('Thinking...');
+    appendLog('info', `sendChat starting turn=${turnId}, effort=${effortLevel}, safety=${safetyLevel}, prompt="${prompt.trim().slice(0, 80)}..."`);
     try {
       const chatHistory: ModelChatMessage[] = nextMessages.map((message) => ({
         role: message.role,
         content: message.content
       }));
+      appendLog('info', 'Calling api.sendChat...');
       const response = await api.sendChat(chatHistory, turnId);
+      appendLog('info', `sendChat completed, message id=${response.message.id}`);
       const finalMessages = [...nextMessages, response.message];
       setMessages(finalMessages);
-      const latestQuery = response.generatedQueries?.at(-1) ?? response.generatedQuery;
-      const latestResult = response.queryResults?.at(-1) ?? response.queryResult;
-      const completedActivity = response.activity ?? [];
-      if (completedActivity.length) {
-        setMessageActivities((current) => ({
-          ...current,
-          [response.message.id]: completedActivity
-        }));
-        setMessageActivityOpen((current) => ({
-          ...current,
-          [response.message.id]: false
-        }));
-      }
+      setStreamingContent('');
       setChatActivity([]);
       setActivityOpen(false);
-      if (latestQuery) {
-        setQuery(latestQuery.query);
-        setValidation(latestQuery.validation);
-        setActiveInspector('query');
-        setInspectorOpen(true);
-      }
-      if (latestResult) {
-        setResult(latestResult);
-        setActiveInspector('results');
-        setInspectorOpen(true);
-        updateStatus(`Returned ${latestResult.rowCount} rows in ${latestResult.elapsedMs} ms`);
-      } else {
-        updateStatus('Response ready');
-      }
-      await persistChatSession(finalMessages, {
-        query: latestQuery?.query ?? query,
-        result: latestResult ?? result ?? undefined
-      });
+      setAnswerGenerating(false);
+      setBusy(false);
+      updateStatus('Response ready');
+      await persistChatSession(finalMessages);
     } catch (error) {
       reportError('The chat request failed.', error);
     } finally {
-      unsubscribeProgress();
+      unsubscribeEvents();
       if (activeChatTurnIdRef.current === turnId) {
         activeChatTurnIdRef.current = null;
       }
@@ -1278,12 +1529,24 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     }
   }
 
+  async function approveInterruption() {
+    if (!api || !pendingApproval) return;
+    await api.approveInterruption(activeChatTurnIdRef.current!, pendingApproval.id);
+    setPendingApproval(null);
+  }
+
+  async function denyInterruption() {
+    if (!api || !pendingApproval) return;
+    await api.denyInterruption(activeChatTurnIdRef.current!, pendingApproval.id);
+    setPendingApproval(null);
+  }
+
   async function runQuery() {
     if (!api || !query.trim()) return;
     setBusy(true);
-    updateStatus(settings.safeMode ? 'Running safe query...' : 'Running validated query...');
+    updateStatus('Running query...');
     try {
-      const nextResult = await api.executeQuery(query, settings.safeMode ? 'safe' : 'manual');
+      const nextResult = await api.executeQuery(query);
       setResult(nextResult);
       setActiveInspector('results');
       setInspectorOpen(true);
@@ -1384,10 +1647,17 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }
 
   function chooseStarter(starterPrompt: string) {
+    const tempId = crypto.randomUUID();
+    setActiveChatId(tempId);
+    setMessages(createInitialMessages(true));
     setPrompt(starterPrompt);
+    setActiveView('workspace');
   }
 
   function chooseSchemaPrompt(starterPrompt: string) {
+    const tempId = crypto.randomUUID();
+    setActiveChatId(tempId);
+    setMessages(createInitialMessages(true));
     setPrompt(starterPrompt);
     setActiveView('workspace');
   }
@@ -1465,6 +1735,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }
 
   function closeInspector() {
+    if (isProjectPage) return;
     setInspectorOpen(false);
   }
 
@@ -1529,16 +1800,13 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             placeholder={connection?.kind === 'elasticsearch' || connection?.kind === 'mongodb' ? 'Generated JSON will appear here.' : 'Generated SQL will appear here.'}
             spellCheck={false}
           />
-          <div className={`query-validation ${validation?.safe ? 'safe' : 'blocked'}`}>
-            <ShieldCheck size={16} />
-            <span>{validation ? validation.reason : 'Query validation will appear here.'}</span>
-          </div>
         </div>
       );
     }
 
-    return (
-      <div className="inspector-body schema-view" aria-label="Schema" onScroll={handleSchemaScroll} ref={schemaPanelRef}>
+    if (activeInspector === 'schema') {
+      return (
+        <div className="inspector-body schema-view" aria-label="Schema" onScroll={handleSchemaScroll} ref={schemaPanelRef}>
         {schema ? (
           <>
             <div className="schema-search-field">
@@ -1656,7 +1924,45 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           </div>
         )}
       </div>
-    );
+      );
+    }
+
+    if (activeInspector === 'audit') {
+      const entries = auditEntries;
+      return (
+        <div className="inspector-body" aria-label="Audit log" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', padding: '16px 28px' }}>
+          {entries.length === 0 ? (
+            <div className="schema-empty">
+              <span>No audit entries yet. Tool calls will be logged here.</span>
+            </div>
+          ) : (
+            entries.map((entry) => (
+              <div key={entry.id} style={{
+                borderBottom: '1px solid var(--color-separator)',
+                padding: '10px 0',
+                display: 'grid',
+                gap: '4px'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 500, color: 'var(--color-text-primary)' }}>{entry.toolName}</span>
+                  <time style={{ color: 'var(--color-text-tertiary)', fontSize: '11px' }}>{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+                </div>
+                {entry.queryPreview && (
+                  <code style={{ fontSize: '11px', background: 'var(--code-bg)', color: 'var(--code-text)', padding: '4px 8px', borderRadius: 'var(--radius-row)', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{entry.queryPreview}</code>
+                )}
+                <span style={{
+                  fontSize: '11px',
+                  color: entry.permissionDecision === 'allow' ? 'var(--color-success)' : entry.permissionDecision === 'denied' ? 'var(--color-danger)' : 'var(--color-warning)'
+                }}>
+                  {entry.permissionDecision}
+                  {entry.risk ? ` · ${entry.risk}` : ''}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      );
+    }
   }
 
   function renderInspector() {
@@ -1698,12 +2004,12 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             </button>
             <button
               className="inspector-footer-action"
-              disabled={busy || !validation?.safe}
+              disabled={busy || !query.trim()}
               onClick={() => void runQuery()}
               type="button"
             >
               <Play size={14} />
-              {settings.safeMode ? 'Run Safe Query' : 'Run Validated Query'}
+              Run Query
             </button>
           </>
         ) : null}
@@ -1716,16 +2022,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       <aside className={inspectorClass} id="inspector-sidebar" aria-label="Inspector">
         <div className="inspector-header">
           <div className="inspector-header-top">
-            <button
-              aria-label="Close inspector"
-              className="inspector-back"
-              onClick={closeInspector}
-              type="button"
-            >
-              <PanelRightClose size={18} />
-            </button>
             <h2 className="inspector-title">
-              {activeInspector === 'results' ? 'Data' : activeInspector === 'query' ? 'Query' : 'Schema'}
+              {activeInspector === 'results' ? 'Data' : activeInspector === 'query' ? 'Query' : activeInspector === 'audit' ? 'Audit' : 'Schema'}
             </h2>
           </div>
           {connection && (
@@ -1765,6 +2063,19 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             type="button"
           >
             Schema
+          </button>
+          <button
+            className={`inspector-tab ${activeInspector === 'audit' ? 'selected' : ''}`}
+            onClick={() => {
+              setActiveInspector('audit');
+              if (api) void api.getAuditLog().then(setAuditEntries);
+            }}
+            role="tab"
+            aria-selected={activeInspector === 'audit'}
+            aria-controls="inspector-audit-panel"
+            type="button"
+          >
+            Audit
           </button>
         </div>
         <div
@@ -1957,107 +2268,147 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
   function renderFocusedView() {
     if (activeView === 'workspace') {
+      if (!activeProject) {
+        if (savedConnections.length > 0) {
+          return (
+          <section className="focus-view" aria-label="Projects">
+            <header className="focus-header">
+              <div className="focus-header-title">
+                <p>Select a project</p>
+                <h2>Projects</h2>
+              </div>
+            </header>
+            <div className="project-grid">
+              {savedConnections.length ? savedConnections.map((conn) => {
+                const isConnecting = connectingProjectId === conn.id;
+                return (
+                  <button
+                    key={conn.id}
+                    className={`project-card ${isConnecting ? 'connecting' : ''}`}
+                    onClick={() => void connectFromHistory(conn)}
+                    disabled={busy}
+                    type="button"
+                  >
+                    {isConnecting && (
+                      <div className="project-card-loader">
+                        <Loader2 className="spin" size={22} />
+                      </div>
+                    )}
+                    <div className="project-card-icon">
+                      <ConnectionLogo kind={conn.kind} />
+                    </div>
+                    <span className="project-card-name">{conn.label}</span>
+                    <span
+                      className="project-card-kind"
+                      style={{
+                        color: conn.kind === 'sqlite' ? 'var(--source-neutral)' : conn.kind === 'postgres' ? 'var(--source-analytics)' : conn.kind === 'mysql' ? 'var(--source-customer)' : conn.kind === 'mongodb' ? 'var(--source-operations)' : 'var(--source-marketing)'
+                      }}
+                    >
+                      <span
+                        className="sidebar-source-dot"
+                        style={{
+                          backgroundColor: 'currentColor',
+                          width: '6px',
+                          height: '6px',
+                          borderRadius: 'var(--radius-round)',
+                          flexShrink: 0
+                        }}
+                      />
+                      {dbKindDisplayName(conn.kind)}
+                    </span>
+                  </button>
+                );
+              }) : (
+                <p className="history-empty">No saved projects yet.</p>
+              )}
+              <button
+                type="button"
+                className="project-card project-card-add"
+                onClick={openNewProjectModal}
+              >
+                <div className="project-card-icon">
+                  <Plus size={28} />
+                </div>
+                <span className="project-card-name">New project</span>
+                <span className="project-card-kind">Connect a database</span>
+              </button>
+            </div>
+          </section>
+        );
+      }
       return null;
     }
 
-    if (activeView === 'connections') {
-      return (
-        <section className="focus-view" aria-label="Connections">
-          <header className="focus-header">
-            <div className="focus-header-title">
-              <p>Database access</p>
-              <h2>Connections</h2>
-            </div>
-            <button type="button" className="focus-back-button" onClick={() => openView('workspace')}>Back to chat</button>
-          </header>
-
-          <div className="connections-section">
-            <p className="connections-section-title">Current connection</p>
-            <div className="connection-status-row">
-              <span className={connection ? 'status-dot connected' : 'status-dot'} />
-              <span className="connection-status-label">{connection ? connection.label : 'No active connection'}</span>
-              <span className="connection-status-detail">{schemaSummary}</span>
-            </div>
-          </div>
-
-          <div className="connections-section">
-            <p className="connections-section-title">New connection</p>
-            <div className="connection-kind-select">
-              <button
-                type="button"
-                className={`connection-kind-trigger${connectionKindMenuOpen ? ' open' : ''}`}
-                onClick={() => setConnectionKindMenuOpen((current) => !current)}
-                aria-expanded={connectionKindMenuOpen}
-                aria-haspopup="listbox"
-                disabled={busy || !api}
-              >
-                <Database size={16} />
-                <span>Choose connection type…</span>
-                <ChevronDown size={14} className={connectionKindMenuOpen ? 'open' : ''} />
+    if (activeView === 'workspace' && !activeChatId) {
+        return (
+          <section className="focus-view" aria-label="Project home">
+            <header className="focus-header">
+              <div className="focus-header-title">
+                <p>{activeProject ? dbKindDisplayName(activeProject.kind) : ''} project</p>
+                <h2>{activeProject?.label ?? ''}</h2>
+              </div>
+              <button type="button" className="primary-button" onClick={resetChat}>
+                <Plus size={16} />
+                New chat
               </button>
-              {connectionKindMenuOpen && (
-                <div className="connection-kind-menu" role="listbox">
-                  {connectionKindOptions.map((option) => (
-                    <button
-                      key={option.kind}
-                      type="button"
-                      className="connection-kind-option"
-                      role="option"
-                      onClick={() => selectConnectionKind(option.kind)}
-                    >
-                      <ConnectionLogo kind={option.kind} monochrome />
-                      {option.label}
+            </header>
+            <div className="connections-section">
+              <p className="connections-section-title">Database status</p>
+              <div className="connection-status-row">
+                <span className="status-dot connected" />
+                <span className="connection-status-label">Connected</span>
+                <span className="connection-status-detail">{schemaSummary}</span>
+              </div>
+            </div>
+            {schema && (
+              <div className="connections-section">
+                <p className="connections-section-title">Quick prompts</p>
+                <div className="starter-list">
+                  {starterPrompts.map((starter) => (
+                    <button type="button" className="starter-row" onClick={() => chooseStarter(starter.prompt)} key={starter.title}>
+                      <span className="sidebar-action-row-label">{starter.title}</span>
+                      <ChevronRight size={16} />
                     </button>
                   ))}
                 </div>
+              </div>
+            )}
+            <div className="connections-section">
+              <p className="connections-section-title">Recent chats</p>
+              {chatSessions.filter((session) => session.connection?.id === (activeProject ? activeProject.id : '')).length ? (
+                <div className="history-list">
+                  {chatSessions
+                    .filter((session) => session.connection?.id === (activeProject ? activeProject.id : ''))
+                    .slice(0, 6)
+                    .map((session) => (
+                      <div className={`history-item ${activeChatId === session.id ? 'active' : ''}`} key={session.id}>
+                        <button type="button" className="history-main" onClick={() => void openChatSession(session)}>
+                          <MessageSquareText size={15} />
+                          <span className="history-main-info">
+                            <strong>{session.title}</strong>
+                            <small>{formatHistoryDate(session.updatedAt)}</small>
+                          </span>
+                        </button>
+                        <button type="button" className="history-delete" onClick={() => void deleteChatSession(session.id)} aria-label={`Delete chat ${session.title}`}>
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              ) : (
+                <p className="history-empty">New chats in this project will appear here.</p>
               )}
             </div>
-            <div className={`connection-form-panel${elasticsearchFormOpen || dbFormOpen ? ' open' : ''}`}>
-              {renderElasticsearchForm()}
-              {renderDbForm()}
-            </div>
-          </div>
-
-          <div className="connections-section">
-            <p className="connections-section-title">Saved connections</p>
-            {savedConnections.length ? (
-              <div className="history-list">
-                {savedConnections.map((item) => {
-                  const isActive = connection?.id === item.id;
-                  return (
-                    <div className={`saved-connection-row ${isActive ? 'active' : ''}`} key={item.id}>
-                      <button
-                        type="button"
-                        className="saved-connection-main"
-                        onClick={() => void connectFromHistory(item)}
-                        disabled={busy}
-                        aria-current={isActive ? 'true' : undefined}
-                      >
-                        <ConnectionLogo kind={item.kind} monochrome />
-                        <span className="saved-connection-label">{item.label}</span>
-                        <span className="saved-connection-date">{formatHistoryDate(item.lastConnectedAt)}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="saved-connection-delete"
-                        onClick={() => void deleteConnection(item.id)}
-                        aria-label={`Delete connection ${item.label}`}
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="history-empty">Connected databases will appear here.</p>
-            )}
-          </div>
-        </section>
-      );
+          </section>
+        );
+      }
+      return null;
     }
 
     if (activeView === 'history') {
+      const projectSessions = activeProject
+        ? chatSessions.filter((session) => session.connection?.id === activeProject.id)
+        : chatSessions;
       return (
         <section className="focus-view" aria-label="Chat history">
           <header className="focus-header">
@@ -2077,7 +2428,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             </div>
           </header>
           <div className="history-list">
-            {chatSessions.length ? chatSessions.map((session) => (
+            {projectSessions.length ? projectSessions.map((session) => (
               <div className={`history-item ${activeChatId === session.id ? 'active' : ''}`} key={session.id}>
                 <button type="button" className="history-main" onClick={() => void openChatSession(session)}>
                   <MessageSquareText size={15} />
@@ -2098,6 +2449,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       );
     }
 
+    return renderSettingsView();
+  }
+
+  function renderSettingsView() {
     return (
       <section className="focus-view" aria-label="Settings">
         <header className="focus-header">
@@ -2111,16 +2466,98 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         {renderSettingsControls()}
 
         <div className="settings-section">
-          <p className="settings-section-title">Safety</p>
-          <div className="settings-row">
-            <label className="settings-row-label" htmlFor="safe-mode-toggle">SAFE mode</label>
-            <div className="settings-row-control">
-              <label className="safe-toggle-row">
-                <input id="safe-mode-toggle" type="checkbox" checked={settings.safeMode} onChange={(event) => void saveSettings({ ...settings, safeMode: event.target.checked })} />
-                <span>{settings.safeMode ? 'On — only read-only queries are allowed' : 'Off — validated reads and writes are allowed'}</span>
-              </label>
+          <p className="settings-section-title">Connections</p>
+          {savedConnections.length ? (
+            <div className="history-list">
+              {savedConnections.map((item) => (
+                <div className={`saved-connection-row ${connection?.id === item.id ? 'active' : ''}`} key={item.id}>
+                  {renamingId === item.id ? (
+                    <div className="saved-connection-rename">
+                      <input
+                        className="rename-input"
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void commitRename(item.id, renameValue);
+                          if (e.key === 'Escape') setRenamingId(null);
+                        }}
+                        autoFocus
+                        ref={(el) => {
+                          if (el && el.value === item.label) el.select();
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="saved-connection-rename-action save"
+                        onClick={() => void commitRename(item.id, renameValue)}
+                        aria-label="Save rename"
+                        title="Save"
+                      >
+                        <Check size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        className="saved-connection-rename-action cancel"
+                        onClick={() => setRenamingId(null)}
+                        aria-label="Cancel rename"
+                        title="Cancel"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="saved-connection-main"
+                      onClick={() => void connectFromHistory(item)}
+                      disabled={busy}
+                      aria-current={connection?.id === item.id ? 'true' : undefined}
+                    >
+                      <ConnectionLogo kind={item.kind} monochrome />
+                      <span className="saved-connection-label">{item.label}</span>
+                      <span className="saved-connection-date">{dbKindDisplayName(item.kind)}</span>
+                    </button>
+                  )}
+                  {renamingId !== item.id && (
+                    <button
+                      type="button"
+                      className="saved-connection-edit"
+                      onClick={() => startRename(item.id, item.label)}
+                      aria-label={`Rename connection ${item.label}`}
+                      title="Rename"
+                    >
+                      <Pencil size={14} />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="saved-connection-delete"
+                    onClick={() => void deleteConnection(item.id)}
+                    aria-label={`Delete connection ${item.label}`}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="primary-button"
+                onClick={openNewProjectModal}
+                style={{ marginTop: '12px' }}
+              >
+                <Plus size={16} />
+                Add connection
+              </button>
             </div>
-          </div>
+          ) : (
+            <div className="history-empty" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+              <p>No saved connections yet.</p>
+              <button type="button" className="primary-button" onClick={openNewProjectModal}>
+                <Plus size={16} />
+                Add connection
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="settings-section">
@@ -2191,6 +2628,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   } as CSSProperties;
 
   return (
+    <ErrorBoundary>
     <main
       className={`app-shell${resizeDrag ? ' resizing-panels' : ''}`}
       ref={shellRef}
@@ -2199,146 +2637,168 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       {/* ARIA live region for announcements */}
       <div id="aria-live-announcer" aria-live="polite" aria-atomic="true" className="visually-hidden" />
 
-      {/* Integrated Toolbar */}
-      <header className="window-toolbar" role="toolbar" aria-label="Application toolbar">
-        <div className="toolbar-traffic-light-reserve" />
-        <button
-          aria-label="Toggle sidebar"
-          className="toolbar-icon-button"
-          onClick={() => {}} /* Sidebar is always visible in Scape design */
-          type="button"
-          title="Toggle sidebar"
-        >
-          <Plus size={16} />
-        </button>
-        <button
-          aria-label="Back"
-          className="toolbar-icon-button"
-          disabled={activeView !== 'history'}
-          onClick={() => openView('workspace')}
-          type="button"
-          title="Back"
-        >
-          <ArrowLeft size={16} />
-        </button>
-        <button
-          aria-label="Forward"
-          className="toolbar-icon-button"
-          disabled
-          type="button"
-          title="Forward"
-        >
-          <ArrowRight size={16} />
-        </button>
-        <div className="toolbar-search">
-          <Search size={14} />
-          <input
-            aria-label="Search"
-            onChange={(event) => setGlobalSearch(event.target.value)}
-            placeholder="Search"
-            type="search"
-            value={globalSearch}
-          />
-          {globalSearch && (
-            <button
-              aria-label="Clear search"
-              className="toolbar-search-clear"
-              onClick={() => setGlobalSearch('')}
-              type="button"
-            >
-              <XCircle size={14} />
-            </button>
-          )}
-        </div>
-        <div className="toolbar-spacer" />
-        <button
-          aria-label="Connection selector"
-          className="connection-selector"
-          onClick={() => openView('connections')}
-          type="button"
-          title={connection ? `Connected: ${connection.label}` : 'No connection'}
-        >
-          <Database size={14} />
-          <span className="connection-selector-label">
-            {connection ? connection.label : 'No database'}
-          </span>
-          <ChevronDown size={12} />
-        </button>
-        <button
-          aria-label="Settings"
-          className="toolbar-icon-button"
-          onClick={() => openView('settings')}
-          type="button"
-          title="Settings"
-        >
-          <Settings size={16} />
-        </button>
-      </header>
-
       {/* Workspace Sidebar */}
       <aside className="workspace-sidebar" aria-label="Database workspace">
         <div className="sidebar-content">
-          <div className="sidebar-section-label" style={{ marginTop: 0 }}>Navigation</div>
-          <button
-            aria-label="New chat"
-            className="sidebar-action-row"
-            onClick={resetChat}
-            type="button"
-          >
-            <Plus size={16} />
-            <span className="sidebar-action-row-label">New chat</span>
-          </button>
-
-          <div className="sidebar-section-label">Connections</div>
-          {savedConnections.length > 0 ? savedConnections.slice(0, 4).map((conn) => (
-            <button
-              className={`sidebar-action-row ${connection?.id === conn.id ? 'selected' : ''}`}
-              key={conn.id}
-              onClick={() => void connectFromHistory(conn)}
-              type="button"
-            >
-              <span
-                className="sidebar-source-dot"
-                style={{ backgroundColor: conn.kind === 'sqlite' ? 'var(--source-neutral)' : conn.kind === 'postgres' ? 'var(--source-analytics)' : conn.kind === 'mysql' ? 'var(--source-customer)' : conn.kind === 'mongodb' ? 'var(--source-operations)' : 'var(--source-marketing)' }}
-              />
-              <span className="sidebar-action-row-label">{conn.label}</span>
-            </button>
-          )) : (
-            <button
-              className="sidebar-action-row"
-              onClick={() => openView('connections')}
-              type="button"
-            >
-              <Database size={16} />
-              <span className="sidebar-action-row-label">Add connection</span>
-            </button>
-          )}
-
-          <div className="sidebar-section-label">Chats</div>
-          {chatSessions.slice(0, 6).map((session) => (
-            <button
-              className={`sidebar-action-row ${activeChatId === session.id ? 'selected' : ''}`}
-              key={session.id}
-              onClick={() => void openChatSession(session)}
-              type="button"
-            >
-              <MessageSquareText size={16} />
-              <span className="sidebar-action-row-label">{session.title}</span>
-            </button>
-          ))}
-          {chatSessions.length > 6 && (
-            <button
-              className="sidebar-action-row"
-              onClick={() => openView('history')}
-              type="button"
-            >
-              <span className="sidebar-action-row-label" style={{ color: 'var(--color-text-tertiary)', fontSize: '12px' }}>Show more</span>
-              <ChevronDown size={14} />
-            </button>
-          )}
+          {sidebarMode === 'projects' ? (
+            <>
+              <div className="sidebar-section-label" style={{ marginTop: 0 }}>Projects</div>
+              {savedConnections.length > 0 ? savedConnections.map((conn) => (
+                <button
+                  className={`sidebar-action-row ${connection?.id === conn.id ? 'selected' : ''}`}
+                  key={conn.id}
+                  onClick={() => void connectFromHistory(conn)}
+                  type="button"
+                >
+                  <span
+                    className="sidebar-source-dot"
+                    style={{ backgroundColor: conn.kind === 'sqlite' ? 'var(--source-neutral)' : conn.kind === 'postgres' ? 'var(--source-analytics)' : conn.kind === 'mysql' ? 'var(--source-customer)' : conn.kind === 'mongodb' ? 'var(--source-operations)' : 'var(--source-marketing)' }}
+                  />
+                  <span className="sidebar-action-row-label">{conn.label}</span>
+                </button>
+              )) : (
+                <p className="sidebar-empty">No projects yet.</p>
+              )}
+              <button
+                className="sidebar-action-row"
+                onClick={openNewProjectModal}
+                type="button"
+              >
+                <Plus size={16} />
+                <span className="sidebar-action-row-label">Add project</span>
+              </button>
+            </>
+          ) : activeProject ? (
+            <>
+              <button
+                className="sidebar-action-row"
+                onClick={closeProject}
+                type="button"
+              >
+                <ArrowLeft size={16} />
+                <span className="sidebar-action-row-label">All projects</span>
+              </button>
+              <div className="sidebar-section-label">{activeProject.label}</div>
+              <button
+                aria-label="New chat"
+                className="sidebar-action-row"
+                onClick={resetChat}
+                type="button"
+              >
+                <Plus size={16} />
+                <span className="sidebar-action-row-label">New chat</span>
+              </button>
+              <div className="sidebar-section-label">Chats</div>
+              {chatSessions
+                .filter((session) => session.connection?.id === activeProject.id)
+                .slice(0, 6)
+                .map((session) => (
+                  <div
+                    className={`sidebar-action-row ${activeChatId === session.id ? 'selected' : ''}`}
+                    key={session.id}
+                  >
+                    {renamingChatId === session.id ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', width: '100%' }}>
+                        <input
+                          value={chatRenameValue}
+                          onChange={(e) => setChatRenameValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void commitChatRename(session.id);
+                            if (e.key === 'Escape') setRenamingChatId(null);
+                          }}
+                          onBlur={() => void commitChatRename(session.id)}
+                          autoFocus
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'var(--color-text-primary)',
+                            fontSize: '13px',
+                            lineHeight: '20px',
+                            outline: 'none',
+                            fontFamily: 'inherit',
+                            padding: 0
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => commitChatRename(session.id)}
+                          aria-label="Save rename"
+                          title="Save"
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'var(--color-accent)',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            padding: 0
+                          }}
+                        >
+                          <Check size={14} />
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void openChatSession(session)}
+                          style={{
+                            alignItems: 'center',
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'inherit',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            flex: 1,
+                            gap: '8px',
+                            minWidth: 0,
+                            padding: 0,
+                            font: 'inherit',
+                            textAlign: 'left'
+                          }}
+                        >
+                          <MessageSquareText size={16} />
+                          <span className="sidebar-action-row-label">{session.title}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="sidebar-row-action-icon"
+                          onClick={(e) => { e.stopPropagation(); startChatRename(session); }}
+                          aria-label="Rename chat"
+                          title="Rename"
+                        >
+                          <Pencil size={12} />
+                        </button>
+                        <button
+                          type="button"
+                          className="sidebar-row-action-icon"
+                          onClick={(e) => { e.stopPropagation(); void deleteChatSession(session.id); }}
+                          aria-label="Delete chat"
+                          title="Delete"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </>
+                    )}
+                  </div>
+                ))}
+              {chatSessions.filter((session) => session.connection?.id === activeProject.id).length > 6 && (
+                <button
+                  className="sidebar-action-row"
+                  onClick={() => openView('history')}
+                  type="button"
+                >
+                  <span className="sidebar-action-row-label" style={{ color: 'var(--color-text-tertiary)', fontSize: '12px' }}>Show more</span>
+                  <ChevronDown size={14} />
+                </button>
+              )}
+            </>
+          ) : null}
         </div>
         <div className="sidebar-spacer" />
         <button
+          aria-label="Settings"
           className={`sidebar-action-row ${activeView === 'settings' ? 'selected' : ''}`}
           onClick={() => openView('settings')}
           type="button"
@@ -2353,11 +2813,24 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         {renderFocusedView() ?? (
           <>
             <div className="conversation-header">
-              <h1 className="conversation-title">{activeChatTitle}</h1>
-              <p className="conversation-date-label">Today</p>
-              <div className="conversation-status">
-                <span>{status}</span>
+              <div className="conversation-header-main">
+                <h1 className="conversation-title">{activeChatTitle}</h1>
+                <p className="conversation-date-label">Today</p>
+                <div className="conversation-status">
+                  <span>{status}</span>
+                </div>
               </div>
+              {!isProjectPage && (
+              <button
+                aria-label={inspectorOpen ? 'Hide inspector panel' : 'Show inspector panel'}
+                className="inspector-toggle"
+                onClick={() => { if (inspectorOpen) closeInspector(); else { setActiveInspector('schema'); setInspectorOpen(true); } }}
+                title={inspectorOpen ? 'Hide inspector panel' : 'Show inspector panel'}
+                type="button"
+              >
+                {inspectorOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+              </button>
+            )}
               <hr className="conversation-divider" />
             </div>
 
@@ -2367,9 +2840,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                   <div>
                     <h3>Ask about the data.</h3>
                     <p>
-                      {settings.safeMode
-                        ? 'Connect a database and DB Chat will run safe read-only analysis from the conversation.'
-                        : 'Connect a database and DB Chat will run validated reads and table or document writes from the conversation.'}
+                      Connect a database and DB Chat will analyze your data through the conversation.
                     </p>
                   </div>
                   <div className="starter-list">
@@ -2382,7 +2853,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                   </div>
                 </section>
               )}
-              {messages.length > 1 && (
+              {messages.length > 0 && !hasOnlyWelcomeMessage && (
                 <div className="transcript-grid">
                   {messages.map((message) => {
                     const completedActivity = message.role === 'assistant' ? messageActivities[message.id] : undefined;
@@ -2477,6 +2948,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             <div className="composer-wrapper">
               <form className="composer" onSubmit={(event) => void sendChat(event)}>
                 <textarea
+                  ref={composerRef}
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
                   onKeyDown={(event) => {
@@ -2498,6 +2970,100 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                 >
                   {answerGenerating ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
                 </button>
+                <div className="composer-footer" ref={dropdownRef}>
+                  <div className="composer-footer-group">
+                    <label className="composer-footer-label">Reasoning</label>
+                    <div className="composer-select">
+                      <button
+                        type="button"
+                        className="composer-select-trigger"
+                        onClick={() => setOpenDropdown(openDropdown === 'reasoning' ? null : 'reasoning')}
+                        aria-expanded={openDropdown === 'reasoning'}
+                        aria-label="Reasoning effort"
+                      >
+                        <span>{effortLevel === 'none' ? 'Fast' : effortLevel.charAt(0).toUpperCase() + effortLevel.slice(1)}</span>
+                        <ChevronDown size={12} className="chevron" />
+                      </button>
+                      {openDropdown === 'reasoning' && (
+                        <div className="composer-select-menu" role="menu">
+                          {(['none', 'low', 'medium', 'high', 'max'] as EffortLevel[]).map((level) => (
+                            <button
+                              key={level}
+                              type="button"
+                              role="menuitem"
+                              className={`composer-select-item ${effortLevel === level ? 'active' : ''}`}
+                              onClick={() => {
+                                appendLog('info', `Reasoning level changed to ${level}`);
+                                setEffortLevel(level);
+                                setSettings((current) => ({ ...current, effortLevel: level }));
+                                void api?.saveSettings({ ...settings, effortLevel: level });
+                                setOpenDropdown(null);
+                              }}
+                            >
+                              {level === 'none' ? 'Fast' : level.charAt(0).toUpperCase() + level.slice(1)}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {connection && (
+                    <div className="composer-footer-group">
+                      <label className="composer-footer-label">Safety</label>
+                      <div className="composer-select composer-select--safety" data-level={safetyLevel}>
+                        <button
+                          type="button"
+                          className="composer-select-trigger"
+                          onClick={() => setOpenDropdown(openDropdown === 'safety' ? null : 'safety')}
+                          aria-expanded={openDropdown === 'safety'}
+                          aria-label="Safety level"
+                        >
+                          {safetyLevel === 'safe' ? <ShieldCheck size={13} aria-hidden="true" />
+                            : safetyLevel === 'elevated' ? <ShieldAlert size={13} aria-hidden="true" />
+                            : safetyLevel === 'unrestricted' ? <ShieldX size={13} aria-hidden="true" />
+                            : <Shield size={13} aria-hidden="true" />}
+                          <span>{safetyLevel === 'safe' ? 'Safe' : safetyLevel === 'elevated' ? 'Elevated' : safetyLevel === 'unrestricted' ? 'Unrestricted' : 'Standard'}</span>
+                          <ChevronDown size={12} className="chevron" />
+                        </button>
+                        {openDropdown === 'safety' && (
+                          <div className="composer-select-menu" role="menu">
+                            {(['safe', 'standard', 'elevated', 'unrestricted'] as SafetyLevel[]).map((level) => (
+                              <button
+                                key={level}
+                                type="button"
+                                role="menuitem"
+                                className={`composer-select-item ${safetyLevel === level ? 'active' : ''}`}
+                                onClick={async () => {
+                                  if (level === 'unrestricted' && safetyLevel !== 'unrestricted') {
+                                    setOpenDropdown(null);
+                                    setPendingSafetyConfirm(true);
+                                    return;
+                                  }
+                                  appendLog('info', `Safety level changed to ${level}`);
+                                  setSafetyLevelState(level);
+                                  if (api && connection) {
+                                    appendLog('info', `Calling api.setSafetyLevel(${connection.id}, ${level})`);
+                                    try {
+                                      await api.setSafetyLevel(connection.id, level);
+                                      appendLog('info', `Safety level saved, refreshing histories`);
+                                      await refreshHistories();
+                                    } catch (err) {
+                                      reportError('Failed to set safety level', err);
+                                    }
+                                  }
+                                  setOpenDropdown(null);
+                                }}
+                              >
+                                {level === 'safe' ? 'Safe' : level === 'elevated' ? 'Elevated' : level === 'unrestricted' ? 'Unrestricted' : 'Standard'}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  <div className="composer-footer-spacer" aria-hidden="true" />
+                </div>
               </form>
             </div>
           </>
@@ -2505,7 +3071,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       </section>
 
       {/* Inspector */}
-      {inspectorOpen ? (
+      {inspectorOpen || isProjectPage ? (
         renderInspector()
       ) : (
         <aside className="panel-rail inspector-rail" id="inspector-sidebar" aria-label="Collapsed inspector sidebar" style={{ gridColumn: 3, borderLeft: '1px solid var(--color-separator)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '14px 9px' }}>
@@ -2537,7 +3103,159 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           role="separator"
           tabIndex={0}
         />
+      )}      {/* New Project Modal */}
+      {showNewProjectModal && (
+        <div className="project-modal-backdrop" onClick={closeNewProjectModal}>
+          <div className="project-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="New connection">
+            <div className="project-modal-header">
+              <h2>New connection</h2>
+              <button
+                type="button"
+                className="toolbar-icon-button"
+                onClick={closeNewProjectModal}
+                aria-label="Close"
+              >
+                <XCircle size={18} />
+              </button>
+            </div>
+            <div className="project-modal-body">
+              <p className="connections-section-title">Select connection type</p>
+              {!(elasticsearchFormOpen || dbFormOpen) && (
+                <div className="connection-kind-grid">
+                  {connectionKindOptions.map((option) => (
+                    <button
+                      key={option.kind}
+                      type="button"
+                      className="connection-kind-card"
+                      onClick={() => selectConnectionKind(option.kind)}
+                      disabled={busy || !api}
+                    >
+                      <div className="project-card-icon">
+                        <ConnectionLogo kind={option.kind} />
+                      </div>
+                      <span className="project-card-name">{option.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {(elasticsearchFormOpen || dbFormOpen) && (
+                <button
+                  type="button"
+                  className="connection-form-back"
+                  onClick={() => { setElasticsearchFormOpen(false); setDbFormOpen(false); }}
+                >
+                  <ArrowLeft size={14} />
+                  Back to connection types
+                </button>
+              )}
+              <div className={`connection-form-panel${elasticsearchFormOpen || dbFormOpen ? ' open' : ''}`}>
+                {renderElasticsearchForm()}
+                {renderDbForm()}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
+
+      {pendingApproval && (
+        <div className="project-modal-backdrop">
+          <div className="project-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Approval required">
+            <div className="project-modal-header">
+              <h2>Approve Action</h2>
+            </div>
+            <div className="project-modal-body">
+              <p style={{ color: 'var(--color-text-secondary)', marginBottom: '12px' }}>
+                The agent wants to execute <strong style={{ color: 'var(--color-text-primary)' }}>{pendingApproval.toolName}</strong>
+                {pendingApproval.purpose ? ` — ${pendingApproval.purpose}` : ''}
+              </p>
+              {pendingApproval.queryPreview && (
+                <pre style={{
+                  background: 'var(--code-bg)',
+                  color: 'var(--code-text)',
+                  padding: '12px',
+                  borderRadius: 'var(--radius-control)',
+                  marginBottom: '12px',
+                  overflow: 'auto',
+                  maxHeight: '200px',
+                  fontSize: '12px',
+                  lineHeight: '18px'
+                }}>
+                  {pendingApproval.queryPreview}
+                </pre>
+              )}
+              <p className="connections-section-title" style={{ marginBottom: '12px' }}>
+                Risk:{' '}
+                <span style={{
+                  color: pendingApproval.risk === 'high' ? 'var(--color-danger)' : pendingApproval.risk === 'medium' ? 'var(--color-warning)' : 'var(--color-success)'
+                }}>
+                  {String(pendingApproval.risk ?? 'unknown').toUpperCase()}
+                </span>
+              </p>
+              <div className="connection-form-actions">
+                <button type="button" className="primary-button" onClick={approveInterruption}>
+                  Approve
+                </button>
+                <button type="button" className="connection-form-cancel" onClick={denyInterruption}>
+                  Deny
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingSafetyConfirm && (
+        <div className="project-modal-backdrop" onClick={() => setPendingSafetyConfirm(false)}>
+          <div className="project-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Confirm unrestricted access">
+            <div className="project-modal-header">
+              <h2>Confirm Unrestricted Access</h2>
+            </div>
+            <div className="project-modal-body">
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', marginBottom: '16px' }}>
+                <ShieldX size={20} style={{ color: 'var(--color-danger)', flexShrink: 0, marginTop: '2px' }} />
+                <p style={{ color: 'var(--color-text-secondary)', lineHeight: '20px' }}>
+                  Unrestricted mode allows the agent to execute <strong style={{ color: 'var(--color-text-primary)' }}>all operations without asking for approval</strong>, including writes, DDL statements (CREATE, DROP, ALTER), and schema changes.
+                </p>
+              </div>
+              <p style={{ color: 'var(--color-danger)', fontSize: '13px', fontWeight: 500, marginBottom: '16px' }}>
+                This grants full control over the database. Only use this in environments where data loss is acceptable.
+              </p>
+              <div className="connection-form-actions">
+                <button
+                  type="button"
+                  className="primary-button"
+                  style={{ background: 'var(--color-danger)', borderColor: 'var(--color-danger)' }}
+                  onClick={async () => {
+                    setPendingSafetyConfirm(false);
+                    appendLog('info', 'Safety level changed to unrestricted (confirmed)');
+                    setSafetyLevelState('unrestricted');
+                    if (api && connection) {
+                      try {
+                        await api.setSafetyLevel(connection.id, 'unrestricted');
+                        await refreshHistories();
+                      } catch (err) {
+                        reportError('Failed to set safety level', err);
+                      }
+                    }
+                  }}
+                >
+                  Enable Unrestricted
+                </button>
+                <button
+                  type="button"
+                  className="connection-form-cancel"
+                  onClick={() => setPendingSafetyConfirm(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+
     </main>
+    </ErrorBoundary>
   );
 }

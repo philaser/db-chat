@@ -66,7 +66,7 @@ describe('ElasticsearchConnector', () => {
         size: 10,
         query: { match_all: {} }
       }
-    }), 'safe');
+    }));
 
     expect(result.rows).toEqual([{
       _index: 'orders',
@@ -127,8 +127,8 @@ describe('ElasticsearchConnector', () => {
       if (url.endsWith('/_cluster/health?filter_path=cluster_name,status')) {
         return jsonResponse({ cluster_name: 'test', status: 'green' });
       }
-      if (url.endsWith('/orders/_update/1') && init?.method === 'POST') {
-        return jsonResponse({ _index: 'orders', _id: '1', _version: 2, result: 'updated' });
+      if (url.endsWith('/orders/_doc') && init?.method === 'POST') {
+        return jsonResponse({ _index: 'orders', _id: '2', _version: 1, result: 'created' });
       }
       return jsonResponse({ error: 'not found' }, 404);
     });
@@ -146,17 +146,16 @@ describe('ElasticsearchConnector', () => {
 
     const result = await connector.executeQuery(JSON.stringify({
       index: 'orders',
-      operation: 'update',
-      id: '1',
-      body: { doc: { status: 'paid' } }
-    }), 'manual');
+      operation: 'index',
+      body: { status: 'paid' }
+    }));
 
     expect(result.rows).toEqual([{
-      operation: 'update',
+      operation: 'index',
       index: 'orders',
-      id: '1',
-      result: 'updated',
-      version: 2
+      id: '2',
+      result: 'created',
+      version: 1
     }]);
   });
 

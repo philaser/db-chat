@@ -1,4 +1,4 @@
-import type { QueryExecutionMode, QueryValidationResult } from '../../shared/types.js';
+
 
 const MAX_SAFE_LIMIT = 500;
 const BLOCKED_AGGREGATION_STAGES = new Set([
@@ -60,129 +60,7 @@ export function parseMongoDBReadQuery(query: string): MongoDBReadRequest {
   };
 }
 
-export function validateMongoDBReadOnlyQuery(query: string, mode: QueryExecutionMode): QueryValidationResult {
-  const trimmed = query.trim();
-  if (!trimmed) {
-    return { safe: false, reason: 'Enter a query before running it.', normalizedQuery: trimmed };
-  }
-
-  try {
-    if (mode === 'manual') {
-      return validateManualMongoDBQuery(trimmed);
-    }
-
-    const parsed = parseMongoDBReadQuery(trimmed);
-
-    if (parsed.method === 'count') {
-      const filter = parsed.body.filter;
-      if (filter !== undefined && !isRecord(filter)) {
-        return {
-          safe: false,
-          reason: 'MongoDB count filter must be an object or omitted.',
-          normalizedQuery: JSON.stringify(parsed, null, 2)
-        };
-      }
-      const blockedKey = findBlockedKey(parsed.body);
-      if (blockedKey) {
-        return {
-          safe: false,
-          reason: `MongoDB SAFE mode blocks "${blockedKey}" in request bodies.`,
-          normalizedQuery: JSON.stringify(parsed, null, 2)
-        };
-      }
-      return {
-        safe: true,
-        reason: 'Read-only MongoDB count allowed by SAFE mode.',
-        normalizedQuery: JSON.stringify(parsed, null, 2)
-      };
-    }
-
-    if (parsed.method === 'aggregate') {
-      const pipeline = parsed.body.pipeline;
-      if (!Array.isArray(pipeline)) {
-        return {
-          safe: false,
-          reason: 'MongoDB aggregate body must include a pipeline array.',
-          normalizedQuery: JSON.stringify(parsed, null, 2)
-        };
-      }
-
-      const blockedStage = findBlockedAggregationStage(pipeline);
-      if (blockedStage) {
-        return {
-          safe: false,
-          reason: `MongoDB SAFE mode blocks aggregation stage "${blockedStage}".`,
-          normalizedQuery: JSON.stringify(parsed, null, 2)
-        };
-      }
-
-      const pipelineLimit = findAggregationLimit(pipeline);
-      if (pipelineLimit !== null && typeof pipelineLimit === 'number') {
-        if (pipelineLimit > MAX_SAFE_LIMIT) {
-          return {
-            safe: false,
-            reason: `MongoDB SAFE mode limits aggregate to ${MAX_SAFE_LIMIT} documents per $limit.`,
-            normalizedQuery: JSON.stringify(parsed, null, 2)
-          };
-        }
-        if (pipelineLimit <= 0) {
-          return {
-            safe: false,
-            reason: 'MongoDB aggregate $limit must be a positive integer.',
-            normalizedQuery: JSON.stringify(parsed, null, 2)
-          };
-        }
-      }
-    }
-
-    if (parsed.method === 'find') {
-      const limit = parsed.body.limit;
-      if (typeof limit === 'number') {
-        if (limit > MAX_SAFE_LIMIT) {
-          return {
-            safe: false,
-            reason: `MongoDB SAFE mode limits find results to ${MAX_SAFE_LIMIT} documents.`,
-            normalizedQuery: JSON.stringify(parsed, null, 2)
-          };
-        }
-        if (limit <= 0) {
-          return {
-            safe: false,
-            reason: 'MongoDB find limit must be a positive integer.',
-            normalizedQuery: JSON.stringify(parsed, null, 2)
-          };
-        }
-      }
-    }
-
-    const blockedKey = findBlockedKey(parsed.body);
-    if (blockedKey) {
-      return {
-        safe: false,
-        reason: `MongoDB SAFE mode blocks "${blockedKey}" in request bodies.`,
-        normalizedQuery: JSON.stringify(parsed, null, 2)
-      };
-    }
-
-    return {
-      safe: true,
-      reason: 'Read-only MongoDB query allowed by SAFE mode.',
-      normalizedQuery: JSON.stringify(parsed, null, 2)
-    };
-  } catch (error) {
-    return {
-      safe: false,
-      reason: error instanceof Error ? error.message : 'MongoDB query JSON could not be parsed.',
-      normalizedQuery: trimmed
-    };
-  }
-}
-
-export function parseMongoDBQuery(query: string, mode: QueryExecutionMode): MongoDBParsedRequest {
-  if (mode === 'safe') {
-    return parseMongoDBReadQuery(query);
-  }
-
+export function parseMongoDBQuery(query: string): MongoDBParsedRequest {
   const parsed = JSON.parse(query) as unknown;
   if (!isRecord(parsed) || typeof parsed.method !== 'string') {
     return parseMongoDBReadQuery(query);
@@ -243,25 +121,6 @@ export function parseMongoDBQuery(query: string, mode: QueryExecutionMode): Mong
   };
 }
 
-function validateManualMongoDBQuery(trimmed: string): QueryValidationResult {
-  const parsed = parseMongoDBQuery(trimmed, 'manual');
-  if (parsed.method === 'find' || parsed.method === 'aggregate' || parsed.method === 'count') {
-    const safeValidation = validateMongoDBReadOnlyQuery(trimmed, 'safe');
-    return safeValidation.safe
-      ? {
-        ...safeValidation,
-        reason: 'Validated MongoDB read allowed with SAFE mode off.'
-      }
-      : safeValidation;
-  }
-
-  return {
-    safe: true,
-    reason: `Validated MongoDB document ${parsed.method} allowed with SAFE mode off.`,
-    normalizedQuery: JSON.stringify(parsed, null, 2)
-  };
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -270,7 +129,7 @@ function isSafeCollectionName(name: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(name.trim()) && !name.includes('..');
 }
 
-function findBlockedAggregationStage(pipeline: unknown[]): string | null {
+export function findBlockedAggregationStage(pipeline: unknown[]): string | null {
   for (const stage of pipeline) {
     if (!isRecord(stage)) continue;
     for (const key of Object.keys(stage)) {
@@ -292,7 +151,7 @@ function findAggregationLimit(pipeline: unknown[]): number | null {
   return null;
 }
 
-function findBlockedKey(value: unknown): string | null {
+export function findBlockedKey(value: unknown): string | null {
   if (Array.isArray(value)) {
     for (const item of value) {
       const blocked = findBlockedKey(item);

@@ -1,15 +1,15 @@
 export type DatabaseKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres' | 'mongodb';
-export type ModelProviderKind = 'openrouter' | 'openai';
-export type QueryExecutionMode = 'safe' | 'manual';
+export type ModelProviderKind = 'openrouter';
 export type ChatRole = 'system' | 'user' | 'assistant';
 export type ChatActivityStatus = 'thinking' | 'validating' | 'running' | 'success' | 'blocked' | 'error' | 'complete';
+export type SafetyLevel = 'safe' | 'standard' | 'elevated' | 'unrestricted';
+export type EffortLevel = 'none' | 'low' | 'medium' | 'high' | 'max';
 
 export interface ConnectionConfig {
   id: string;
   kind: DatabaseKind;
   label: string;
   databasePath?: string;
-  /** Kept for existing saved Elasticsearch connections created with URL input. */
   elasticsearchUrl?: string;
   elasticsearchHost?: string;
   elasticsearchPort?: number;
@@ -29,6 +29,7 @@ export interface ConnectionConfig {
   hasSavedPassword?: boolean;
   authDatabase?: string;
   mongodbUri?: string;
+  safetyLevel?: SafetyLevel;
   createdAt: string;
 }
 
@@ -50,12 +51,6 @@ export interface DatabaseSchema {
   tables: TableInfo[];
 }
 
-export interface QueryValidationResult {
-  safe: boolean;
-  reason: string;
-  normalizedQuery: string;
-}
-
 export interface QueryResult {
   columns: string[];
   rows: Record<string, unknown>[];
@@ -70,12 +65,6 @@ export interface ChatMessage {
   createdAt: string;
 }
 
-export interface GeneratedQuery {
-  query: string;
-  explanation: string;
-  validation: QueryValidationResult;
-}
-
 export interface ChatActivityStep {
   id: string;
   queryId?: string;
@@ -83,24 +72,14 @@ export interface ChatActivityStep {
   title: string;
   detail?: string;
   query?: string;
-  validation?: QueryValidationResult;
   rowCount?: number;
   elapsedMs?: number;
   createdAt: string;
 }
 
-export interface ChatProgressEvent {
-  turnId: string;
-  step: ChatActivityStep;
-}
-
 export interface ChatTurnResponse {
   message: ChatMessage;
-  generatedQuery?: GeneratedQuery;
-  queryResult?: QueryResult;
-  generatedQueries?: GeneratedQuery[];
-  queryResults?: QueryResult[];
-  activity?: ChatActivityStep[];
+  events?: AgentEvent[];
 }
 
 export interface ConnectionHistoryItem extends ConnectionConfig {
@@ -118,16 +97,10 @@ export interface PersistedChatSession {
   updatedAt: string;
 }
 
-export interface ProviderSettings {
-  provider: ModelProviderKind;
-  model: string;
-  hasApiKey: boolean;
-}
-
 export interface PersistedSettings {
   provider: ModelProviderKind;
   model: string;
-  safeMode: boolean;
+  effortLevel?: EffortLevel;
 }
 
 export interface ModelInfo {
@@ -137,7 +110,7 @@ export interface ModelInfo {
 
 export interface ModelChatMessage {
   role: ChatRole | 'tool';
-  content: string;
+  content: string | null;
   tool_call_id?: string;
   tool_calls?: ModelToolCall[];
 }
@@ -186,29 +159,98 @@ export interface ModelProvider {
 export interface DatabaseConnector {
   connect(config: ConnectionConfig): Promise<void>;
   introspect(): Promise<DatabaseSchema>;
-  validateQuery(query: string, mode: QueryExecutionMode): QueryValidationResult;
-  executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult>;
+  executeQuery(query: string): Promise<QueryResult>;
   getContextForPrompt(): Promise<string>;
+  setSafetyLevel(level: SafetyLevel): void;
   close(): void;
+}
+
+// ----- Agent Harness Types -----
+
+export type AgentState = 'idle' | 'thinking' | 'processing' | 'executing' | 'complete' | 'aborted';
+
+export type AgentEventType =
+  | 'text-delta'
+  | 'tool-start'
+  | 'tool-progress'
+  | 'tool-complete'
+  | 'thinking-start'
+  | 'thinking-delta'
+  | 'status'
+  | 'complete'
+  | 'error'
+  | 'aborted'
+  | 'approval-required'
+  | 'approval-resolved';
+
+export interface AgentEvent {
+  turnId: string;
+  type: AgentEventType;
+  timestamp: string;
+  data: Record<string, unknown>;
+}
+
+export interface AgentToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+export interface AgentToolResult {
+  ok: boolean;
+  summary: string;
+  data?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface AgentMemory {
+  id: string;
+  content: string;
+  category: 'schema' | 'domain' | 'preference' | 'query' | 'note';
+  importance: number;
+  createdAt: string;
+  lastAccessedAt: string;
+}
+
+export interface AuditEntry {
+  id: string;
+  timestamp: string;
+  turnId: string;
+  connectionId: string;
+  toolName: string;
+  toolInput?: Record<string, unknown>;
+  permissionDecision: string;
+  queryPreview?: string;
+  risk?: string;
+  elapsedMs?: number;
 }
 
 export interface DbChatApi {
   chooseSqliteFile(): Promise<ConnectionConfig | null>;
   connect(config: ConnectionConfig): Promise<DatabaseSchema>;
   getSchema(): Promise<DatabaseSchema | null>;
-  validateQuery(query: string, mode: QueryExecutionMode): Promise<QueryValidationResult>;
-  executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult>;
+  executeQuery(query: string): Promise<QueryResult>;
   sendChat(messages: ModelChatMessage[], turnId?: string): Promise<ChatTurnResponse>;
-  onChatProgress(turnId: string, listener: (event: ChatProgressEvent) => void): () => void;
+  subscribeToAgentEvents(turnId: string, listener: (event: AgentEvent) => void): () => void;
+  abortChat(turnId: string): Promise<void>;
+  approveInterruption(turnId: string, interruptionId: string): Promise<void>;
+  denyInterruption(turnId: string, interruptionId: string): Promise<void>;
   loadSettings(): Promise<PersistedSettings & { hasApiKey: boolean }>;
   saveSettings(settings: PersistedSettings): Promise<void>;
   saveApiKey(provider: ModelProviderKind, apiKey: string): Promise<void>;
-  listModels(provider: ModelProviderKind): Promise<ModelInfo[]>;
+  listModels(): Promise<ModelInfo[]>;
   listChatSessions(): Promise<PersistedChatSession[]>;
   saveChatSession(session: PersistedChatSession): Promise<PersistedChatSession>;
   deleteChatSession(id: string): Promise<void>;
   clearChatSessions(): Promise<void>;
   listConnections(): Promise<ConnectionHistoryItem[]>;
   deleteConnection(id: string): Promise<void>;
+  renameConnection(id: string, label: string): Promise<void>;
+  setSafetyLevel(connectionId: string, level: SafetyLevel): Promise<void>;
+  getAuditLog(): Promise<AuditEntry[]>;
   saveCsvFile(request: { content: string; defaultName: string }): Promise<void>;
+  rendererLog(level: string, message: string): Promise<void>;
 }

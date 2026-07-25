@@ -3,16 +3,15 @@ import type {
   ConnectionConfig,
   DatabaseConnector,
   DatabaseSchema,
-  QueryExecutionMode,
   QueryResult,
-  QueryValidationResult,
   TableInfo
 } from '../../shared/types.js';
-import { validateSqliteReadOnlyQuery } from './sqliteValidation.js';
+import { QueryValidator, type SafetyLevel } from './QueryValidator.js';
 
 export class SQLiteConnector implements DatabaseConnector {
   private db: Database.Database | null = null;
   private config: ConnectionConfig | null = null;
+  private safetyLevel: SafetyLevel = 'standard';
 
   async connect(config: ConnectionConfig): Promise<void> {
     if (!config.databasePath) {
@@ -55,26 +54,28 @@ export class SQLiteConnector implements DatabaseConnector {
     };
   }
 
-  validateQuery(query: string, mode: QueryExecutionMode): QueryValidationResult {
-    return validateSqliteReadOnlyQuery(query, mode);
+  setSafetyLevel(level: SafetyLevel): void {
+    this.safetyLevel = level;
   }
 
-  async executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult> {
+  async executeQuery(query: string): Promise<QueryResult> {
     const db = this.requireDb();
-    const validation = this.validateQuery(query, mode);
-    if (!validation.safe) {
-      throw new Error(validation.reason);
+
+    const validation = QueryValidator.validate(query, this.safetyLevel);
+    if (!validation.ok) {
+      throw new Error(validation.reason ?? 'Query validation failed.');
     }
+    const effectiveQuery = validation.modifiedQuery ?? query;
 
     const start = performance.now();
-    const statement = db.prepare(validation.normalizedQuery);
+    const statement = db.prepare(effectiveQuery);
     const rows = statement.reader
       ? statement.all() as Record<string, unknown>[]
       : [writeResultRow(statement.run())];
     const elapsedMs = Math.round(performance.now() - start);
     const columns = rows[0]
       ? Object.keys(rows[0])
-      : this.getColumnsForEmptyResult(validation.normalizedQuery);
+      : this.getColumnsForEmptyResult(query);
 
     return {
       columns,

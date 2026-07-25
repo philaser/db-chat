@@ -2,6 +2,7 @@ import { app, safeStorage } from 'electron';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type {
+  AgentMemory,
   ConnectionConfig,
   ConnectionHistoryItem,
   DatabaseKind,
@@ -18,12 +19,12 @@ interface StoreData {
   encryptedPasswords: Record<string, string>;
   connections: ConnectionHistoryItem[];
   chatSessions: PersistedChatSession[];
+  memories: AgentMemory[];
 }
 
 const DEFAULT_SETTINGS: PersistedSettings = {
   provider: 'openrouter',
-  model: 'openai/gpt-4.1-mini',
-  safeMode: true
+  model: 'openai/gpt-4.1-mini'
 };
 
 const PASSWORD_KINDS: Set<DatabaseKind> = new Set(['elasticsearch', 'mysql', 'postgres', 'mongodb']);
@@ -173,6 +174,14 @@ export class AppStore {
     });
   }
 
+  renameConnection(id: string, label: string): void {
+    const data = this.read();
+    const connections = data.connections.map((conn) =>
+      conn.id === id ? { ...conn, label: label.trim() || conn.label } : conn
+    );
+    this.write({ ...data, connections });
+  }
+
   listChatSessions(): PersistedChatSession[] {
     return this.read().chatSessions;
   }
@@ -224,7 +233,8 @@ export class AppStore {
             ? { elasticsearchHasSavedPassword: Boolean(connection.id && encryptedPasswords[connection.id]) }
             : { hasSavedPassword: Boolean(connection.id && encryptedPasswords[connection.id]) })
         })).filter(Boolean),
-        chatSessions: (parsed.chatSessions ?? []).map((session) => this.normalizeChatSession(session, encryptedPasswords, encryptedElasticsearchPasswords)).filter(Boolean)
+        chatSessions: (parsed.chatSessions ?? []).map((session) => this.normalizeChatSession(session, encryptedPasswords, encryptedElasticsearchPasswords)).filter(Boolean),
+        memories: parsed.memories ?? []
       };
     } catch {
       return {
@@ -233,7 +243,8 @@ export class AppStore {
         encryptedElasticsearchPasswords: {},
         encryptedPasswords: {},
         connections: [],
-        chatSessions: []
+        chatSessions: [],
+        memories: []
       };
     }
   }
@@ -246,8 +257,7 @@ export class AppStore {
   private normalizeSettings(settings: PersistedSettings): PersistedSettings {
     return {
       provider: settings.provider,
-      model: settings.model,
-      safeMode: settings.safeMode
+      model: settings.model
     };
   }
 
@@ -337,6 +347,15 @@ export class AppStore {
       return safeStorage.decryptString(Buffer.from(payload, 'base64'));
     }
     return Buffer.from(payload, 'base64').toString('utf8');
+  }
+
+  loadMemories(): AgentMemory[] {
+    return this.read().memories;
+  }
+
+  persistMemories(memories: AgentMemory[]): void {
+    const data = this.read();
+    this.write({ ...data, memories });
   }
 }
 
