@@ -29,11 +29,13 @@ import {
   XCircle
 } from 'lucide-react';
 import {
+  Component,
   FormEvent,
   useCallback,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
   type UIEvent as ReactUIEvent,
   useEffect,
   useMemo,
@@ -465,6 +467,49 @@ function formatTimestamp(iso: string): string {
     hour: 'numeric',
     minute: '2-digit'
   }).format(new Date(iso));
+}
+
+class ErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: { componentStack: string }) {
+    console.error('[dbchat:error-boundary]', error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: '40px', textAlign: 'center', color: 'var(--color-text-primary)' }}>
+          <h2 style={{ marginBottom: '12px' }}>Something went wrong</h2>
+          <p style={{ color: 'var(--color-text-secondary)', marginBottom: '16px' }}>
+            {this.state.error.message}
+          </p>
+          <button
+            type="button"
+            onClick={() => { this.setState({ error: null }); window.location.reload(); }}
+            style={{
+              padding: '8px 16px',
+              borderRadius: '8px',
+              border: '1px solid var(--color-separator)',
+              background: 'var(--color-control)',
+              cursor: 'pointer',
+              color: 'var(--color-text-primary)'
+            }}
+          >
+            Reload
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
@@ -1397,15 +1442,20 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         case 'status':
           updateStatus(String(event.data.message ?? ''));
           break;
-        case 'approval-required':
+        case 'approval-required': {
+          const d = event.data;
+          const src = (d.interruption as Record<string, unknown> | undefined) ?? d;
+          const risk = (src.risk as string) || 'low';
+          appendLog('info', `Approval required: toolName=${String(src.toolName)}, risk=${risk}, dataKeys=${Object.keys(d).join(',')}`);
           setPendingApproval({
-            id: String(event.data.id),
-            toolName: String(event.data.toolName),
-            purpose: String(event.data.purpose),
-            queryPreview: event.data.queryPreview as string | undefined,
-            risk: (event.data.risk as string) as 'none' | 'low' | 'medium' | 'high'
+            id: String(src.id ?? ''),
+            toolName: String(src.toolName ?? ''),
+            purpose: String(src.purpose ?? ''),
+            queryPreview: src.queryPreview as string | undefined,
+            risk: risk as 'none' | 'low' | 'medium' | 'high'
           });
           break;
+        }
         case 'approval-resolved':
           setPendingApproval(null);
           break;
@@ -2547,6 +2597,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   } as CSSProperties;
 
   return (
+    <ErrorBoundary>
     <main
       className={`app-shell${resizeDrag ? ' resizing-panels' : ''}`}
       ref={shellRef}
@@ -3018,7 +3069,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                 <span style={{
                   color: pendingApproval.risk === 'high' ? 'var(--color-danger)' : pendingApproval.risk === 'medium' ? 'var(--color-warning)' : 'var(--color-success)'
                 }}>
-                  {pendingApproval.risk.toUpperCase()}
+                  {String(pendingApproval.risk ?? 'unknown').toUpperCase()}
                 </span>
               </p>
               <div className="connection-form-actions">
@@ -3036,5 +3087,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
 
     </main>
+    </ErrorBoundary>
   );
 }
