@@ -21,7 +21,10 @@ import {
   Search,
   Send,
   Settings,
+  Shield,
+  ShieldAlert,
   ShieldCheck,
+  ShieldX,
   Sun,
   Table2,
   Trash2,
@@ -2907,13 +2910,16 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                           aria-expanded={openDropdown === 'safety'}
                           aria-label="Safety level"
                         >
-                          <ShieldCheck size={13} aria-hidden="true" />
-                          <span>{safetyLevel === 'safe' ? 'Safe' : safetyLevel === 'unrestricted' ? 'Unrestricted' : 'Standard'}</span>
+                          {safetyLevel === 'safe' ? <ShieldCheck size={13} aria-hidden="true" />
+                            : safetyLevel === 'elevated' ? <ShieldAlert size={13} aria-hidden="true" />
+                            : safetyLevel === 'unrestricted' ? <ShieldX size={13} aria-hidden="true" />
+                            : <Shield size={13} aria-hidden="true" />}
+                          <span>{safetyLevel === 'safe' ? 'Safe' : safetyLevel === 'elevated' ? 'Elevated' : safetyLevel === 'unrestricted' ? 'Unrestricted' : 'Standard'}</span>
                           <ChevronDown size={12} className="chevron" />
                         </button>
                         {openDropdown === 'safety' && (
                           <div className="composer-select-menu" role="menu">
-                            {(['safe', 'standard', 'unrestricted'] as SafetyLevel[]).map((level) => (
+                            {(['safe', 'standard', 'elevated', 'unrestricted'] as SafetyLevel[]).map((level) => (
                               <button
                                 key={level}
                                 type="button"
@@ -2935,7 +2941,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                                   setOpenDropdown(null);
                                 }}
                               >
-                                {level === 'safe' ? 'Safe' : level === 'unrestricted' ? 'Unrestricted' : 'Standard'}
+                                {level === 'safe' ? 'Safe' : level === 'elevated' ? 'Elevated' : level === 'unrestricted' ? 'Unrestricted' : 'Standard'}
                               </button>
                             ))}
                           </div>

@@ -30,15 +30,25 @@ export class PermissionManager {
     if (!rule) return 'ask';
 
     if (toolName === 'run_database_query') {
-      const query = (input.query as string) ?? '';
-      if (this.safetyLevel === 'unrestricted') return 'ask';
+      if (this.safetyLevel === 'unrestricted') return 'allow';
 
-      const writePattern = /^\s*(INSERT|UPDATE|DELETE|REPLACE|MERGE|UPSERT|CREATE|DROP|ALTER|TRUNCATE|RENAME|GRANT|REVOKE)\s/i;
-      if (writePattern.test(query.trim())) {
-        if (this.safetyLevel === 'safe') return 'deny';
-        return 'ask';
+      const query = (input.query as string) ?? '';
+      const isDDL = /^\s*(CREATE|DROP|ALTER|TRUNCATE|RENAME|GRANT|REVOKE)\s/i.test(query.trim());
+      const isWrite = /^\s*(INSERT|UPDATE|DELETE|REPLACE|MERGE|UPSERT)\s/i.test(query.trim());
+
+      if (this.safetyLevel === 'elevated') {
+        if (isDDL) return 'ask';
+        return 'allow';
       }
 
+      if (this.safetyLevel === 'standard') {
+        if (isDDL) return 'deny';
+        if (isWrite) return 'ask';
+        return 'allow';
+      }
+
+      // safe
+      if (isDDL || isWrite) return 'deny';
       return 'allow';
     }
 

@@ -1601,8 +1601,12 @@ button:disabled {
   color: var(--color-success);
 }
 
-.composer-select--safety[data-level="unrestricted"] .composer-select-trigger {
+.composer-select--safety[data-level="elevated"] .composer-select-trigger {
   color: var(--color-warning);
+}
+
+.composer-select--safety[data-level="unrestricted"] .composer-select-trigger {
+  color: var(--color-danger);
 }
 
 .composer textarea {

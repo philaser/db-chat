@@ -1,4 +1,4 @@
-export type SafetyLevel = 'safe' | 'standard' | 'unrestricted';
+export type SafetyLevel = 'safe' | 'standard' | 'elevated' | 'unrestricted';
 
 export interface ValidationResult {
   ok: boolean;
