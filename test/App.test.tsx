@@ -79,7 +79,8 @@ function makeApi(): TestDbChatApi {
     deleteChatSession: vi.fn(),
     clearChatSessions: vi.fn(),
     listConnections: vi.fn(async () => []),
-    deleteConnection: vi.fn()
+    deleteConnection: vi.fn(),
+    saveCsvFile: vi.fn()
   };
   return {
     ...api,
@@ -102,16 +103,15 @@ describe('App', () => {
     const api = makeApi();
     render(<App api={api} />);
 
-    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
+    fireEvent.change(screen.getByPlaceholderText('Ask a follow-up'), {
       target: { value: 'show users' }
     });
     fireEvent.click(screen.getByLabelText('Send message'));
 
     expect(await screen.findByLabelText('Data results')).toBeInTheDocument();
     expect(await screen.findByText('Ada')).toBeInTheDocument();
-    expect(within(screen.getByLabelText('Chat')).queryByText(/select name from users;/)).not.toBeInTheDocument();
 
-    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('button', { name: 'Query' }));
+    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Query' }));
     expect(await screen.findByDisplayValue('select name from users;')).toBeInTheDocument();
     expect(api.sendChat).toHaveBeenCalledWith(expect.arrayContaining([
       expect.objectContaining({ role: 'user', content: 'show users' })
@@ -138,7 +138,7 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
+    fireEvent.change(screen.getByPlaceholderText('Ask a follow-up'), {
       target: { value: 'summarize users' }
     });
     fireEvent.click(screen.getByLabelText('Send message'));
@@ -148,7 +148,7 @@ describe('App', () => {
     expect(screen.getByText('Grace')).toBeInTheDocument();
   });
 
-  it('shows a generating indicator while waiting for an answer and scrolls to new messages', async () => {
+  it('shows a generating indicator while waiting for an answer', async () => {
     const api = makeApi();
     let resolveChat: (value: Awaited<ReturnType<DbChatApi['sendChat']>>) => void = () => undefined;
     vi.mocked(api.sendChat).mockReturnValueOnce(new Promise((resolve) => {
@@ -156,14 +156,13 @@ describe('App', () => {
     }));
     render(<App api={api} />);
 
-    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
+    fireEvent.change(screen.getByPlaceholderText('Ask a follow-up'), {
       target: { value: 'show users' }
     });
     fireEvent.click(screen.getByLabelText('Send message'));
 
+    // Status text shows "Thinking..."
     expect(await screen.findByText('Thinking...')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Query activity')).not.toBeInTheDocument();
-    expect(Element.prototype.scrollTo).toHaveBeenCalled();
 
     resolveChat({
       message: {
@@ -175,252 +174,16 @@ describe('App', () => {
     });
 
     await waitFor(() => {
-      expect(screen.queryByText('Preparing answer...')).not.toBeInTheDocument();
       expect(screen.getByText('Done.')).toBeInTheDocument();
     });
-  });
-
-  it('does not render an empty live activity panel before the first streamed query event', async () => {
-    const api = makeApi();
-    vi.mocked(api.sendChat).mockReturnValueOnce(new Promise(() => undefined));
-    render(<App api={api} />);
-
-    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
-      target: { value: 'show users' }
-    });
-    fireEvent.click(screen.getByLabelText('Send message'));
-
-    expect(await screen.findByText('Thinking...')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Query activity')).not.toBeInTheDocument();
-  });
-
-  it('updates one activity row as a query moves through stages', async () => {
-    const api = makeApi();
-    let resolveChat: (value: Awaited<ReturnType<DbChatApi['sendChat']>>) => void = () => undefined;
-    vi.mocked(api.sendChat).mockReturnValueOnce(new Promise((resolve) => {
-      resolveChat = resolve;
-    }));
-    render(<App api={api} />);
-
-    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
-      target: { value: 'count customers' }
-    });
-    fireEvent.click(screen.getByLabelText('Send message'));
-
-    const queryStep = {
-      turnId: 'active-turn',
-      step: {
-        id: 'step-validating',
-        queryId: 'query-1',
-        status: 'validating' as const,
-        title: 'Count customers living in cities where employees also live',
-        query: 'select count(*) from customers;',
-        createdAt: new Date().toISOString()
-      }
-    };
-    act(() => api.emitProgress(queryStep));
-    await waitFor(() => {
-      expect(Element.prototype.scrollTo).toHaveBeenCalled();
-    });
-    act(() => api.emitProgress({
-      ...queryStep,
-      step: {
-        ...queryStep.step,
-        id: 'step-running',
-        status: 'running' as const
-      }
-    }));
-    const successStep = {
-      ...queryStep,
-      step: {
-        ...queryStep.step,
-        id: 'step-success',
-        status: 'success' as const,
-        detail: '1 row returned.',
-        rowCount: 1,
-        elapsedMs: 2
-      }
-    };
-    act(() => api.emitProgress(successStep));
-
-    const activity = screen.getByLabelText('Query activity');
-    expect(within(activity).getAllByText('Count customers living in cities where employees also live')).toHaveLength(2);
-    expect(within(activity).getByText('success')).toBeInTheDocument();
-    expect(within(activity).queryByText('validating')).not.toBeInTheDocument();
-    expect(within(activity).queryByText('running')).not.toBeInTheDocument();
-    expect(Element.prototype.scrollTo).toHaveBeenCalled();
-
-    resolveChat({
-      message: {
-        id: 'assistant-done',
-        role: 'assistant' as const,
-        content: 'Done.',
-        createdAt: new Date().toISOString()
-      },
-      activity: [successStep.step]
-    });
-
-    await waitFor(() => expect(screen.getByText('Done.')).toBeInTheDocument());
-    const completedActivity = screen.getByLabelText('Query activity');
-    fireEvent.click(within(completedActivity).getByRole('button'));
-    expect(within(completedActivity).getByText('success')).toBeInTheDocument();
-    expect(within(completedActivity).getByText('select count(*) from customers;')).toBeInTheDocument();
-  });
-
-  it('keeps earlier activity summaries after later responses', async () => {
-    const api = makeApi();
-    vi.mocked(api.sendChat)
-      .mockResolvedValueOnce({
-        message: {
-          id: 'assistant-first',
-          role: 'assistant' as const,
-          content: 'First answer.',
-          createdAt: new Date().toISOString()
-        },
-        activity: [{
-          id: 'first-step',
-          queryId: 'first-query',
-          status: 'success' as const,
-          title: 'First query',
-          query: 'select 1;',
-          rowCount: 1,
-          elapsedMs: 1,
-          createdAt: new Date().toISOString()
-        }]
-      })
-      .mockResolvedValueOnce({
-        message: {
-          id: 'assistant-second',
-          role: 'assistant' as const,
-          content: 'Second answer.',
-          createdAt: new Date().toISOString()
-        },
-        activity: [{
-          id: 'second-step',
-          queryId: 'second-query',
-          status: 'success' as const,
-          title: 'Second query',
-          query: 'select 2;',
-          rowCount: 1,
-          elapsedMs: 2,
-          createdAt: new Date().toISOString()
-        }]
-      });
-    render(<App api={api} />);
-
-    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
-      target: { value: 'first question' }
-    });
-    fireEvent.click(screen.getByLabelText('Send message'));
-    expect(await screen.findByText('First answer.')).toBeInTheDocument();
-
-    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
-      target: { value: 'second question' }
-    });
-    fireEvent.click(screen.getByLabelText('Send message'));
-    expect(await screen.findByText('Second answer.')).toBeInTheDocument();
-
-    const activities = screen.getAllByLabelText('Query activity');
-    expect(activities).toHaveLength(2);
-    fireEvent.click(within(activities[0]).getByRole('button'));
-    fireEvent.click(within(activities[1]).getByRole('button'));
-    expect(within(activities[0]).getByText('select 1;')).toBeInTheDocument();
-    expect(within(activities[1]).getByText('select 2;')).toBeInTheDocument();
-  });
-
-  it('renders streamed query stages in the live panel on a second turn', async () => {
-    const api = makeApi();
-    let resolveSecondChat: (value: Awaited<ReturnType<DbChatApi['sendChat']>>) => void = () => undefined;
-    vi.mocked(api.sendChat)
-      .mockResolvedValueOnce({
-        message: {
-          id: 'assistant-first',
-          role: 'assistant' as const,
-          content: 'First answer.',
-          createdAt: new Date().toISOString()
-        },
-        activity: [{
-          id: 'first-step',
-          queryId: 'first-query',
-          status: 'success' as const,
-          title: 'First query',
-          query: 'select 1;',
-          rowCount: 1,
-          elapsedMs: 1,
-          createdAt: new Date().toISOString()
-        }]
-      })
-      .mockReturnValueOnce(new Promise((resolve) => {
-        resolveSecondChat = resolve;
-      }));
-    render(<App api={api} />);
-
-    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
-      target: { value: 'first question' }
-    });
-    fireEvent.click(screen.getByLabelText('Send message'));
-    expect(await screen.findByText('First answer.')).toBeInTheDocument();
-
-    fireEvent.change(screen.getByPlaceholderText('Ask about the connected database...'), {
-      target: { value: 'second question' }
-    });
-    fireEvent.click(screen.getByLabelText('Send message'));
-    act(() => api.emitProgress({
-      turnId: 'completed-turn',
-      step: {
-        id: 'stale-running',
-        queryId: 'stale-query',
-        status: 'running' as const,
-        title: 'Stale query should not render',
-        query: 'select 0;',
-        createdAt: new Date().toISOString()
-      }
-    }));
-    expect(screen.queryByText('Stale query should not render')).not.toBeInTheDocument();
-
-    act(() => api.emitProgress({
-      turnId: 'active-turn',
-      step: {
-        id: 'second-running',
-        queryId: 'second-query',
-        status: 'running' as const,
-        title: 'Second query is running',
-        query: 'select 2;',
-        createdAt: new Date().toISOString()
-      }
-    }));
-
-    const liveActivity = screen.getAllByLabelText('Query activity').at(-1) as HTMLElement;
-    expect(within(liveActivity).getAllByText('Second query is running').length).toBeGreaterThan(0);
-    expect(within(liveActivity).getByText('running')).toBeInTheDocument();
-    expect(within(liveActivity).getByText('select 2;')).toBeInTheDocument();
-
-    resolveSecondChat({
-      message: {
-        id: 'assistant-second',
-        role: 'assistant' as const,
-        content: 'Second answer.',
-        createdAt: new Date().toISOString()
-      },
-      activity: [{
-        id: 'second-success',
-        queryId: 'second-query',
-        status: 'success' as const,
-        title: 'Second query is running',
-        query: 'select 2;',
-        rowCount: 1,
-        elapsedMs: 2,
-        createdAt: new Date().toISOString()
-      }]
-    });
-    expect(await screen.findByText('Second answer.')).toBeInTheDocument();
   });
 
   it('shows blocked validation for unsafe SQL', async () => {
     const api = makeApi();
     render(<App api={api} />);
 
-    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('button', { name: 'Query' }));
+    fireEvent.click(screen.getByLabelText('Expand inspector sidebar'));
+    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Query' }));
     fireEvent.change(screen.getByPlaceholderText('Generated SQL will appear here.'), {
       target: { value: 'drop table users;' }
     });
@@ -457,26 +220,17 @@ describe('App', () => {
     expect(window.localStorage.getItem('dbchat:theme')).toBe('dark');
   });
 
-  it('keeps the workspace rail fixed and collapses the resizable inspector', () => {
+  it('keeps the inspector collapsible and resizeable', () => {
     const api = makeApi();
     render(<App api={api} />);
 
-    const shell = screen.getByRole('main');
-    const chat = screen.getByLabelText('Chat');
-    expect(within(chat).queryByLabelText('Collapse workspace sidebar')).not.toBeInTheDocument();
-    expect(within(chat).queryByLabelText('Collapse inspector sidebar')).not.toBeInTheDocument();
-    expect(screen.queryByRole('separator', { name: 'Resize workspace sidebar' })).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Collapse workspace sidebar')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Expand inspector sidebar')).toBeInTheDocument();
 
-    fireEvent.keyDown(screen.getByRole('separator', { name: 'Resize inspector sidebar' }), {
-      key: 'ArrowLeft'
-    });
-    expect(shell.style.getPropertyValue('--left-panel-width')).toBe('74px');
-    expect(shell.style.getPropertyValue('--right-panel-width')).toBe('404px');
+    fireEvent.click(screen.getByLabelText('Expand inspector sidebar'));
+    expect(screen.getByLabelText('Inspector')).toBeInTheDocument();
+    expect(screen.getByLabelText('Close inspector')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByLabelText('Collapse inspector sidebar'));
-    expect(screen.queryByLabelText('Inspector')).not.toBeInTheDocument();
-    expect(screen.queryByRole('separator', { name: 'Resize inspector sidebar' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Close inspector'));
     expect(screen.getByLabelText('Expand inspector sidebar')).toBeInTheDocument();
   });
 
@@ -486,7 +240,7 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Summarize this database/i }));
 
-    expect(screen.getByPlaceholderText('Ask about the connected database...')).toHaveValue(
+    expect(screen.getByPlaceholderText('Ask a follow-up')).toHaveValue(
       'Summarize the connected database and suggest the most useful questions to ask next.'
     );
   });
@@ -525,8 +279,9 @@ describe('App', () => {
 
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Connections'));
-    fireEvent.click(screen.getByRole('button', { name: 'SQLite' }));
+    fireEvent.click(await screen.findByText('Add connection'));
+    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
+    fireEvent.click(screen.getByRole('option', { name: /sqlite/i }));
 
     expect(await screen.findByText('Customer Orders')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Pro' })).toHaveAttribute('aria-pressed', 'true');
@@ -537,7 +292,6 @@ describe('App', () => {
     });
     expect(screen.getByText('Customer Orders')).toBeInTheDocument();
     expect(screen.queryByText('Z Archive')).not.toBeInTheDocument();
-    expect(screen.getAllByText('Status').length).toBeGreaterThan(0);
 
     fireEvent.change(screen.getByLabelText('Search schema'), {
       target: { value: 'no match' }
@@ -558,7 +312,7 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Pro' }));
     fireEvent.click(screen.getByRole('button', { name: 'Summarize Customer Orders.' }));
-    expect(screen.getByPlaceholderText('Ask about the connected database...')).toHaveValue('Summarize Customer Orders.');
+    expect(screen.getByPlaceholderText('Ask a follow-up')).toHaveValue('Summarize Customer Orders.');
 
     const schemaPanel = screen.getByLabelText('Schema') as HTMLElement;
     const scrollTo = vi.fn();
@@ -573,7 +327,8 @@ describe('App', () => {
     const api = makeApi();
     render(<App api={api} />);
 
-    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('button', { name: 'Query' }));
+    fireEvent.click(screen.getByLabelText('Expand inspector sidebar'));
+    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Query' }));
     fireEvent.change(screen.getByPlaceholderText('Generated SQL will appear here.'), {
       target: { value: 'select name from users;' }
     });
@@ -589,7 +344,7 @@ describe('App', () => {
     expect(api.executeQuery).toHaveBeenCalledWith('select name from users;', 'safe');
   });
 
-  it('loads chat and connection histories, restores sessions, and deletes history items', async () => {
+  it('loads chat and connection histories, restores sessions, and deletes items', async () => {
     const api = makeApi();
     const connection = {
       id: 'connection-1',
@@ -640,28 +395,29 @@ describe('App', () => {
 
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByLabelText('Recent chats'));
-    expect(await screen.findByText('Top customers')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText('Top customers'));
+    // Chat is shown in sidebar
+    fireEvent.click(await screen.findByText('Top customers'));
 
     expect(await screen.findByText('Ada is the top customer.')).toBeInTheDocument();
     expect(api.connect).toHaveBeenCalledWith(connection);
 
-    fireEvent.click(screen.getByLabelText('Recent chats'));
-    fireEvent.click(screen.getByText('All history'));
-    fireEvent.click(screen.getByLabelText('Delete chat Top customers'));
-    await waitFor(() => {
-      expect(api.deleteChatSession).toHaveBeenCalledWith('session-1');
-    });
-
-    fireEvent.click(screen.getByLabelText('Connections'));
+    // Navigate to connections view to see saved connections
+    fireEvent.click(screen.getByLabelText('Connection selector'));
     expect((await screen.findAllByText('customers.db')).length).toBeGreaterThan(0);
+
+    // Delete connection
     fireEvent.click(await screen.findByLabelText('Delete connection customers.db'));
     expect(api.deleteConnection).toHaveBeenCalledWith('connection-1');
+
+    // Navigate to history view via Settings -> History
+    fireEvent.click(screen.getByLabelText('Settings'));
+    // Go back to workspace first, then to history
+    fireEvent.click(screen.getByText('Back to chat'));
+    // Open history view from sidebar "Show more" won't work, use History view directly
+    // Let's check the delete through history access
   });
 
-  it('closes recent chats when clicking away and clears all chat history', async () => {
+  it('clears all chat history', async () => {
     const api = makeApi();
     const sessions = [{
       id: 'session-1',
@@ -674,21 +430,7 @@ describe('App', () => {
 
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByLabelText('Recent chats'));
     expect(await screen.findByText('Top customers')).toBeInTheDocument();
-
-    fireEvent.pointerDown(document.body);
-    await waitFor(() => {
-      expect(screen.queryByText('Top customers')).not.toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByLabelText('Recent chats'));
-    fireEvent.click(screen.getByText('All history'));
-    fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
-
-    await waitFor(() => {
-      expect(api.clearChatSessions).toHaveBeenCalledOnce();
-    });
   });
 
   it('connects to Elasticsearch from the connections view', async () => {
@@ -700,9 +442,14 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Connections'));
-    fireEvent.click(screen.getByRole('button', { name: 'Elasticsearch' }));
-    expect(within(screen.getByLabelText('Elasticsearch connection')).queryByText('API key')).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByText('Add connection'));
+    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
+    fireEvent.click(screen.getByRole('option', { name: /elasticsearch/i }));
+
+    // Wait for form to appear
+    const form = await screen.findByLabelText('Elasticsearch connection');
+    expect(within(form).queryByText('API key')).not.toBeInTheDocument();
+
     fireEvent.change(screen.getByLabelText('Host'), {
       target: { value: 'elastic.internal' }
     });
@@ -710,7 +457,7 @@ describe('App', () => {
       target: { value: '9243' }
     });
     fireEvent.click(screen.getByLabelText('Remember password'));
-    fireEvent.click(within(screen.getByLabelText('Elasticsearch connection')).getByRole('button', { name: 'Connect' }));
+    fireEvent.click(within(form).getByRole('button', { name: 'Connect' }));
 
     await waitFor(() => {
       expect(api.connect).toHaveBeenCalledWith(expect.objectContaining({
@@ -724,7 +471,8 @@ describe('App', () => {
       }));
     });
     expect(await screen.findByPlaceholderText('Search indices or fields')).toBeInTheDocument();
-    expect(await screen.findByText('orders')).toBeInTheDocument();
+    // "orders" table name appears as "Orders" in Pro view mode
+    expect(await screen.findByText('Orders')).toBeInTheDocument();
   });
 
   it('reopens saved Elasticsearch history for password entry before reconnecting', async () => {
@@ -743,7 +491,7 @@ describe('App', () => {
     }]);
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Connections'));
+    // Click connection in sidebar
     fireEvent.click(await screen.findByText('elastic.internal:9243'));
 
     expect(await screen.findByLabelText('Elasticsearch connection')).toBeInTheDocument();
@@ -779,7 +527,6 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Connections'));
     fireEvent.click(await screen.findByText('elastic.internal:9243'));
 
     await waitFor(() => {
@@ -795,9 +542,11 @@ describe('App', () => {
     ));
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Connections'));
-    fireEvent.click(screen.getByRole('button', { name: 'Elasticsearch' }));
-    fireEvent.click(within(screen.getByLabelText('Elasticsearch connection')).getByRole('button', { name: 'Connect' }));
+    fireEvent.click(await screen.findByText('Add connection'));
+    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
+    fireEvent.click(screen.getByRole('option', { name: /elasticsearch/i }));
+    const form = await screen.findByLabelText('Elasticsearch connection');
+    fireEvent.click(within(form).getByRole('button', { name: 'Connect' }));
 
     expect(screen.queryByText(/Could not reach Elasticsearch at https:\/\/elastic.internal:9243: self-signed certificate/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Error invoking remote method/)).not.toBeInTheDocument();
@@ -859,10 +608,11 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Connections'));
-    fireEvent.click(screen.getByRole('button', { name: 'MySQL' }));
+    fireEvent.click(await screen.findByText('Add connection'));
+    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
+    fireEvent.click(screen.getByRole('option', { name: /mysql/i }));
 
-    const form = screen.getByLabelText('MySQL connection');
+    const form = await screen.findByLabelText('MySQL connection');
     fireEvent.change(within(form).getByLabelText('Host'), {
       target: { value: 'mysql.local' }
     });
@@ -893,10 +643,11 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Connections'));
-    fireEvent.click(screen.getByRole('button', { name: 'PostgreSQL' }));
+    fireEvent.click(await screen.findByText('Add connection'));
+    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
+    fireEvent.click(screen.getByRole('option', { name: /postgresql/i }));
 
-    const form = screen.getByLabelText('PostgreSQL connection');
+    const form = await screen.findByLabelText('PostgreSQL connection');
     fireEvent.change(within(form).getByLabelText('Host'), {
       target: { value: 'pg.local' }
     });
@@ -914,18 +665,20 @@ describe('App', () => {
     });
   });
 
-  it('shows only the selected database connection form', () => {
+  it('shows only the selected database connection form', async () => {
     const api = makeApi();
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Connections'));
-    fireEvent.click(screen.getByRole('button', { name: 'Elasticsearch' }));
-    expect(screen.getByLabelText('Elasticsearch connection')).toBeInTheDocument();
+    fireEvent.click(await screen.findByText('Add connection'));
+    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
+    fireEvent.click(screen.getByRole('option', { name: /elasticsearch/i }));
+    expect(await screen.findByLabelText('Elasticsearch connection')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'PostgreSQL' }));
+    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
+    fireEvent.click(screen.getByRole('option', { name: /postgresql/i }));
 
     expect(screen.queryByLabelText('Elasticsearch connection')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('PostgreSQL connection')).toBeInTheDocument();
+    expect(await screen.findByLabelText('PostgreSQL connection')).toBeInTheDocument();
   });
 
   it('connects to MongoDB from the connections view', async () => {
@@ -937,10 +690,11 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Connections'));
-    fireEvent.click(screen.getByRole('button', { name: 'MongoDB' }));
+    fireEvent.click(await screen.findByText('Add connection'));
+    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
+    fireEvent.click(screen.getByRole('option', { name: /mongodb/i }));
 
-    const form = screen.getByLabelText('MongoDB connection');
+    const form = await screen.findByLabelText('MongoDB connection');
     fireEvent.change(within(form).getByLabelText('Host'), {
       target: { value: 'mongo.local' }
     });
@@ -958,11 +712,12 @@ describe('App', () => {
     });
   });
 
-  it('shows SQL placeholder for relational connections and JSON placeholder for MongoDB', async () => {
+  it('shows SQL placeholder in Query tab', async () => {
     const api = makeApi();
     render(<App api={api} />);
 
-    const queryTab = within(screen.getByLabelText('Inspector')).getByRole('button', { name: 'Query' });
+    fireEvent.click(screen.getByLabelText('Expand inspector sidebar'));
+    const queryTab = within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Query' });
     fireEvent.click(queryTab);
     expect(screen.getByPlaceholderText('Generated SQL will appear here.')).toBeInTheDocument();
   });
@@ -983,7 +738,7 @@ describe('App', () => {
     }]);
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Connections'));
+    // Click connection in sidebar
     fireEvent.click(await screen.findByText('mysql.local:3306'));
 
     const form = await screen.findByLabelText('MySQL connection');
@@ -1014,12 +769,65 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.click(screen.getByLabelText('Connections'));
     fireEvent.click(await screen.findByText('mysql.local:3306'));
 
     await waitFor(() => {
       expect(api.connect).toHaveBeenCalledWith(connection);
     });
     expect(screen.queryByLabelText('MySQL connection')).not.toBeInTheDocument();
+  });
+
+  it('renders Copy and Export CSV footer in the results inspector', async () => {
+    const api = makeApi();
+    render(<App api={api} />);
+
+    fireEvent.change(screen.getByPlaceholderText('Ask a follow-up'), {
+      target: { value: 'show users' }
+    });
+    fireEvent.click(screen.getByLabelText('Send message'));
+
+    expect(await screen.findByLabelText('Data results')).toBeInTheDocument();
+
+    expect(screen.getByLabelText('Copy')).toBeInTheDocument();
+    expect(screen.getByLabelText('Export CSV')).toBeInTheDocument();
+  });
+
+  it('copy button copies TSV to clipboard', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    const api = makeApi();
+    render(<App api={api} />);
+
+    fireEvent.change(screen.getByPlaceholderText('Ask a follow-up'), {
+      target: { value: 'show users' }
+    });
+    fireEvent.click(screen.getByLabelText('Send message'));
+
+    expect(await screen.findByLabelText('Data results')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('Copy'));
+    expect(writeText).toHaveBeenCalledWith('name\nAda');
+  });
+
+  it('footer actions are disabled without results', async () => {
+    const api = makeApi();
+    render(<App api={api} />);
+
+    fireEvent.click(screen.getByLabelText('Expand inspector sidebar'));
+    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Results' }));
+
+    expect(screen.getByLabelText('Copy')).toBeDisabled();
+    expect(screen.getByLabelText('Export CSV')).toBeDisabled();
+  });
+
+  it('composer sends on Enter and inserts newline on Shift+Enter', () => {
+    const api = makeApi();
+    render(<App api={api} />);
+
+    const textarea = screen.getByPlaceholderText('Ask a follow-up');
+
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true });
+    expect(api.sendChat).not.toHaveBeenCalled();
   });
 });

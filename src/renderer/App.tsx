@@ -665,6 +665,36 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }, [showFlyoutChats]);
 
   useEffect(() => {
+    if (!connectionKindMenuOpen) {
+      return;
+    }
+
+    function closeMenu(event: PointerEvent) {
+      const target = event.target as Node;
+      if (!target || !(target instanceof Node)) {
+        return;
+      }
+      const root = document.querySelector('.connection-kind-select');
+      if (root && !root.contains(target)) {
+        setConnectionKindMenuOpen(false);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setConnectionKindMenuOpen(false);
+      }
+    }
+
+    document.addEventListener('pointerdown', closeMenu);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', closeMenu);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [connectionKindMenuOpen]);
+
+  useEffect(() => {
     if (!resizeDrag) {
       return;
     }
@@ -1088,7 +1118,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     }
     if (kind === 'elasticsearch') {
       setDbFormOpen(false);
-      setElasticsearchHost('');
+      setElasticsearchHost('localhost');
       setElasticsearchPort('9200');
       setElasticsearchUseSsl(false);
       setElasticsearchVerifyCerts(true);
