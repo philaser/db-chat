@@ -26,6 +26,10 @@ const api: DbChatApi = {
     };
   },
   abortChat: (turnId: string) => ipcRenderer.invoke('dbchat:abort-chat', turnId),
+  approveInterruption: (turnId: string, interruptionId: string) =>
+    ipcRenderer.invoke('dbchat:approve-interruption', turnId, interruptionId),
+  denyInterruption: (turnId: string, interruptionId: string) =>
+    ipcRenderer.invoke('dbchat:deny-interruption', turnId, interruptionId),
   loadSettings: () => ipcRenderer.invoke('dbchat:load-settings'),
   saveSettings: (settings: PersistedSettings) => ipcRenderer.invoke('dbchat:save-settings', settings),
   saveApiKey: (provider: ModelProviderKind, apiKey: string) => ipcRenderer.invoke('dbchat:save-api-key', provider, apiKey),
@@ -37,6 +41,8 @@ const api: DbChatApi = {
   listConnections: () => ipcRenderer.invoke('dbchat:list-connections'),
   deleteConnection: (id: string) => ipcRenderer.invoke('dbchat:delete-connection', id),
   renameConnection: (id: string, label: string) => ipcRenderer.invoke('dbchat:rename-connection', id, label),
+  setSafetyLevel: (connectionId: string, level: string) => ipcRenderer.invoke('dbchat:set-safety-level', connectionId, level),
+  getAuditLog: () => ipcRenderer.invoke('dbchat:get-audit-log'),
   saveCsvFile: (request) => ipcRenderer.invoke('dbchat:save-csv-file', request)
 };
 

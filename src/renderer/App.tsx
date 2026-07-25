@@ -532,6 +532,13 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [copiedFeedback, setCopiedFeedback] = useState(false);
   const [exportingCsv, setExportingCsv] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
+  const [pendingApproval, setPendingApproval] = useState<{
+    id: string;
+    toolName: string;
+    purpose: string;
+    queryPreview?: string;
+    risk: 'none' | 'low' | 'medium' | 'high';
+  } | null>(null);
   const shellRef = useRef<HTMLElement | null>(null);
   const recentChatsRef = useRef<HTMLDivElement | null>(null);
   const schemaPanelRef = useRef<HTMLDivElement | null>(null);
@@ -1309,6 +1316,18 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         case 'status':
           updateStatus(String(event.data.message ?? ''));
           break;
+        case 'approval-required':
+          setPendingApproval({
+            id: String(event.data.id),
+            toolName: String(event.data.toolName),
+            purpose: String(event.data.purpose),
+            queryPreview: event.data.queryPreview as string | undefined,
+            risk: (event.data.risk as string) as 'none' | 'low' | 'medium' | 'high'
+          });
+          break;
+        case 'approval-resolved':
+          setPendingApproval(null);
+          break;
         case 'complete':
         case 'error':
         case 'aborted':
@@ -1347,6 +1366,18 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       setAnswerGenerating(false);
       setBusy(false);
     }
+  }
+
+  async function approveInterruption() {
+    if (!api || !pendingApproval) return;
+    await api.approveInterruption(activeChatTurnIdRef.current!, pendingApproval.id);
+    setPendingApproval(null);
+  }
+
+  async function denyInterruption() {
+    if (!api || !pendingApproval) return;
+    await api.denyInterruption(activeChatTurnIdRef.current!, pendingApproval.id);
+    setPendingApproval(null);
   }
 
   async function runQuery() {
@@ -2728,6 +2759,53 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
               <div className={`connection-form-panel${elasticsearchFormOpen || dbFormOpen ? ' open' : ''}`}>
                 {renderElasticsearchForm()}
                 {renderDbForm()}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingApproval && (
+        <div className="project-modal-backdrop">
+          <div className="project-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Approval required">
+            <div className="project-modal-header">
+              <h2>Approve Action</h2>
+            </div>
+            <div className="project-modal-body">
+              <p style={{ color: 'var(--color-text-secondary)', marginBottom: '12px' }}>
+                The agent wants to execute <strong style={{ color: 'var(--color-text-primary)' }}>{pendingApproval.toolName}</strong>
+                {pendingApproval.purpose ? ` — ${pendingApproval.purpose}` : ''}
+              </p>
+              {pendingApproval.queryPreview && (
+                <pre style={{
+                  background: 'var(--code-bg)',
+                  color: 'var(--code-text)',
+                  padding: '12px',
+                  borderRadius: 'var(--radius-control)',
+                  marginBottom: '12px',
+                  overflow: 'auto',
+                  maxHeight: '200px',
+                  fontSize: '12px',
+                  lineHeight: '18px'
+                }}>
+                  {pendingApproval.queryPreview}
+                </pre>
+              )}
+              <p className="connections-section-title" style={{ marginBottom: '12px' }}>
+                Risk:{' '}
+                <span style={{
+                  color: pendingApproval.risk === 'high' ? 'var(--color-danger)' : pendingApproval.risk === 'medium' ? 'var(--color-warning)' : 'var(--color-success)'
+                }}>
+                  {pendingApproval.risk.toUpperCase()}
+                </span>
+              </p>
+              <div className="connection-form-actions">
+                <button type="button" className="primary-button" onClick={approveInterruption}>
+                  Approve
+                </button>
+                <button type="button" className="connection-form-cancel" onClick={denyInterruption}>
+                  Deny
+                </button>
               </div>
             </div>
           </div>

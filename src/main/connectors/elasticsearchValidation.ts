@@ -1,6 +1,6 @@
 
 
-const MAX_SAFE_SIZE = 500;
+export const MAX_SAFE_SIZE = 500;
 const SAFE_INDEX_PATTERN = /^[A-Za-z0-9._*,-]+$/;
 const SAFE_DOCUMENT_INDEX_PATTERN = /^[A-Za-z0-9._-]+$/;
 const BLOCKED_KEYS = new Set([
@@ -123,7 +123,7 @@ function isSafeDocumentId(id: string): boolean {
   return Boolean(id.trim()) && !/[/?#]/.test(id);
 }
 
-function findBlockedKey(value: unknown): string | null {
+export function findBlockedKey(value: unknown): string | null {
   if (Array.isArray(value)) {
     for (const item of value) {
       const blocked = findBlockedKey(item);

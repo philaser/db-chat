@@ -10,7 +10,8 @@ import type {
   ModelProviderKind,
   PersistedChatSession,
   PersistedSettings,
-  QueryResult
+  QueryResult,
+  SafetyLevel
 } from '../shared/types.js';
 import type { OpenDialogOptions } from 'electron';
 import { ElasticsearchConnector } from './connectors/ElasticsearchConnector.js';
@@ -19,16 +20,23 @@ import { MySQLConnector } from './connectors/MySQLConnector.js';
 import { PostgresConnector } from './connectors/PostgresConnector.js';
 import { SQLiteConnector } from './connectors/SQLiteConnector.js';
 import { runAgentLoop } from './agent/AgentLoop.js';
+import { PermissionManager } from './agent/PermissionManager.js';
+import { ApprovalManager } from './agent/ApprovalManager.js';
 import { createToolRegistry } from './agent/tools/index.js';
 import { MemoryStore } from './agent/MemoryStore.js';
 import { OpenRouterClient } from './model/OpenRouterClient.js';
 import { AppStore } from './storage/AppStore.js';
+import { AuditStore } from './storage/AuditStore.js';
 
 export class IpcController {
   private connector: DatabaseConnector | null = null;
   private schema: DatabaseSchema | null = null;
   private toolRegistry = createToolRegistry();
   private memoryStore = new MemoryStore();
+  private permissionManager = new PermissionManager();
+  private approvalManager = new ApprovalManager();
+  private auditStore = new AuditStore();
+  private activeAbortController: AbortController | null = null;
 
   constructor(private readonly store: AppStore) {
     this.loadMemories();
@@ -108,7 +116,9 @@ export class IpcController {
       client,
       controller: this,
       memoryStore: this.memoryStore,
-      toolRegistry: this.toolRegistry
+      toolRegistry: this.toolRegistry,
+      permissionManager: this.permissionManager,
+      approvalManager: this.approvalManager
     });
 
     this.persistMemories();
@@ -121,6 +131,14 @@ export class IpcController {
 
   abortChat(): void {
     // Abort signal handled via AbortController in AgentLoop
+  }
+
+  approveInterruption(turnId: string, interruptionId: string): void {
+    this.approvalManager.approve(interruptionId);
+  }
+
+  denyInterruption(turnId: string, interruptionId: string): void {
+    this.approvalManager.deny(interruptionId);
   }
 
   loadSettings(): PersistedSettings & { hasApiKey: boolean } {
@@ -187,6 +205,17 @@ export class IpcController {
 
   renameConnection(id: string, label: string): void {
     this.store.renameConnection(id, label);
+  }
+
+  setSafetyLevel(_connectionId: string, level: SafetyLevel): void {
+    if (this.connector) {
+      this.connector.setSafetyLevel(level);
+    }
+    this.permissionManager?.setSafetyLevel(level);
+  }
+
+  getAuditLog(): unknown[] {
+    return this.auditStore.getEntries(200);
   }
 
   requireConnector(): DatabaseConnector {

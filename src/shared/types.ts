@@ -2,6 +2,7 @@ export type DatabaseKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres' | '
 export type ModelProviderKind = 'openrouter';
 export type ChatRole = 'system' | 'user' | 'assistant';
 export type ChatActivityStatus = 'thinking' | 'validating' | 'running' | 'success' | 'blocked' | 'error' | 'complete';
+export type SafetyLevel = 'safe' | 'standard' | 'unrestricted';
 
 export interface ConnectionConfig {
   id: string;
@@ -27,6 +28,7 @@ export interface ConnectionConfig {
   hasSavedPassword?: boolean;
   authDatabase?: string;
   mongodbUri?: string;
+  safetyLevel?: SafetyLevel;
   createdAt: string;
 }
 
@@ -157,6 +159,7 @@ export interface DatabaseConnector {
   introspect(): Promise<DatabaseSchema>;
   executeQuery(query: string): Promise<QueryResult>;
   getContextForPrompt(): Promise<string>;
+  setSafetyLevel(level: SafetyLevel): void;
   close(): void;
 }
 
@@ -174,7 +177,9 @@ export type AgentEventType =
   | 'status'
   | 'complete'
   | 'error'
-  | 'aborted';
+  | 'aborted'
+  | 'approval-required'
+  | 'approval-resolved';
 
 export interface AgentEvent {
   turnId: string;
@@ -208,6 +213,17 @@ export interface AgentMemory {
   lastAccessedAt: string;
 }
 
+export interface AuditEntry {
+  id: string;
+  timestamp: string;
+  turnId: string;
+  connectionId: string;
+  toolName: string;
+  permissionDecision: string;
+  queryPreview?: string;
+  risk?: string;
+}
+
 export interface DbChatApi {
   chooseSqliteFile(): Promise<ConnectionConfig | null>;
   connect(config: ConnectionConfig): Promise<DatabaseSchema>;
@@ -216,6 +232,8 @@ export interface DbChatApi {
   sendChat(messages: ModelChatMessage[], turnId?: string): Promise<ChatTurnResponse>;
   subscribeToAgentEvents(turnId: string, listener: (event: AgentEvent) => void): () => void;
   abortChat(turnId: string): Promise<void>;
+  approveInterruption(turnId: string, interruptionId: string): Promise<void>;
+  denyInterruption(turnId: string, interruptionId: string): Promise<void>;
   loadSettings(): Promise<PersistedSettings & { hasApiKey: boolean }>;
   saveSettings(settings: PersistedSettings): Promise<void>;
   saveApiKey(provider: ModelProviderKind, apiKey: string): Promise<void>;
@@ -227,5 +245,7 @@ export interface DbChatApi {
   listConnections(): Promise<ConnectionHistoryItem[]>;
   deleteConnection(id: string): Promise<void>;
   renameConnection(id: string, label: string): Promise<void>;
+  setSafetyLevel(connectionId: string, level: SafetyLevel): Promise<void>;
+  getAuditLog(): Promise<AuditEntry[]>;
   saveCsvFile(request: { content: string; defaultName: string }): Promise<void>;
 }

@@ -1,3 +1,4 @@
+import { QueryValidator, type SafetyLevel } from './QueryValidator.js';
 import type {
   ConnectionConfig,
   DatabaseConnector,
@@ -10,6 +11,7 @@ export class MySQLConnector implements DatabaseConnector {
   private connection: unknown = null;
   private pool: unknown = null;
   private config: ConnectionConfig | null = null;
+  private safetyLevel: SafetyLevel = 'standard';
 
   async connect(config: ConnectionConfig): Promise<void> {
     const { createPool } = await import('mysql2/promise');
@@ -71,14 +73,22 @@ export class MySQLConnector implements DatabaseConnector {
     };
   }
 
+  setSafetyLevel(level: SafetyLevel): void {
+    this.safetyLevel = level;
+  }
+
   async executeQuery(query: string): Promise<QueryResult> {
     const conn = this.requireConnection();
 
-    const normalized = query;
-    const isWrite = /^\s*(insert|update|delete|replace)\s/i.test(normalized);
+    const validation = QueryValidator.validate(query, this.safetyLevel);
+    if (!validation.ok) {
+      throw new Error(validation.reason ?? 'Query validation failed.');
+    }
+    const effectiveQuery = validation.modifiedQuery ?? query;
+    const isWrite = validation.isWrite ?? false;
 
     const start = performance.now();
-    const [rawResult] = await conn.query(normalized) as [Array<Record<string, unknown>> | { affectedRows?: number; changedRows?: number; insertId?: number | string; warningStatus?: number }, unknown];
+    const [rawResult] = await conn.query(effectiveQuery) as [Array<Record<string, unknown>> | { affectedRows?: number; changedRows?: number; insertId?: number | string; warningStatus?: number }, unknown];
     const elapsedMs = Math.round(performance.now() - start);
 
     if (isWrite && !Array.isArray(rawResult)) {

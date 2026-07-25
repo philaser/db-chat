@@ -60,6 +60,14 @@ export class ActivityManager {
     this.emit('aborted');
   }
 
+  approvalRequired(interruption: Record<string, unknown>): void {
+    this.emit('approval-required', { interruption });
+  }
+
+  approvalResolved(interruptionId: string, approved: boolean): void {
+    this.emit('approval-resolved', { interruptionId, approved });
+  }
+
   getEvents(): AgentEvent[] {
     return [...this.events];
   }

@@ -5,16 +5,24 @@ import type {
   DatabaseConnector,
   DatabaseSchema,
   QueryResult,
-  TableInfo
+  TableInfo,
+  SafetyLevel
 } from '../../shared/types.js';
 import {
   parseElasticsearchQuery,
-  parseElasticsearchSearchQuery
+  parseElasticsearchSearchQuery,
+  findBlockedKey,
+  MAX_SAFE_SIZE
 } from './elasticsearchValidation.js';
 
 export class ElasticsearchConnector implements DatabaseConnector {
   private config: ConnectionConfig | null = null;
   private baseUrl: URL | null = null;
+  private safetyLevel: SafetyLevel = 'standard';
+
+  setSafetyLevel(level: SafetyLevel): void {
+    this.safetyLevel = level;
+  }
 
   async connect(config: ConnectionConfig): Promise<void> {
     const baseUrl = buildBaseUrl(config);
@@ -53,6 +61,9 @@ export class ElasticsearchConnector implements DatabaseConnector {
   async executeQuery(query: string): Promise<QueryResult> {
     const parsed = parseElasticsearchQuery(query);
     if ('operation' in parsed) {
+      if (this.safetyLevel === 'safe') {
+        throw new Error('Elasticsearch write operations are blocked in safe mode.');
+      }
       return this.executeDocumentWrite(parsed);
     }
 
@@ -60,8 +71,12 @@ export class ElasticsearchConnector implements DatabaseConnector {
   }
 
   private async executeSearch(parsed: ReturnType<typeof parseElasticsearchSearchQuery>): Promise<QueryResult> {
+    const blockedKey = findBlockedKey(parsed.body);
+    if (blockedKey) {
+      throw new Error(`Elasticsearch blocked key "${blockedKey}" in search body.`);
+    }
     const body = {
-      size: 50,
+      size: parsed.body.size ?? MAX_SAFE_SIZE,
       track_total_hits: true,
       ...parsed.body
     };
@@ -89,6 +104,12 @@ export class ElasticsearchConnector implements DatabaseConnector {
 
   private async executeDocumentWrite(parsed: Extract<ReturnType<typeof parseElasticsearchQuery>, { operation: string }>): Promise<QueryResult> {
     const start = performance.now();
+    if (parsed.body) {
+      const blocked = findBlockedKey(parsed.body);
+      if (blocked) {
+        throw new Error(`Elasticsearch blocked key "${blocked}" in write body.`);
+      }
+    }
     const response = parsed.operation === 'delete'
       ? await this.request<ElasticsearchWriteResponse>(
         `${encodeURIComponent(parsed.index)}/_doc/${encodeURIComponent(parsed.id ?? '')}`,

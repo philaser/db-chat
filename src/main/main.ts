@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AppStore } from './storage/AppStore.js';
 import { IpcController } from './ipc.js';
-import type { ConnectionConfig, ModelProviderKind, PersistedChatSession, PersistedSettings } from '../shared/types.js';
+import type { ConnectionConfig, ModelProviderKind, PersistedChatSession, PersistedSettings, SafetyLevel } from '../shared/types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.env.VITE_DEV_SERVER_URL || !app.isPackaged;
@@ -45,6 +45,8 @@ function registerIpc(): void {
   });
   ipcMain.handle('dbchat:send-chat', (event, messages, turnId?: string) => controller.sendChat(messages, turnId, event.sender));
   ipcMain.handle('dbchat:abort-chat', () => controller.abortChat());
+  ipcMain.handle('dbchat:approve-interruption', (_event, turnId: string, interruptionId: string) => controller.approveInterruption(turnId, interruptionId));
+  ipcMain.handle('dbchat:deny-interruption', (_event, turnId: string, interruptionId: string) => controller.denyInterruption(turnId, interruptionId));
   ipcMain.handle('dbchat:load-settings', () => controller.loadSettings());
   ipcMain.handle('dbchat:save-settings', (_event, settings: PersistedSettings) => controller.saveSettings(settings));
   ipcMain.handle('dbchat:save-api-key', (_event, provider: ModelProviderKind, apiKey: string) => controller.saveApiKey(provider, apiKey));
@@ -56,6 +58,8 @@ function registerIpc(): void {
   ipcMain.handle('dbchat:list-connections', () => controller.listConnections());
   ipcMain.handle('dbchat:delete-connection', (_event, id: string) => controller.deleteConnection(id));
   ipcMain.handle('dbchat:rename-connection', (_event, id: string, label: string) => controller.renameConnection(id, label));
+  ipcMain.handle('dbchat:set-safety-level', (_event, connectionId: string, level: string) => controller.setSafetyLevel(connectionId, level as SafetyLevel));
+  ipcMain.handle('dbchat:get-audit-log', () => controller.getAuditLog());
   ipcMain.handle('dbchat:save-csv-file', (_event, request: { content: string; defaultName: string }) => controller.saveCsvFile(request));
 }
 

@@ -129,7 +129,7 @@ function isSafeCollectionName(name: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(name.trim()) && !name.includes('..');
 }
 
-function findBlockedAggregationStage(pipeline: unknown[]): string | null {
+export function findBlockedAggregationStage(pipeline: unknown[]): string | null {
   for (const stage of pipeline) {
     if (!isRecord(stage)) continue;
     for (const key of Object.keys(stage)) {
@@ -151,7 +151,7 @@ function findAggregationLimit(pipeline: unknown[]): number | null {
   return null;
 }
 
-function findBlockedKey(value: unknown): string | null {
+export function findBlockedKey(value: unknown): string | null {
   if (Array.isArray(value)) {
     for (const item of value) {
       const blocked = findBlockedKey(item);

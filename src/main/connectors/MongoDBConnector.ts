@@ -4,10 +4,13 @@ import type {
   DatabaseConnector,
   DatabaseSchema,
   QueryResult,
-  TableInfo
+  TableInfo,
+  SafetyLevel
 } from '../../shared/types.js';
 import {
   parseMongoDBQuery,
+  findBlockedAggregationStage,
+  findBlockedKey,
   type MongoDBParsedRequest,
   type MongoDBReadRequest,
   type MongoDBWriteRequest
@@ -20,6 +23,11 @@ export class MongoDBConnector implements DatabaseConnector {
   private client: unknown = null;
   private db: unknown = null;
   private config: ConnectionConfig | null = null;
+  private safetyLevel: SafetyLevel = 'standard';
+
+  setSafetyLevel(level: SafetyLevel): void {
+    this.safetyLevel = level;
+  }
 
   async connect(config: ConnectionConfig): Promise<void> {
     const { MongoClient } = await import('mongodb');
@@ -68,6 +76,9 @@ export class MongoDBConnector implements DatabaseConnector {
     const parsed = parseMongoDBQuery(query) as MongoDBParsedRequest;
 
     if (parsed.method === 'insertOne' || parsed.method === 'updateOne' || parsed.method === 'deleteOne') {
+      if (this.safetyLevel === 'safe') {
+        throw new Error('MongoDB write operations are blocked in safe mode.');
+      }
       return this.executeDocumentWrite(parsed as MongoDBWriteRequest);
     }
 
@@ -93,6 +104,10 @@ export class MongoDBConnector implements DatabaseConnector {
 
     if (parsed.method === 'aggregate') {
       const pipeline = (parsed.body.pipeline ?? []) as unknown[];
+      const blockedStage = findBlockedAggregationStage(pipeline);
+      if (blockedStage) {
+        throw new Error(`MongoDB aggregation stage "${blockedStage}" is blocked.`);
+      }
       const hasLimit = pipeline.some((stage: unknown) =>
         typeof stage === 'object' && stage !== null && '$limit' in (stage as Record<string, unknown>)
       );
@@ -139,12 +154,28 @@ export class MongoDBConnector implements DatabaseConnector {
 
     let result: Record<string, unknown> = {};
     if (parsed.method === 'insertOne') {
+      const blocked = findBlockedKey(parsed.document ?? {});
+      if (blocked) {
+        throw new Error(`MongoDB blocked key "${blocked}" in insert document.`);
+      }
       const insertResult = await collection.insertOne(parsed.document ?? {});
       result = { operation: 'insertOne', insertedId: String(insertResult.insertedId), acknowledged: insertResult.acknowledged };
     } else if (parsed.method === 'updateOne') {
+      const updateBlocked = findBlockedKey(parsed.update ?? {});
+      if (updateBlocked) {
+        throw new Error(`MongoDB blocked key "${updateBlocked}" in update body.`);
+      }
+      const filterBlocked = findBlockedKey(parsed.filter ?? {});
+      if (filterBlocked) {
+        throw new Error(`MongoDB blocked key "${filterBlocked}" in update filter.`);
+      }
       const updateResult = await collection.updateOne(parsed.filter ?? {}, parsed.update ?? {});
       result = { operation: 'updateOne', matchedCount: updateResult.matchedCount, modifiedCount: updateResult.modifiedCount, acknowledged: updateResult.acknowledged };
     } else if (parsed.method === 'deleteOne') {
+      const filterBlocked = findBlockedKey(parsed.filter ?? {});
+      if (filterBlocked) {
+        throw new Error(`MongoDB blocked key "${filterBlocked}" in delete filter.`);
+      }
       const deleteResult = await collection.deleteOne(parsed.filter ?? {});
       result = { operation: 'deleteOne', deletedCount: deleteResult.deletedCount, acknowledged: deleteResult.acknowledged };
     }

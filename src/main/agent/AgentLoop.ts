@@ -1,5 +1,5 @@
 import type { WebContents } from 'electron';
-import type { ChatMessage, ModelChatMessage, AgentEvent } from '../../shared/types.js';
+import type { ChatMessage, ModelChatMessage, AgentEvent, AgentToolResult } from '../../shared/types.js';
 import { ToolRegistry } from './ToolRegistry.js';
 import { ActivityManager } from './ActivityManager.js';
 import { ContextManager } from './ContextManager.js';
@@ -7,6 +7,8 @@ import { MemoryStore } from './MemoryStore.js';
 import { OpenRouterClient } from '../model/OpenRouterClient.js';
 import { buildSystemPrompt } from './prompts/system.js';
 import { AGENT_DEFAULTS, type ToolContext } from './types.js';
+import { PermissionManager } from './PermissionManager.js';
+import { ApprovalManager } from './ApprovalManager.js';
 import type { IpcController } from '../ipc.js';
 
 export interface AgentLoopConfig {
@@ -15,6 +17,8 @@ export interface AgentLoopConfig {
   controller: IpcController;
   memoryStore: MemoryStore;
   toolRegistry: ToolRegistry;
+  permissionManager: PermissionManager;
+  approvalManager: ApprovalManager;
 }
 
 interface TurnResult {
@@ -133,25 +137,83 @@ export async function runAgentLoop(
           input = {};
         }
 
-        activity.toolStart(toolName, input.purpose as string);
+        const permission = config.permissionManager.check(toolName, input);
 
-        const result = await config.toolRegistry.execute(toolName, input, toolContext);
+        if (permission === 'deny') {
+          const denyResult: AgentToolResult = {
+            ok: false,
+            summary: `Tool "${toolName}" is blocked by safety settings`,
+            error: `Permission denied for "${toolName}" at safety level`
+          };
+          const toolMessage: ModelChatMessage = {
+            role: 'tool',
+            tool_call_id: call.id,
+            content: JSON.stringify(denyResult)
+          };
+          conversation.push(toolMessage);
+          activity.toolStart(toolName, input.purpose as string);
+          activity.toolComplete(toolName, denyResult.summary);
+          allToolCalls.push({
+            query: (input.query as string) ?? JSON.stringify(input),
+            purpose: (input.purpose as string) ?? toolName,
+            result: denyResult
+          });
+          totalToolCalls++;
+          continue;
+        }
+
+        if (permission === 'ask') {
+          if (config.approvalManager.isAllowedBySession(toolName, input)) {
+            await executeToolAndRecord(toolName, input, call.id, toolContext, config.toolRegistry, activity, conversation, allToolCalls);
+            totalToolCalls++;
+            continue;
+          }
+
+          const interruption = config.approvalManager.createInterruption(turnId, toolName, input);
+          activity.approvalRequired({
+            id: interruption.id,
+            turnId: interruption.turnId,
+            toolName: interruption.toolName,
+            toolInput: interruption.toolInput,
+            purpose: interruption.purpose,
+            risk: interruption.risk,
+            queryPreview: interruption.queryPreview,
+            timestamp: interruption.timestamp
+          });
+
+          const approved = await config.approvalManager.waitForDecision(interruption.id);
+          activity.approvalResolved(interruption.id, approved);
+
+          if (approved) {
+            await executeToolAndRecord(toolName, input, call.id, toolContext, config.toolRegistry, activity, conversation, allToolCalls);
+            totalToolCalls++;
+          } else {
+            const denyResult: AgentToolResult = {
+              ok: false,
+              summary: `Tool "${toolName}" was denied by user`,
+              error: 'User denied the tool execution'
+            };
+            const toolMessage: ModelChatMessage = {
+              role: 'tool',
+              tool_call_id: call.id,
+              content: JSON.stringify(denyResult)
+            };
+            conversation.push(toolMessage);
+            activity.toolStart(toolName, input.purpose as string);
+            activity.toolComplete(toolName, denyResult.summary);
+            allToolCalls.push({
+              query: (input.query as string) ?? JSON.stringify(input),
+              purpose: (input.purpose as string) ?? toolName,
+              result: denyResult
+            });
+            totalToolCalls++;
+          }
+
+          continue;
+        }
+
+        await executeToolAndRecord(toolName, input, call.id, toolContext, config.toolRegistry, activity, conversation, allToolCalls);
         totalToolCalls++;
-
-        const toolMessage: ModelChatMessage = {
-          role: 'tool',
-          tool_call_id: call.id,
-          content: JSON.stringify(result)
-        };
-        conversation.push(toolMessage);
-
-        activity.toolComplete(toolName, result.summary);
-
-        allToolCalls.push({
-          query: (input.query as string) ?? JSON.stringify(input),
-          purpose: (input.purpose as string) ?? toolName,
-          result
-        });
       }
     }
 
@@ -238,6 +300,36 @@ interface ToolCallAccumulator {
   id: string;
   type: 'function';
   function: { name: string; arguments: string };
+}
+
+async function executeToolAndRecord(
+  toolName: string,
+  input: Record<string, unknown>,
+  toolCallId: string,
+  toolContext: ToolContext,
+  toolRegistry: ToolRegistry,
+  activity: ActivityManager,
+  conversation: ModelChatMessage[],
+  allToolCalls: Array<{ query: string; purpose: string; result: unknown }>
+): Promise<void> {
+  activity.toolStart(toolName, input.purpose as string);
+
+  const result = await toolRegistry.execute(toolName, input, toolContext);
+
+  const toolMessage: ModelChatMessage = {
+    role: 'tool',
+    tool_call_id: toolCallId,
+    content: JSON.stringify(result)
+  };
+  conversation.push(toolMessage);
+
+  activity.toolComplete(toolName, result.summary);
+
+  allToolCalls.push({
+    query: (input.query as string) ?? JSON.stringify(input),
+    purpose: (input.purpose as string) ?? toolName,
+    result
+  });
 }
 
 function buildResult(

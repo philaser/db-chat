@@ -39,6 +39,8 @@ function makeApi(): TestDbChatApi {
       });
     }),
     abortChat: vi.fn(),
+    approveInterruption: vi.fn(),
+    denyInterruption: vi.fn(),
     loadSettings: vi.fn(async () => ({
       provider: 'openrouter' as const,
       model: 'openai/gpt-4.1-mini',
@@ -57,6 +59,8 @@ function makeApi(): TestDbChatApi {
     listConnections: vi.fn(async () => []),
     deleteConnection: vi.fn(),
     renameConnection: vi.fn(),
+    setSafetyLevel: vi.fn(),
+    getAuditLog: vi.fn(async () => []),
     saveCsvFile: vi.fn()
   };
   return {
