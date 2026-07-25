@@ -28,7 +28,7 @@ export function buildSystemPrompt(options: {
           .join('\n')}`
       : '',
 
-    `\n## Query Guidelines\n\n- Always use the run_database_query tool for every data access.\n- Use get_schema_info when you need to understand the database structure.\n- Use sample_data to peek at table contents before writing complex queries.\n- Run queries one at a time. Think about what would be most helpful to show next.`
+    `\n## Query Guidelines\n\n- Always use the run_database_query tool for every data access.\n- Use get_schema_info when you need to understand the database structure.\n- Use sample_data to peek at table contents before writing complex queries.\n- Run queries one at a time. Think about what would be most helpful to show next.\n- After any DDL operation (CREATE, DROP, ALTER, TRUNCATE, RENAME), call get_schema_info to refresh the schema before continuing. This ensures you see the structural changes you just made.`
   ].filter(Boolean).join('\n');
 }
 
