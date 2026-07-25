@@ -50,24 +50,27 @@ import {
   type SimpleIcon
 } from 'simple-icons';
 import type {
+  AuditEntry,
   ChatMessage,
   ChatActivityStep,
   ConnectionConfig,
   ConnectionHistoryItem,
   DatabaseSchema,
+  EffortLevel,
   ModelChatMessage,
   ModelInfo,
   ModelProviderKind,
   PersistedChatSession,
   PersistedSettings,
   QueryResult,
+  SafetyLevel,
   TableInfo
 } from '../shared/types';
 
 const fallbackApi = typeof window !== 'undefined' ? window.dbchat : undefined;
 const themeStorageKey = 'dbchat:theme';
 
-type InspectorTab = 'results' | 'query' | 'schema';
+type InspectorTab = 'results' | 'query' | 'schema' | 'audit';
 type AppView = 'workspace' | 'history' | 'settings';
 type SidebarMode = 'projects' | 'project';
 type ConnectionLogoKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres' | 'mongodb';
@@ -539,6 +542,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     queryPreview?: string;
     risk: 'none' | 'low' | 'medium' | 'high';
   } | null>(null);
+  const [auditEntries, setAuditEntries] = useState<Array<{ id: string; timestamp: string; toolName: string; permissionDecision: string; queryPreview?: string; risk?: string }>>([]);
+  const [effortLevel, setEffortLevel] = useState<EffortLevel>('medium');
+  const [safetyLevel, setSafetyLevelState] = useState<SafetyLevel>('standard');
   const shellRef = useRef<HTMLElement | null>(null);
   const recentChatsRef = useRef<HTMLDivElement | null>(null);
   const schemaPanelRef = useRef<HTMLDivElement | null>(null);
@@ -1639,8 +1645,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       );
     }
 
-    return (
-      <div className="inspector-body schema-view" aria-label="Schema" onScroll={handleSchemaScroll} ref={schemaPanelRef}>
+    if (activeInspector === 'schema') {
+      return (
+        <div className="inspector-body schema-view" aria-label="Schema" onScroll={handleSchemaScroll} ref={schemaPanelRef}>
         {schema ? (
           <>
             <div className="schema-search-field">
@@ -1758,7 +1765,45 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           </div>
         )}
       </div>
-    );
+      );
+    }
+
+    if (activeInspector === 'audit') {
+      const entries = auditEntries;
+      return (
+        <div className="inspector-body" aria-label="Audit log" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', padding: '16px 28px' }}>
+          {entries.length === 0 ? (
+            <div className="schema-empty">
+              <span>No audit entries yet. Tool calls will be logged here.</span>
+            </div>
+          ) : (
+            entries.map((entry) => (
+              <div key={entry.id} style={{
+                borderBottom: '1px solid var(--color-separator)',
+                padding: '10px 0',
+                display: 'grid',
+                gap: '4px'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 500, color: 'var(--color-text-primary)' }}>{entry.toolName}</span>
+                  <time style={{ color: 'var(--color-text-tertiary)', fontSize: '11px' }}>{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+                </div>
+                {entry.queryPreview && (
+                  <code style={{ fontSize: '11px', background: 'var(--code-bg)', color: 'var(--code-text)', padding: '4px 8px', borderRadius: 'var(--radius-row)', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{entry.queryPreview}</code>
+                )}
+                <span style={{
+                  fontSize: '11px',
+                  color: entry.permissionDecision === 'allow' ? 'var(--color-success)' : entry.permissionDecision === 'denied' ? 'var(--color-danger)' : 'var(--color-warning)'
+                }}>
+                  {entry.permissionDecision}
+                  {entry.risk ? ` · ${entry.risk}` : ''}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      );
+    }
   }
 
   function renderInspector() {
@@ -1819,7 +1864,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         <div className="inspector-header">
           <div className="inspector-header-top">
             <h2 className="inspector-title">
-              {activeInspector === 'results' ? 'Data' : activeInspector === 'query' ? 'Query' : 'Schema'}
+              {activeInspector === 'results' ? 'Data' : activeInspector === 'query' ? 'Query' : activeInspector === 'audit' ? 'Audit' : 'Schema'}
             </h2>
           </div>
           {connection && (
@@ -1859,6 +1904,19 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             type="button"
           >
             Schema
+          </button>
+          <button
+            className={`inspector-tab ${activeInspector === 'audit' ? 'selected' : ''}`}
+            onClick={() => {
+              setActiveInspector('audit');
+              if (api) void api.getAuditLog().then(setAuditEntries);
+            }}
+            role="tab"
+            aria-selected={activeInspector === 'audit'}
+            aria-controls="inspector-audit-panel"
+            type="button"
+          >
+            Audit
           </button>
         </div>
         <div
@@ -2648,6 +2706,40 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
             {/* Composer */}
             <div className="composer-wrapper">
+              <div className="effort-bar">
+                <span className="effort-bar-label">Reasoning</span>
+                {(['none', 'low', 'medium', 'high', 'max'] as EffortLevel[]).map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    className={`effort-chip ${(settings.effortLevel ?? 'medium') === level ? 'active' : ''}`}
+                    onClick={() => {
+                      setEffortLevel(level);
+                      void api?.saveSettings({ ...settings, effortLevel: level });
+                    }}
+                    title={`${level === 'none' ? 'No reasoning' : level === 'low' ? 'Minimal' : level === 'medium' ? 'Balanced' : level === 'high' ? 'Deep' : 'Maximum'} reasoning effort`}
+                  >
+                    {level === 'none' ? 'Fast' : level.charAt(0).toUpperCase() + level.slice(1)}
+                  </button>
+                ))}
+                {connection && (
+                  <button
+                    type="button"
+                    className="safety-badge"
+                    onClick={() => {
+                      const next = connection.safetyLevel === 'safe' ? 'standard' : connection.safetyLevel === 'standard' ? 'unrestricted' : 'safe';
+                      void api?.setSafetyLevel(connection.id, next);
+                    }}
+                    title={`Safety level: ${(connection.safetyLevel ?? 'standard') === 'safe' ? 'Read-only' : (connection.safetyLevel ?? 'standard') === 'standard' ? 'Standard (writes need approval)' : 'Unrestricted'}. Click to change.`}
+                    style={{
+                      color: (connection.safetyLevel ?? 'standard') === 'safe' ? 'var(--color-success)' : (connection.safetyLevel ?? 'standard') === 'unrestricted' ? 'var(--color-danger)' : 'var(--color-warning)'
+                    }}
+                  >
+                    <ShieldCheck size={13} />
+                    {(connection.safetyLevel ?? 'standard') === 'safe' ? 'Safe' : (connection.safetyLevel ?? 'standard') === 'unrestricted' ? 'Unrestricted' : 'Standard'}
+                  </button>
+                )}
+              </div>
               <form className="composer" onSubmit={(event) => void sendChat(event)}>
                 <textarea
                   ref={composerRef}

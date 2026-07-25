@@ -3,6 +3,7 @@ export type ModelProviderKind = 'openrouter';
 export type ChatRole = 'system' | 'user' | 'assistant';
 export type ChatActivityStatus = 'thinking' | 'validating' | 'running' | 'success' | 'blocked' | 'error' | 'complete';
 export type SafetyLevel = 'safe' | 'standard' | 'unrestricted';
+export type EffortLevel = 'none' | 'low' | 'medium' | 'high' | 'max';
 
 export interface ConnectionConfig {
   id: string;
@@ -99,6 +100,7 @@ export interface PersistedChatSession {
 export interface PersistedSettings {
   provider: ModelProviderKind;
   model: string;
+  effortLevel?: EffortLevel;
 }
 
 export interface ModelInfo {
