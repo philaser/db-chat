@@ -1,9 +1,9 @@
-import { runDatabaseQueryTool } from './RunDatabaseQueryTool';
-import { getSchemaInfoTool } from './GetSchemaInfoTool';
-import { sampleDataTool } from './SampleDataTool';
-import { saveMemoryTool } from './SaveMemoryTool';
-import { ToolRegistry } from '../ToolRegistry';
-import type { Tool } from '../types';
+import { runDatabaseQueryTool } from './RunDatabaseQueryTool.js';
+import { getSchemaInfoTool } from './GetSchemaInfoTool.js';
+import { sampleDataTool } from './SampleDataTool.js';
+import { saveMemoryTool } from './SaveMemoryTool.js';
+import { ToolRegistry } from '../ToolRegistry.js';
+import type { Tool } from '../types.js';
 
 export const allTools: Tool[] = [
   runDatabaseQueryTool,

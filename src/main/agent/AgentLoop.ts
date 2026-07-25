@@ -1,13 +1,13 @@
 import type { WebContents } from 'electron';
-import type { ChatMessage, ModelChatMessage, AgentEvent } from '../../shared/types';
-import { ToolRegistry } from './ToolRegistry';
-import { ActivityManager } from './ActivityManager';
-import { ContextManager } from './ContextManager';
-import { MemoryStore } from './MemoryStore';
-import { OpenRouterClient } from '../model/OpenRouterClient';
-import { buildSystemPrompt } from './prompts/system';
-import { AGENT_DEFAULTS, type ToolContext } from './types';
-import type { IpcController } from '../ipc';
+import type { ChatMessage, ModelChatMessage, AgentEvent } from '../../shared/types.js';
+import { ToolRegistry } from './ToolRegistry.js';
+import { ActivityManager } from './ActivityManager.js';
+import { ContextManager } from './ContextManager.js';
+import { MemoryStore } from './MemoryStore.js';
+import { OpenRouterClient } from '../model/OpenRouterClient.js';
+import { buildSystemPrompt } from './prompts/system.js';
+import { AGENT_DEFAULTS, type ToolContext } from './types.js';
+import type { IpcController } from '../ipc.js';
 
 export interface AgentLoopConfig {
   model: string;

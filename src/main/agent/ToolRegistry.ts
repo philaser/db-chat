@@ -1,5 +1,5 @@
-import type { Tool, ToolContext } from './types';
-import type { AgentToolDefinition, AgentToolResult } from '../../shared/types';
+import type { Tool, ToolContext } from './types.js';
+import type { AgentToolDefinition, AgentToolResult } from '../../shared/types.js';
 
 export class ToolRegistry {
   private tools = new Map<string, Tool>();

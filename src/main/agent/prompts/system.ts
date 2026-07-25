@@ -1,4 +1,4 @@
-import type { AgentMemory } from '../../../shared/types';
+import type { AgentMemory } from '../../../shared/types.js';
 
 export function buildSystemPrompt(options: {
   schemaContext: string;

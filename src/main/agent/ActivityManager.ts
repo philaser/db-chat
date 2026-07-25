@@ -1,5 +1,5 @@
 import type { WebContents } from 'electron';
-import type { AgentEvent } from '../../shared/types';
+import type { AgentEvent } from '../../shared/types.js';
 
 export class ActivityManager {
   private events: AgentEvent[] = [];

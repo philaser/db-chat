@@ -1,4 +1,4 @@
-import type { AgentMemory } from '../../shared/types';
+import type { AgentMemory } from '../../shared/types.js';
 
 export class MemoryStore {
   private memories: AgentMemory[] = [];

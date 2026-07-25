@@ -1,4 +1,4 @@
-import type { ModelInfo } from '../../shared/types';
+import type { ModelInfo } from '../../shared/types.js';
 
 export interface OpenRouterConfig {
   apiKey: string;

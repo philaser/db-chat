@@ -1,7 +1,7 @@
-import type { ModelChatMessage, AgentMemory } from '../../shared/types';
-import { DEFAULT_COMPACT_CONFIG, type CompactConfig, type ContextSnapshot } from './types';
-import type { OpenRouterClient } from '../model/OpenRouterClient';
-import { buildCompactionPrompt } from './prompts/system';
+import type { ModelChatMessage, AgentMemory } from '../../shared/types.js';
+import { DEFAULT_COMPACT_CONFIG, type CompactConfig, type ContextSnapshot } from './types.js';
+import type { OpenRouterClient } from '../model/OpenRouterClient.js';
+import { buildCompactionPrompt } from './prompts/system.js';
 
 export class ContextManager {
   constructor(
