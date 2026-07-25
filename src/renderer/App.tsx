@@ -579,11 +579,17 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }, [theme]);
 
   useEffect(() => {
+    if (connection?.safetyLevel) {
+      setSafetyLevelState(connection.safetyLevel);
+    }
+  }, [connection?.id, connection?.safetyLevel]);
+
+  useEffect(() => {
     if (!api) {
       updateStatus('Desktop app bridge unavailable. Run DB Chat in Electron to connect databases.');
       return;
     }
-    void api.loadSettings().then(setSettings).catch((error) => reportError('Settings could not be loaded. Defaults are in use.', error));
+    void api.loadSettings().then((s) => { setSettings(s); if (s.effortLevel) setEffortLevel(s.effortLevel); }).catch((error) => reportError('Settings could not be loaded. Defaults are in use.', error));
     void refreshHistories(api);
   }, [api]);
 
@@ -2712,9 +2718,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                   <button
                     key={level}
                     type="button"
-                    className={`effort-chip ${(settings.effortLevel ?? 'medium') === level ? 'active' : ''}`}
+                    className={`effort-chip ${effortLevel === level ? 'active' : ''}`}
                     onClick={() => {
                       setEffortLevel(level);
+                      setSettings((current) => ({ ...current, effortLevel: level }));
                       void api?.saveSettings({ ...settings, effortLevel: level });
                     }}
                     title={`${level === 'none' ? 'No reasoning' : level === 'low' ? 'Minimal' : level === 'medium' ? 'Balanced' : level === 'high' ? 'Deep' : 'Maximum'} reasoning effort`}
@@ -2726,17 +2733,24 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                   <button
                     type="button"
                     className="safety-badge"
-                    onClick={() => {
-                      const next = connection.safetyLevel === 'safe' ? 'standard' : connection.safetyLevel === 'standard' ? 'unrestricted' : 'safe';
-                      void api?.setSafetyLevel(connection.id, next);
+                    onClick={async () => {
+                      const levels: SafetyLevel[] = ['safe', 'standard', 'unrestricted'];
+                      const current = safetyLevel;
+                      const idx = levels.indexOf(current);
+                      const next = levels[(idx + 1) % levels.length];
+                      setSafetyLevelState(next);
+                      if (api && connection) {
+                        await api.setSafetyLevel(connection.id, next);
+                        await refreshHistories();
+                      }
                     }}
-                    title={`Safety level: ${(connection.safetyLevel ?? 'standard') === 'safe' ? 'Read-only' : (connection.safetyLevel ?? 'standard') === 'standard' ? 'Standard (writes need approval)' : 'Unrestricted'}. Click to change.`}
+                    title={`Safety level: ${safetyLevel === 'safe' ? 'Read-only' : safetyLevel === 'standard' ? 'Standard (writes need approval)' : 'Unrestricted'}. Click to change.`}
                     style={{
-                      color: (connection.safetyLevel ?? 'standard') === 'safe' ? 'var(--color-success)' : (connection.safetyLevel ?? 'standard') === 'unrestricted' ? 'var(--color-danger)' : 'var(--color-warning)'
+                      color: safetyLevel === 'safe' ? 'var(--color-success)' : safetyLevel === 'unrestricted' ? 'var(--color-danger)' : 'var(--color-warning)'
                     }}
                   >
                     <ShieldCheck size={13} />
-                    {(connection.safetyLevel ?? 'standard') === 'safe' ? 'Safe' : (connection.safetyLevel ?? 'standard') === 'unrestricted' ? 'Unrestricted' : 'Standard'}
+                    {safetyLevel === 'safe' ? 'Safe' : safetyLevel === 'unrestricted' ? 'Unrestricted' : 'Standard'}
                   </button>
                 )}
               </div>
