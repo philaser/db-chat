@@ -2,6 +2,7 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -14,6 +15,7 @@ import {
   Moon,
   PanelRightClose,
   PanelRightOpen,
+  Pencil,
   Play,
   Plus,
   Search,
@@ -23,6 +25,7 @@ import {
   Sun,
   Table2,
   Trash2,
+  X,
   XCircle
 } from 'lucide-react';
 import {
@@ -65,7 +68,8 @@ const fallbackApi = typeof window !== 'undefined' ? window.dbchat : undefined;
 const themeStorageKey = 'dbchat:theme';
 
 type InspectorTab = 'results' | 'query' | 'schema';
-type AppView = 'workspace' | 'connections' | 'history' | 'settings';
+type AppView = 'workspace' | 'history' | 'settings';
+type SidebarMode = 'projects' | 'project';
 type ConnectionLogoKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres' | 'mongodb';
 type SchemaViewMode = 'pro' | 'raw';
 type ThemeMode =
@@ -475,6 +479,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     hasApiKey: false
   });
   const [activeView, setActiveView] = useState<AppView>('workspace');
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>('projects');
+  const [activeProject, setActiveProject] = useState<ConnectionConfig | null>(null);
   const [showFlyoutChats, setShowFlyoutChats] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logs, setLogs] = useState<AppLogEntry[]>([]);
@@ -499,6 +505,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [schemaScrolled, setSchemaScrolled] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(loadInitialTheme);
   const [connectionKindMenuOpen, setConnectionKindMenuOpen] = useState(false);
+  const [showNewProjectModal, setShowNewProjectModal] = useState(false);
+  const [connectingProjectId, setConnectingProjectId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
   const [elasticsearchFormOpen, setElasticsearchFormOpen] = useState(false);
   const [elasticsearchHost, setElasticsearchHost] = useState('localhost');
   const [elasticsearchPort, setElasticsearchPort] = useState('9200');
@@ -855,6 +865,40 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     updateStatus('Ready for a new chat');
   }
 
+  function closeProject() {
+    setConnection(null);
+    setSchema(null);
+    setActiveProject(null);
+    setSidebarMode('projects');
+    setActiveChatId(null);
+    setMessages(createInitialMessages());
+    setPrompt('');
+    setQuery('');
+    setResult(null);
+    setChatActivity([]);
+    setActivityOpen(false);
+    setMessageActivities({});
+    setMessageActivityOpen({});
+    setActiveInspector('schema');
+    setInspectorOpen(false);
+    setActiveView('workspace');
+    setShowFlyoutChats(false);
+    updateStatus('Closed project');
+  }
+
+  function openNewProjectModal() {
+    setShowNewProjectModal(true);
+    setElasticsearchFormOpen(false);
+    setDbFormOpen(false);
+  }
+
+  function closeNewProjectModal() {
+    setShowNewProjectModal(false);
+    setElasticsearchFormOpen(false);
+    setDbFormOpen(false);
+    setConnectionKindMenuOpen(false);
+  }
+
   function openView(view: AppView) {
     setActiveView(view);
     setShowFlyoutChats(false);
@@ -877,6 +921,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       }
       const nextSchema = await api.connect(config);
       setConnection(config);
+      setActiveProject(config);
+      setSidebarMode('project');
+      setShowNewProjectModal(false);
       setSchema(nextSchema);
       setActiveInspector('schema');
       setInspectorOpen(true);
@@ -928,6 +975,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       };
       const nextSchema = await api.connect(config);
       setConnection(config);
+      setActiveProject(config);
+      setSidebarMode('project');
+      setShowNewProjectModal(false);
       setSchema(nextSchema);
       setActiveInspector('schema');
       setInspectorOpen(true);
@@ -958,11 +1008,14 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       prepareDbReconnect(config, config.kind, `Enter the password to reconnect ${config.label}.`);
       return;
     }
+    setConnectingProjectId(config.id);
     setBusy(true);
     updateStatus(`Connecting to ${config.label}...`);
     try {
       const nextSchema = await api.connect(config);
       setConnection(config);
+      setActiveProject(config);
+      setSidebarMode('project');
       setSchema(nextSchema);
       setActiveInspector('schema');
       setInspectorOpen(true);
@@ -973,6 +1026,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       reportError('Could not connect to the saved database.', error);
     } finally {
       setBusy(false);
+      setConnectingProjectId(null);
     }
   }
 
@@ -994,6 +1048,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     updateStatus(`Opened ${session.title}`);
 
     if (session.connection) {
+      setActiveProject(session.connection);
+      setSidebarMode('project');
       if (session.connection.kind === 'elasticsearch'
         && !session.connection.elasticsearchPassword
         && !session.connection.elasticsearchHasSavedPassword) {
@@ -1053,8 +1109,27 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   async function deleteConnection(id: string) {
     if (!api) return;
     await api.deleteConnection(id);
+    if (connection?.id === id) {
+      closeProject();
+    }
     await refreshHistories();
     updateStatus('Saved connection deleted');
+  }
+
+  function startRename(id: string, currentLabel: string) {
+    setRenamingId(id);
+    setRenameValue(currentLabel);
+  }
+
+  async function commitRename(id: string, label: string) {
+    if (!api || !label.trim()) {
+      setRenamingId(null);
+      return;
+    }
+    await api.renameConnection(id, label.trim());
+    setRenamingId(null);
+    await refreshHistories();
+    updateStatus('Connection renamed');
   }
 
   function openDbForm(kind: 'mysql' | 'postgres' | 'mongodb') {
@@ -1082,7 +1157,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setElasticsearchPassword('');
     setElasticsearchRememberPassword(Boolean(config.elasticsearchHasSavedPassword || config.elasticsearchRememberPassword));
     setElasticsearchFormOpen(true);
-    setActiveView('connections');
+    setShowNewProjectModal(true);
     updateStatus(nextStatus);
   }
 
@@ -1127,7 +1202,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setDbFormRememberPassword(Boolean(config.hasSavedPassword || config.rememberPassword));
     setDbFormAuthDatabase(config.authDatabase ?? '');
     setDbFormOpen(true);
-    setActiveView('connections');
+    setShowNewProjectModal(true);
     updateStatus(nextStatus);
   }
 
@@ -1166,6 +1241,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       };
       const nextSchema = await api.connect(config);
       setConnection(config);
+      setActiveProject(config);
+      setSidebarMode('project');
+      setShowNewProjectModal(false);
       setSchema(nextSchema);
       setActiveInspector('schema');
       setInspectorOpen(true);
@@ -1373,6 +1451,9 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }
 
   function chooseSchemaPrompt(starterPrompt: string) {
+    const tempId = crypto.randomUUID();
+    setActiveChatId(tempId);
+    setMessages(createInitialMessages());
     setPrompt(starterPrompt);
     setActiveView('workspace');
   }
@@ -1938,107 +2019,147 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
   function renderFocusedView() {
     if (activeView === 'workspace') {
+      if (!activeProject) {
+        if (savedConnections.length > 0) {
+          return (
+          <section className="focus-view" aria-label="Projects">
+            <header className="focus-header">
+              <div className="focus-header-title">
+                <p>Select a project</p>
+                <h2>Projects</h2>
+              </div>
+            </header>
+            <div className="project-grid">
+              {savedConnections.length ? savedConnections.map((conn) => {
+                const isConnecting = connectingProjectId === conn.id;
+                return (
+                  <button
+                    key={conn.id}
+                    className={`project-card ${isConnecting ? 'connecting' : ''}`}
+                    onClick={() => void connectFromHistory(conn)}
+                    disabled={busy}
+                    type="button"
+                  >
+                    {isConnecting && (
+                      <div className="project-card-loader">
+                        <Loader2 className="spin" size={22} />
+                      </div>
+                    )}
+                    <div className="project-card-icon">
+                      <ConnectionLogo kind={conn.kind} />
+                    </div>
+                    <span className="project-card-name">{conn.label}</span>
+                    <span
+                      className="project-card-kind"
+                      style={{
+                        color: conn.kind === 'sqlite' ? 'var(--source-neutral)' : conn.kind === 'postgres' ? 'var(--source-analytics)' : conn.kind === 'mysql' ? 'var(--source-customer)' : conn.kind === 'mongodb' ? 'var(--source-operations)' : 'var(--source-marketing)'
+                      }}
+                    >
+                      <span
+                        className="sidebar-source-dot"
+                        style={{
+                          backgroundColor: 'currentColor',
+                          width: '6px',
+                          height: '6px',
+                          borderRadius: 'var(--radius-round)',
+                          flexShrink: 0
+                        }}
+                      />
+                      {dbKindDisplayName(conn.kind)}
+                    </span>
+                  </button>
+                );
+              }) : (
+                <p className="history-empty">No saved projects yet.</p>
+              )}
+              <button
+                type="button"
+                className="project-card project-card-add"
+                onClick={openNewProjectModal}
+              >
+                <div className="project-card-icon">
+                  <Plus size={28} />
+                </div>
+                <span className="project-card-name">New project</span>
+                <span className="project-card-kind">Connect a database</span>
+              </button>
+            </div>
+          </section>
+        );
+      }
       return null;
     }
 
-    if (activeView === 'connections') {
-      return (
-        <section className="focus-view" aria-label="Connections">
-          <header className="focus-header">
-            <div className="focus-header-title">
-              <p>Database access</p>
-              <h2>Connections</h2>
-            </div>
-            <button type="button" className="focus-back-button" onClick={() => openView('workspace')}>Back to chat</button>
-          </header>
-
-          <div className="connections-section">
-            <p className="connections-section-title">Current connection</p>
-            <div className="connection-status-row">
-              <span className={connection ? 'status-dot connected' : 'status-dot'} />
-              <span className="connection-status-label">{connection ? connection.label : 'No active connection'}</span>
-              <span className="connection-status-detail">{schemaSummary}</span>
-            </div>
-          </div>
-
-          <div className="connections-section">
-            <p className="connections-section-title">New connection</p>
-            <div className="connection-kind-select">
-              <button
-                type="button"
-                className={`connection-kind-trigger${connectionKindMenuOpen ? ' open' : ''}`}
-                onClick={() => setConnectionKindMenuOpen((current) => !current)}
-                aria-expanded={connectionKindMenuOpen}
-                aria-haspopup="listbox"
-                disabled={busy || !api}
-              >
-                <Database size={16} />
-                <span>Choose connection type…</span>
-                <ChevronDown size={14} className={connectionKindMenuOpen ? 'open' : ''} />
+    if (activeView === 'workspace' && !activeChatId) {
+        return (
+          <section className="focus-view" aria-label="Project home">
+            <header className="focus-header">
+              <div className="focus-header-title">
+                <p>{activeProject ? dbKindDisplayName(activeProject.kind) : ''} project</p>
+                <h2>{activeProject?.label ?? ''}</h2>
+              </div>
+              <button type="button" className="primary-button" onClick={resetChat}>
+                <Plus size={16} />
+                New chat
               </button>
-              {connectionKindMenuOpen && (
-                <div className="connection-kind-menu" role="listbox">
-                  {connectionKindOptions.map((option) => (
-                    <button
-                      key={option.kind}
-                      type="button"
-                      className="connection-kind-option"
-                      role="option"
-                      onClick={() => selectConnectionKind(option.kind)}
-                    >
-                      <ConnectionLogo kind={option.kind} monochrome />
-                      {option.label}
+            </header>
+            <div className="connections-section">
+              <p className="connections-section-title">Database status</p>
+              <div className="connection-status-row">
+                <span className="status-dot connected" />
+                <span className="connection-status-label">Connected</span>
+                <span className="connection-status-detail">{schemaSummary}</span>
+              </div>
+            </div>
+            {schema && (
+              <div className="connections-section">
+                <p className="connections-section-title">Quick prompts</p>
+                <div className="starter-list">
+                  {starterPrompts.map((starter) => (
+                    <button type="button" className="starter-row" onClick={() => chooseStarter(starter.prompt)} key={starter.title}>
+                      <span className="sidebar-action-row-label">{starter.title}</span>
+                      <ChevronRight size={16} />
                     </button>
                   ))}
                 </div>
+              </div>
+            )}
+            <div className="connections-section">
+              <p className="connections-section-title">Recent chats</p>
+              {chatSessions.filter((session) => session.connection?.id === (activeProject ? activeProject.id : '')).length ? (
+                <div className="history-list">
+                  {chatSessions
+                    .filter((session) => session.connection?.id === (activeProject ? activeProject.id : ''))
+                    .slice(0, 6)
+                    .map((session) => (
+                      <div className={`history-item ${activeChatId === session.id ? 'active' : ''}`} key={session.id}>
+                        <button type="button" className="history-main" onClick={() => void openChatSession(session)}>
+                          <MessageSquareText size={15} />
+                          <span className="history-main-info">
+                            <strong>{session.title}</strong>
+                            <small>{formatHistoryDate(session.updatedAt)}</small>
+                          </span>
+                        </button>
+                        <button type="button" className="history-delete" onClick={() => void deleteChatSession(session.id)} aria-label={`Delete chat ${session.title}`}>
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              ) : (
+                <p className="history-empty">New chats in this project will appear here.</p>
               )}
             </div>
-            <div className={`connection-form-panel${elasticsearchFormOpen || dbFormOpen ? ' open' : ''}`}>
-              {renderElasticsearchForm()}
-              {renderDbForm()}
-            </div>
-          </div>
-
-          <div className="connections-section">
-            <p className="connections-section-title">Saved connections</p>
-            {savedConnections.length ? (
-              <div className="history-list">
-                {savedConnections.map((item) => {
-                  const isActive = connection?.id === item.id;
-                  return (
-                    <div className={`saved-connection-row ${isActive ? 'active' : ''}`} key={item.id}>
-                      <button
-                        type="button"
-                        className="saved-connection-main"
-                        onClick={() => void connectFromHistory(item)}
-                        disabled={busy}
-                        aria-current={isActive ? 'true' : undefined}
-                      >
-                        <ConnectionLogo kind={item.kind} monochrome />
-                        <span className="saved-connection-label">{item.label}</span>
-                        <span className="saved-connection-date">{formatHistoryDate(item.lastConnectedAt)}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="saved-connection-delete"
-                        onClick={() => void deleteConnection(item.id)}
-                        aria-label={`Delete connection ${item.label}`}
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="history-empty">Connected databases will appear here.</p>
-            )}
-          </div>
-        </section>
-      );
+          </section>
+        );
+      }
+      return null;
     }
 
     if (activeView === 'history') {
+      const projectSessions = activeProject
+        ? chatSessions.filter((session) => session.connection?.id === activeProject.id)
+        : chatSessions;
       return (
         <section className="focus-view" aria-label="Chat history">
           <header className="focus-header">
@@ -2058,7 +2179,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             </div>
           </header>
           <div className="history-list">
-            {chatSessions.length ? chatSessions.map((session) => (
+            {projectSessions.length ? projectSessions.map((session) => (
               <div className={`history-item ${activeChatId === session.id ? 'active' : ''}`} key={session.id}>
                 <button type="button" className="history-main" onClick={() => void openChatSession(session)}>
                   <MessageSquareText size={15} />
@@ -2079,6 +2200,10 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       );
     }
 
+    return renderSettingsView();
+  }
+
+  function renderSettingsView() {
     return (
       <section className="focus-view" aria-label="Settings">
         <header className="focus-header">
@@ -2090,6 +2215,101 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         </header>
 
         {renderSettingsControls()}
+
+        <div className="settings-section">
+          <p className="settings-section-title">Connections</p>
+          {savedConnections.length ? (
+            <div className="history-list">
+              {savedConnections.map((item) => (
+                <div className={`saved-connection-row ${connection?.id === item.id ? 'active' : ''}`} key={item.id}>
+                  {renamingId === item.id ? (
+                    <div className="saved-connection-rename">
+                      <input
+                        className="rename-input"
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void commitRename(item.id, renameValue);
+                          if (e.key === 'Escape') setRenamingId(null);
+                        }}
+                        autoFocus
+                        ref={(el) => {
+                          if (el && el.value === item.label) el.select();
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="saved-connection-rename-action save"
+                        onClick={() => void commitRename(item.id, renameValue)}
+                        aria-label="Save rename"
+                        title="Save"
+                      >
+                        <Check size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        className="saved-connection-rename-action cancel"
+                        onClick={() => setRenamingId(null)}
+                        aria-label="Cancel rename"
+                        title="Cancel"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="saved-connection-main"
+                      onClick={() => void connectFromHistory(item)}
+                      disabled={busy}
+                      aria-current={connection?.id === item.id ? 'true' : undefined}
+                    >
+                      <ConnectionLogo kind={item.kind} monochrome />
+                      <span className="saved-connection-label">{item.label}</span>
+                      <span className="saved-connection-date">{dbKindDisplayName(item.kind)}</span>
+                    </button>
+                  )}
+                  {renamingId !== item.id && (
+                    <button
+                      type="button"
+                      className="saved-connection-edit"
+                      onClick={() => startRename(item.id, item.label)}
+                      aria-label={`Rename connection ${item.label}`}
+                      title="Rename"
+                    >
+                      <Pencil size={14} />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="saved-connection-delete"
+                    onClick={() => void deleteConnection(item.id)}
+                    aria-label={`Delete connection ${item.label}`}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="primary-button"
+                onClick={openNewProjectModal}
+                style={{ marginTop: '12px' }}
+              >
+                <Plus size={16} />
+                Add connection
+              </button>
+            </div>
+          ) : (
+            <div className="history-empty" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+              <p>No saved connections yet.</p>
+              <button type="button" className="primary-button" onClick={openNewProjectModal}>
+                <Plus size={16} />
+                Add connection
+              </button>
+            </div>
+          )}
+        </div>
 
         <div className="settings-section">
           <p className="settings-section-title">Appearance</p>
@@ -2222,7 +2442,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         <button
           aria-label="Connection selector"
           className="connection-selector"
-          onClick={() => openView('connections')}
+          onClick={() => { if (!activeProject) openNewProjectModal(); else setSidebarMode('projects'); }}
           type="button"
           title={connection ? `Connected: ${connection.label}` : 'No connection'}
         >
@@ -2246,64 +2466,81 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       {/* Workspace Sidebar */}
       <aside className="workspace-sidebar" aria-label="Database workspace">
         <div className="sidebar-content">
-          <div className="sidebar-section-label" style={{ marginTop: 0 }}>Navigation</div>
-          <button
-            aria-label="New chat"
-            className="sidebar-action-row"
-            onClick={resetChat}
-            type="button"
-          >
-            <Plus size={16} />
-            <span className="sidebar-action-row-label">New chat</span>
-          </button>
-
-          <div className="sidebar-section-label">Connections</div>
-          {savedConnections.length > 0 ? savedConnections.slice(0, 4).map((conn) => (
-            <button
-              className={`sidebar-action-row ${connection?.id === conn.id ? 'selected' : ''}`}
-              key={conn.id}
-              onClick={() => void connectFromHistory(conn)}
-              type="button"
-            >
-              <span
-                className="sidebar-source-dot"
-                style={{ backgroundColor: conn.kind === 'sqlite' ? 'var(--source-neutral)' : conn.kind === 'postgres' ? 'var(--source-analytics)' : conn.kind === 'mysql' ? 'var(--source-customer)' : conn.kind === 'mongodb' ? 'var(--source-operations)' : 'var(--source-marketing)' }}
-              />
-              <span className="sidebar-action-row-label">{conn.label}</span>
-            </button>
-          )) : (
-            <button
-              className="sidebar-action-row"
-              onClick={() => openView('connections')}
-              type="button"
-            >
-              <Database size={16} />
-              <span className="sidebar-action-row-label">Add connection</span>
-            </button>
-          )}
-
-          <div className="sidebar-section-label">Chats</div>
-          {chatSessions.slice(0, 6).map((session) => (
-            <button
-              className={`sidebar-action-row ${activeChatId === session.id ? 'selected' : ''}`}
-              key={session.id}
-              onClick={() => void openChatSession(session)}
-              type="button"
-            >
-              <MessageSquareText size={16} />
-              <span className="sidebar-action-row-label">{session.title}</span>
-            </button>
-          ))}
-          {chatSessions.length > 6 && (
-            <button
-              className="sidebar-action-row"
-              onClick={() => openView('history')}
-              type="button"
-            >
-              <span className="sidebar-action-row-label" style={{ color: 'var(--color-text-tertiary)', fontSize: '12px' }}>Show more</span>
-              <ChevronDown size={14} />
-            </button>
-          )}
+          {sidebarMode === 'projects' ? (
+            <>
+              <div className="sidebar-section-label" style={{ marginTop: 0 }}>Projects</div>
+              {savedConnections.length > 0 ? savedConnections.map((conn) => (
+                <button
+                  className={`sidebar-action-row ${connection?.id === conn.id ? 'selected' : ''}`}
+                  key={conn.id}
+                  onClick={() => void connectFromHistory(conn)}
+                  type="button"
+                >
+                  <span
+                    className="sidebar-source-dot"
+                    style={{ backgroundColor: conn.kind === 'sqlite' ? 'var(--source-neutral)' : conn.kind === 'postgres' ? 'var(--source-analytics)' : conn.kind === 'mysql' ? 'var(--source-customer)' : conn.kind === 'mongodb' ? 'var(--source-operations)' : 'var(--source-marketing)' }}
+                  />
+                  <span className="sidebar-action-row-label">{conn.label}</span>
+                </button>
+              )) : (
+                <p className="sidebar-empty">No projects yet.</p>
+              )}
+              <button
+                className="sidebar-action-row"
+                onClick={openNewProjectModal}
+                type="button"
+              >
+                <Plus size={16} />
+                <span className="sidebar-action-row-label">Add project</span>
+              </button>
+            </>
+          ) : activeProject ? (
+            <>
+              <button
+                className="sidebar-action-row"
+                onClick={closeProject}
+                type="button"
+              >
+                <ArrowLeft size={16} />
+                <span className="sidebar-action-row-label">All projects</span>
+              </button>
+              <div className="sidebar-section-label">{activeProject.label}</div>
+              <button
+                aria-label="New chat"
+                className="sidebar-action-row"
+                onClick={resetChat}
+                type="button"
+              >
+                <Plus size={16} />
+                <span className="sidebar-action-row-label">New chat</span>
+              </button>
+              <div className="sidebar-section-label">Chats</div>
+              {chatSessions
+                .filter((session) => session.connection?.id === activeProject.id)
+                .slice(0, 6)
+                .map((session) => (
+                  <button
+                    className={`sidebar-action-row ${activeChatId === session.id ? 'selected' : ''}`}
+                    key={session.id}
+                    onClick={() => void openChatSession(session)}
+                    type="button"
+                  >
+                    <MessageSquareText size={16} />
+                    <span className="sidebar-action-row-label">{session.title}</span>
+                  </button>
+                ))}
+              {chatSessions.filter((session) => session.connection?.id === activeProject.id).length > 6 && (
+                <button
+                  className="sidebar-action-row"
+                  onClick={() => openView('history')}
+                  type="button"
+                >
+                  <span className="sidebar-action-row-label" style={{ color: 'var(--color-text-tertiary)', fontSize: '12px' }}>Show more</span>
+                  <ChevronDown size={14} />
+                </button>
+              )}
+            </>
+          ) : null}
         </div>
         <div className="sidebar-spacer" />
         <button
@@ -2503,7 +2740,61 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           role="separator"
           tabIndex={0}
         />
+      )}      {/* New Project Modal */}
+      {showNewProjectModal && (
+        <div className="project-modal-backdrop" onClick={closeNewProjectModal}>
+          <div className="project-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="New connection">
+            <div className="project-modal-header">
+              <h2>New connection</h2>
+              <button
+                type="button"
+                className="toolbar-icon-button"
+                onClick={closeNewProjectModal}
+                aria-label="Close"
+              >
+                <XCircle size={18} />
+              </button>
+            </div>
+            <div className="project-modal-body">
+              <p className="connections-section-title">Select connection type</p>
+              {!(elasticsearchFormOpen || dbFormOpen) && (
+                <div className="connection-kind-grid">
+                  {connectionKindOptions.map((option) => (
+                    <button
+                      key={option.kind}
+                      type="button"
+                      className="connection-kind-card"
+                      onClick={() => selectConnectionKind(option.kind)}
+                      disabled={busy || !api}
+                    >
+                      <div className="project-card-icon">
+                        <ConnectionLogo kind={option.kind} />
+                      </div>
+                      <span className="project-card-name">{option.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {(elasticsearchFormOpen || dbFormOpen) && (
+                <button
+                  type="button"
+                  className="connection-form-back"
+                  onClick={() => { setElasticsearchFormOpen(false); setDbFormOpen(false); }}
+                >
+                  <ArrowLeft size={14} />
+                  Back to connection types
+                </button>
+              )}
+              <div className={`connection-form-panel${elasticsearchFormOpen || dbFormOpen ? ' open' : ''}`}>
+                {renderElasticsearchForm()}
+                {renderDbForm()}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
+
+
     </main>
   );
 }

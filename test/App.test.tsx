@@ -56,6 +56,7 @@ function makeApi(): TestDbChatApi {
     clearChatSessions: vi.fn(),
     listConnections: vi.fn(async () => []),
     deleteConnection: vi.fn(),
+    renameConnection: vi.fn(),
     saveCsvFile: vi.fn()
   };
   return {
@@ -69,6 +70,7 @@ function makeApi(): TestDbChatApi {
 
 describe('App', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     Element.prototype.scrollIntoView = vi.fn();
     Element.prototype.scrollTo = vi.fn();
     window.localStorage.clear();
@@ -213,9 +215,8 @@ describe('App', () => {
 
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByText('Add connection'));
-    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
-    fireEvent.click(screen.getByRole('option', { name: /sqlite/i }));
+    fireEvent.click(await screen.findByText('Add project'));
+    fireEvent.click(screen.getByRole('button', { name: /sqlite/i }));
 
     expect(await screen.findByText('Customer Orders')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Pro' })).toHaveAttribute('aria-pressed', 'true');
@@ -308,42 +309,64 @@ describe('App', () => {
 
     render(<App api={api} />);
 
-    // Chat is shown in sidebar
-    fireEvent.click(await screen.findByText('Top customers'));
+    // Click project to enter project mode
+    fireEvent.click((await screen.findAllByText('customers.db'))[0]);
+    await waitFor(() => {
+      expect(api.connect).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'connection-1',
+        label: 'customers.db',
+        kind: 'sqlite'
+      }));
+    });
+
+    // Chat is now visible in sidebar
+    fireEvent.click((await screen.findAllByText('Top customers'))[0]);
 
     expect(await screen.findByText('Ada is the top customer.')).toBeInTheDocument();
-    expect(api.connect).toHaveBeenCalledWith(connection);
 
-    // Navigate to connections view to see saved connections
-    fireEvent.click(screen.getByLabelText('Connection selector'));
-    expect((await screen.findAllByText('customers.db')).length).toBeGreaterThan(0);
-
-    // Delete connection
+    // Delete connection via Settings
+    fireEvent.click(screen.getByLabelText('Settings'));
     fireEvent.click(await screen.findByLabelText('Delete connection customers.db'));
     expect(api.deleteConnection).toHaveBeenCalledWith('connection-1');
-
-    // Navigate to history view via Settings -> History
-    fireEvent.click(screen.getByLabelText('Settings'));
-    // Go back to workspace first, then to history
-    fireEvent.click(screen.getByText('Back to chat'));
-    // Open history view from sidebar "Show more" won't work, use History view directly
-    // Let's check the delete through history access
   });
 
   it('clears all chat history', async () => {
     const api = makeApi();
+    const conn = {
+      id: 'conn-1',
+      kind: 'sqlite' as const,
+      label: 'test.db',
+      databasePath: '/tmp/test.db',
+      createdAt: '2026-05-02T00:00:00.000Z',
+      lastConnectedAt: '2026-05-02T00:00:00.000Z'
+    };
     const sessions = [{
       id: 'session-1',
       title: 'Top customers',
       messages: [],
+      connection: conn,
       createdAt: '2026-05-02T00:00:00.000Z',
       updatedAt: '2026-05-02T00:00:01.000Z'
     }];
     vi.mocked(api.listChatSessions).mockImplementation(async () => sessions);
+    vi.mocked(api.listConnections).mockResolvedValue([conn]);
+    vi.mocked(api.connect).mockResolvedValue({
+      kind: 'sqlite',
+      label: 'test.db',
+      tables: []
+    });
 
     render(<App api={api} />);
 
-    expect(await screen.findByText('Top customers')).toBeInTheDocument();
+    fireEvent.click((await screen.findAllByText('test.db'))[0]);
+    await waitFor(() => {
+      expect(api.connect).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'conn-1',
+        label: 'test.db',
+        kind: 'sqlite'
+      }));
+    });
+    expect((await screen.findAllByText('Top customers')).length).toBeGreaterThan(0);
   });
 
   it('connects to Elasticsearch from the connections view', async () => {
@@ -355,9 +378,8 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByText('Add connection'));
-    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
-    fireEvent.click(screen.getByRole('option', { name: /elasticsearch/i }));
+    fireEvent.click(await screen.findByText('Add project'));
+    fireEvent.click(screen.getByRole('button', { name: /elasticsearch/i }));
 
     // Wait for form to appear
     const form = await screen.findByLabelText('Elasticsearch connection');
@@ -405,7 +427,7 @@ describe('App', () => {
     render(<App api={api} />);
 
     // Click connection in sidebar
-    fireEvent.click(await screen.findByText('elastic.internal:9243'));
+    fireEvent.click((await screen.findAllByText('elastic.internal:9243'))[0]);
 
     expect(await screen.findByLabelText('Elasticsearch connection')).toBeInTheDocument();
     expect(screen.getByLabelText('Host')).toHaveValue('elastic.internal');
@@ -440,7 +462,7 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByText('elastic.internal:9243'));
+    fireEvent.click((await screen.findAllByText('elastic.internal:9243'))[0]);
 
     await waitFor(() => {
       expect(api.connect).toHaveBeenCalledWith(connection);
@@ -455,9 +477,8 @@ describe('App', () => {
     ));
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByText('Add connection'));
-    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
-    fireEvent.click(screen.getByRole('option', { name: /elasticsearch/i }));
+    fireEvent.click(await screen.findByText('Add project'));
+    fireEvent.click(screen.getByRole('button', { name: /elasticsearch/i }));
     const form = await screen.findByLabelText('Elasticsearch connection');
     fireEvent.click(within(form).getByRole('button', { name: 'Connect' }));
 
@@ -521,9 +542,8 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByText('Add connection'));
-    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
-    fireEvent.click(screen.getByRole('option', { name: /mysql/i }));
+    fireEvent.click(await screen.findByText('Add project'));
+    fireEvent.click(screen.getByRole('button', { name: /mysql/i }));
 
     const form = await screen.findByLabelText('MySQL connection');
     fireEvent.change(within(form).getByLabelText('Host'), {
@@ -556,9 +576,8 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByText('Add connection'));
-    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
-    fireEvent.click(screen.getByRole('option', { name: /postgresql/i }));
+    fireEvent.click(await screen.findByText('Add project'));
+    fireEvent.click(screen.getByRole('button', { name: /postgresql/i }));
 
     const form = await screen.findByLabelText('PostgreSQL connection');
     fireEvent.change(within(form).getByLabelText('Host'), {
@@ -582,13 +601,12 @@ describe('App', () => {
     const api = makeApi();
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByText('Add connection'));
-    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
-    fireEvent.click(screen.getByRole('option', { name: /elasticsearch/i }));
+    fireEvent.click(await screen.findByText('Add project'));
+    fireEvent.click(screen.getByRole('button', { name: /elasticsearch/i }));
     expect(await screen.findByLabelText('Elasticsearch connection')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
-    fireEvent.click(screen.getByRole('option', { name: /postgresql/i }));
+    fireEvent.click(screen.getByRole('button', { name: /back to connection types/i }));
+    fireEvent.click(screen.getByRole('button', { name: /postgresql/i }));
 
     expect(screen.queryByLabelText('Elasticsearch connection')).not.toBeInTheDocument();
     expect(await screen.findByLabelText('PostgreSQL connection')).toBeInTheDocument();
@@ -603,9 +621,8 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByText('Add connection'));
-    fireEvent.click(screen.getByRole('button', { name: /choose connection type/i }));
-    fireEvent.click(screen.getByRole('option', { name: /mongodb/i }));
+    fireEvent.click(await screen.findByText('Add project'));
+    fireEvent.click(screen.getByRole('button', { name: /mongodb/i }));
 
     const form = await screen.findByLabelText('MongoDB connection');
     fireEvent.change(within(form).getByLabelText('Host'), {
@@ -652,7 +669,7 @@ describe('App', () => {
     render(<App api={api} />);
 
     // Click connection in sidebar
-    fireEvent.click(await screen.findByText('mysql.local:3306'));
+    fireEvent.click((await screen.findAllByText('mysql.local:3306'))[0]);
 
     const form = await screen.findByLabelText('MySQL connection');
     expect(form).toBeInTheDocument();
@@ -682,7 +699,7 @@ describe('App', () => {
     });
     render(<App api={api} />);
 
-    fireEvent.click(await screen.findByText('mysql.local:3306'));
+    fireEvent.click((await screen.findAllByText('mysql.local:3306'))[0]);
 
     await waitFor(() => {
       expect(api.connect).toHaveBeenCalledWith(connection);

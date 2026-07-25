@@ -36,6 +36,7 @@ const api: DbChatApi = {
   clearChatSessions: () => ipcRenderer.invoke('dbchat:clear-chat-sessions'),
   listConnections: () => ipcRenderer.invoke('dbchat:list-connections'),
   deleteConnection: (id: string) => ipcRenderer.invoke('dbchat:delete-connection', id),
+  renameConnection: (id: string, label: string) => ipcRenderer.invoke('dbchat:rename-connection', id, label),
   saveCsvFile: (request) => ipcRenderer.invoke('dbchat:save-csv-file', request)
 };
 

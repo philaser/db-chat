@@ -185,6 +185,10 @@ export class IpcController {
     this.store.deleteConnection(id);
   }
 
+  renameConnection(id: string, label: string): void {
+    this.store.renameConnection(id, label);
+  }
+
   requireConnector(): DatabaseConnector {
     if (!this.connector) {
       throw new Error('No database is connected.');

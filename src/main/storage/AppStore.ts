@@ -174,6 +174,14 @@ export class AppStore {
     });
   }
 
+  renameConnection(id: string, label: string): void {
+    const data = this.read();
+    const connections = data.connections.map((conn) =>
+      conn.id === id ? { ...conn, label: label.trim() || conn.label } : conn
+    );
+    this.write({ ...data, connections });
+  }
+
   listChatSessions(): PersistedChatSession[] {
     return this.read().chatSessions;
   }

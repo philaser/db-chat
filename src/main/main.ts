@@ -55,6 +55,7 @@ function registerIpc(): void {
   ipcMain.handle('dbchat:clear-chat-sessions', () => controller.clearChatSessions());
   ipcMain.handle('dbchat:list-connections', () => controller.listConnections());
   ipcMain.handle('dbchat:delete-connection', (_event, id: string) => controller.deleteConnection(id));
+  ipcMain.handle('dbchat:rename-connection', (_event, id: string, label: string) => controller.renameConnection(id, label));
   ipcMain.handle('dbchat:save-csv-file', (_event, request: { content: string; defaultName: string }) => controller.saveCsvFile(request));
 }
 
