@@ -2786,6 +2786,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                       </div>
                     </div>
                   )}
+                  <div className="composer-footer-spacer" aria-hidden="true" />
                 </div>
               </form>
             </div>
