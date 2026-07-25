@@ -1481,7 +1481,7 @@ button:disabled {
   display: flex;
   gap: var(--space-4);
   min-height: 28px;
-  padding: 0 10px 6px;
+  padding: 0 42px 6px 10px;
 }
 
 .composer-footer-group {
