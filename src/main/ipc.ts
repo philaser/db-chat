@@ -1,4 +1,5 @@
 import { BrowserWindow, dialog, type WebContents } from 'electron';
+import fs from 'node:fs';
 import path from 'node:path';
 import type {
   ConnectionConfig,
@@ -711,6 +712,22 @@ export class IpcController {
       throw new Error('No database is connected.');
     }
     return this.connector;
+  }
+
+  async saveCsvFile(request: { content: string; defaultName: string }): Promise<void> {
+    const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    const result = await dialog.showSaveDialog(window, {
+      title: 'Export CSV',
+      defaultPath: request.defaultName,
+      filters: [
+        { name: 'CSV files', extensions: ['csv'] },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    });
+    if (result.canceled || !result.filePath) {
+      return;
+    }
+    await fs.promises.writeFile(result.filePath, request.content, 'utf-8');
   }
 }
 

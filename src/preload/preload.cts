@@ -53,7 +53,8 @@ const api: DbChatApi = {
   deleteChatSession: (id: string) => ipcRenderer.invoke('dbchat:delete-chat-session', id),
   clearChatSessions: () => ipcRenderer.invoke('dbchat:clear-chat-sessions'),
   listConnections: () => ipcRenderer.invoke('dbchat:list-connections'),
-  deleteConnection: (id: string) => ipcRenderer.invoke('dbchat:delete-connection', id)
+  deleteConnection: (id: string) => ipcRenderer.invoke('dbchat:delete-connection', id),
+  saveCsvFile: (request) => ipcRenderer.invoke('dbchat:save-csv-file', request)
 };
 
 contextBridge.exposeInMainWorld('dbchat', api);

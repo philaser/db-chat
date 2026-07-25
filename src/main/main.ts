@@ -11,13 +11,15 @@ const isDev = process.env.VITE_DEV_SERVER_URL || !app.isPackaged;
 let mainWindow: BrowserWindow | null = null;
 
 function createWindow(): void {
+  const isMac = process.platform === 'darwin';
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
     minWidth: 980,
     minHeight: 680,
     title: 'DB Chat',
-    backgroundColor: '#f7f4ed',
+    titleBarStyle: isMac ? 'hiddenInset' : 'default',
+    backgroundColor: '#ffffff',
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.cjs'),
       nodeIntegration: false,
@@ -55,6 +57,7 @@ function registerIpc(): void {
   ipcMain.handle('dbchat:clear-chat-sessions', () => controller.clearChatSessions());
   ipcMain.handle('dbchat:list-connections', () => controller.listConnections());
   ipcMain.handle('dbchat:delete-connection', (_event, id: string) => controller.deleteConnection(id));
+  ipcMain.handle('dbchat:save-csv-file', (_event, request: { content: string; defaultName: string }) => controller.saveCsvFile(request));
 }
 
 void app.whenReady().then(() => {
