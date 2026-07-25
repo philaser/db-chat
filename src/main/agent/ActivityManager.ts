@@ -61,7 +61,7 @@ export class ActivityManager {
   }
 
   approvalRequired(interruption: Record<string, unknown>): void {
-    this.emit('approval-required', { interruption });
+    this.emit('approval-required', interruption);
   }
 
   approvalResolved(interruptionId: string, approved: boolean): void {

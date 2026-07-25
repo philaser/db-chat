@@ -637,7 +637,17 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
       updateStatus('Desktop app bridge unavailable. Run DB Chat in Electron to connect databases.');
       return;
     }
-    void api.loadSettings().then((s) => { setSettings(s); if (s.effortLevel) setEffortLevel(s.effortLevel); }).catch((error) => reportError('Settings could not be loaded. Defaults are in use.', error));
+    void api.loadSettings().then((s) => { 
+      setSettings(s); 
+      if (s.effortLevel) {
+        setEffortLevel(s.effortLevel);
+      } else {
+        const defaults = { ...s, effortLevel: 'medium' as EffortLevel };
+        setEffortLevel('medium');
+        setSettings(defaults);
+        void api.saveSettings(defaults);
+      }
+    }).catch((error) => reportError('Settings could not be loaded. Defaults are in use.', error));
     void refreshHistories(api);
   }, [api]);
 
