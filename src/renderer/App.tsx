@@ -594,6 +594,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [auditEntries, setAuditEntries] = useState<Array<{ id: string; timestamp: string; toolName: string; permissionDecision: string; queryPreview?: string; risk?: string }>>([]);
   const [effortLevel, setEffortLevel] = useState<EffortLevel>('medium');
   const [safetyLevel, setSafetyLevelState] = useState<SafetyLevel>('standard');
+  const [pendingSafetyConfirm, setPendingSafetyConfirm] = useState(false);
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
   const dropdownRef = useRef<HTMLDivElement | null>(null);
   const shellRef = useRef<HTMLElement | null>(null);
@@ -2926,6 +2927,11 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                                 role="menuitem"
                                 className={`composer-select-item ${safetyLevel === level ? 'active' : ''}`}
                                 onClick={async () => {
+                                  if (level === 'unrestricted' && safetyLevel !== 'unrestricted') {
+                                    setOpenDropdown(null);
+                                    setPendingSafetyConfirm(true);
+                                    return;
+                                  }
                                   appendLog('info', `Safety level changed to ${level}`);
                                   setSafetyLevelState(level);
                                   if (api && connection) {
@@ -3084,6 +3090,56 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                 </button>
                 <button type="button" className="connection-form-cancel" onClick={denyInterruption}>
                   Deny
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingSafetyConfirm && (
+        <div className="project-modal-backdrop" onClick={() => setPendingSafetyConfirm(false)}>
+          <div className="project-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Confirm unrestricted access">
+            <div className="project-modal-header">
+              <h2>Confirm Unrestricted Access</h2>
+            </div>
+            <div className="project-modal-body">
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', marginBottom: '16px' }}>
+                <ShieldX size={20} style={{ color: 'var(--color-danger)', flexShrink: 0, marginTop: '2px' }} />
+                <p style={{ color: 'var(--color-text-secondary)', lineHeight: '20px' }}>
+                  Unrestricted mode allows the agent to execute <strong style={{ color: 'var(--color-text-primary)' }}>all operations without asking for approval</strong>, including writes, DDL statements (CREATE, DROP, ALTER), and schema changes.
+                </p>
+              </div>
+              <p style={{ color: 'var(--color-danger)', fontSize: '13px', fontWeight: 500, marginBottom: '16px' }}>
+                This grants full control over the database. Only use this in environments where data loss is acceptable.
+              </p>
+              <div className="connection-form-actions">
+                <button
+                  type="button"
+                  className="primary-button"
+                  style={{ background: 'var(--color-danger)', borderColor: 'var(--color-danger)' }}
+                  onClick={async () => {
+                    setPendingSafetyConfirm(false);
+                    appendLog('info', 'Safety level changed to unrestricted (confirmed)');
+                    setSafetyLevelState('unrestricted');
+                    if (api && connection) {
+                      try {
+                        await api.setSafetyLevel(connection.id, 'unrestricted');
+                        await refreshHistories();
+                      } catch (err) {
+                        reportError('Failed to set safety level', err);
+                      }
+                    }
+                  }}
+                >
+                  Enable Unrestricted
+                </button>
+                <button
+                  type="button"
+                  className="connection-form-cancel"
+                  onClick={() => setPendingSafetyConfirm(false)}
+                >
+                  Cancel
                 </button>
               </div>
             </div>
