@@ -1,6 +1,5 @@
 export type DatabaseKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres' | 'mongodb';
-export type ModelProviderKind = 'openrouter' | 'openai';
-export type QueryExecutionMode = 'safe' | 'manual';
+export type ModelProviderKind = 'openrouter';
 export type ChatRole = 'system' | 'user' | 'assistant';
 export type ChatActivityStatus = 'thinking' | 'validating' | 'running' | 'success' | 'blocked' | 'error' | 'complete';
 
@@ -9,7 +8,6 @@ export interface ConnectionConfig {
   kind: DatabaseKind;
   label: string;
   databasePath?: string;
-  /** Kept for existing saved Elasticsearch connections created with URL input. */
   elasticsearchUrl?: string;
   elasticsearchHost?: string;
   elasticsearchPort?: number;
@@ -50,12 +48,6 @@ export interface DatabaseSchema {
   tables: TableInfo[];
 }
 
-export interface QueryValidationResult {
-  safe: boolean;
-  reason: string;
-  normalizedQuery: string;
-}
-
 export interface QueryResult {
   columns: string[];
   rows: Record<string, unknown>[];
@@ -70,12 +62,6 @@ export interface ChatMessage {
   createdAt: string;
 }
 
-export interface GeneratedQuery {
-  query: string;
-  explanation: string;
-  validation: QueryValidationResult;
-}
-
 export interface ChatActivityStep {
   id: string;
   queryId?: string;
@@ -83,24 +69,14 @@ export interface ChatActivityStep {
   title: string;
   detail?: string;
   query?: string;
-  validation?: QueryValidationResult;
   rowCount?: number;
   elapsedMs?: number;
   createdAt: string;
 }
 
-export interface ChatProgressEvent {
-  turnId: string;
-  step: ChatActivityStep;
-}
-
 export interface ChatTurnResponse {
   message: ChatMessage;
-  generatedQuery?: GeneratedQuery;
-  queryResult?: QueryResult;
-  generatedQueries?: GeneratedQuery[];
-  queryResults?: QueryResult[];
-  activity?: ChatActivityStep[];
+  events?: AgentEvent[];
 }
 
 export interface ConnectionHistoryItem extends ConnectionConfig {
@@ -118,16 +94,9 @@ export interface PersistedChatSession {
   updatedAt: string;
 }
 
-export interface ProviderSettings {
-  provider: ModelProviderKind;
-  model: string;
-  hasApiKey: boolean;
-}
-
 export interface PersistedSettings {
   provider: ModelProviderKind;
   model: string;
-  safeMode: boolean;
 }
 
 export interface ModelInfo {
@@ -137,7 +106,7 @@ export interface ModelInfo {
 
 export interface ModelChatMessage {
   role: ChatRole | 'tool';
-  content: string;
+  content: string | null;
   tool_call_id?: string;
   tool_calls?: ModelToolCall[];
 }
@@ -186,20 +155,67 @@ export interface ModelProvider {
 export interface DatabaseConnector {
   connect(config: ConnectionConfig): Promise<void>;
   introspect(): Promise<DatabaseSchema>;
-  validateQuery(query: string, mode: QueryExecutionMode): QueryValidationResult;
-  executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult>;
+  executeQuery(query: string): Promise<QueryResult>;
   getContextForPrompt(): Promise<string>;
   close(): void;
+}
+
+// ----- Agent Harness Types -----
+
+export type AgentState = 'idle' | 'thinking' | 'processing' | 'executing' | 'complete' | 'aborted';
+
+export type AgentEventType =
+  | 'text-delta'
+  | 'tool-start'
+  | 'tool-progress'
+  | 'tool-complete'
+  | 'thinking-start'
+  | 'thinking-delta'
+  | 'status'
+  | 'complete'
+  | 'error'
+  | 'aborted';
+
+export interface AgentEvent {
+  turnId: string;
+  type: AgentEventType;
+  timestamp: string;
+  data: Record<string, unknown>;
+}
+
+export interface AgentToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+export interface AgentToolResult {
+  ok: boolean;
+  summary: string;
+  data?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface AgentMemory {
+  id: string;
+  content: string;
+  category: 'schema' | 'domain' | 'preference' | 'query' | 'note';
+  importance: number;
+  createdAt: string;
+  lastAccessedAt: string;
 }
 
 export interface DbChatApi {
   chooseSqliteFile(): Promise<ConnectionConfig | null>;
   connect(config: ConnectionConfig): Promise<DatabaseSchema>;
   getSchema(): Promise<DatabaseSchema | null>;
-  validateQuery(query: string, mode: QueryExecutionMode): Promise<QueryValidationResult>;
-  executeQuery(query: string, mode: QueryExecutionMode): Promise<QueryResult>;
+  executeQuery(query: string): Promise<QueryResult>;
   sendChat(messages: ModelChatMessage[], turnId?: string): Promise<ChatTurnResponse>;
-  onChatProgress(turnId: string, listener: (event: ChatProgressEvent) => void): () => void;
+  subscribeToAgentEvents(turnId: string, listener: (event: AgentEvent) => void): () => void;
+  abortChat(turnId: string): Promise<void>;
   loadSettings(): Promise<PersistedSettings & { hasApiKey: boolean }>;
   saveSettings(settings: PersistedSettings): Promise<void>;
   saveApiKey(provider: ModelProviderKind, apiKey: string): Promise<void>;
