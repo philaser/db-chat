@@ -1507,74 +1507,100 @@ button:disabled {
 
 .composer-select {
   align-items: center;
+  display: inline-flex;
+  position: relative;
+}
+
+.composer-select-trigger {
+  align-items: center;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-control);
   color: var(--color-text-secondary);
   cursor: pointer;
   display: inline-flex;
+  font-family: inherit;
   font-size: 11px;
   font-weight: 500;
   gap: 4px;
   height: 22px;
   line-height: 14px;
   padding: 0 4px 0 2px;
-  position: relative;
   transition:
     background-color var(--motion-fast) var(--ease-standard),
     color var(--motion-fast) var(--ease-standard);
 }
 
-.composer-select:hover {
+.composer-select-trigger:hover {
   background: var(--color-control-hover);
   color: var(--color-text-primary);
 }
 
-.composer-select:focus-within {
+.composer-select-trigger:focus-visible {
   background: var(--color-control-hover);
   box-shadow: 0 0 0 2px var(--color-focus-ring);
-}
-
-.composer-select select {
-  appearance: none;
-  background: transparent;
-  border: none;
-  color: inherit;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: inherit;
-  font-weight: inherit;
-  line-height: inherit;
-  margin: 0;
-  outline: none;
-  padding: 0 14px 0 0;
-}
-
-.composer-select select:focus-visible {
   outline: none;
 }
 
-.composer-select svg {
+.composer-select-trigger span {
+  flex: 0 0 auto;
+}
+
+.composer-select-trigger .chevron {
   color: inherit;
   flex: 0 0 auto;
   opacity: 0.7;
   pointer-events: none;
 }
 
-.composer-select svg.chevron {
+.composer-select-menu {
+  animation: menu-enter var(--motion-fast) var(--ease-standard);
+  background: var(--surface);
+  border: 1px solid var(--color-separator);
+  border-radius: var(--radius-popover);
+  box-shadow: var(--shadow-popover);
+  left: 0;
+  min-width: 100%;
+  overflow: hidden;
   position: absolute;
-  right: 2px;
+  top: 100%;
+  z-index: var(--z-popover);
 }
 
-.composer-select--safety {
+.composer-select-item {
+  align-items: center;
+  background: transparent;
+  border: none;
   color: var(--color-text-secondary);
+  cursor: pointer;
+  display: flex;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  gap: 6px;
+  height: 28px;
+  justify-content: flex-start;
+  line-height: 14px;
+  padding: 0 10px;
+  text-align: left;
+  white-space: nowrap;
+  width: 100%;
 }
 
-.composer-select--safety[data-level="safe"] {
+.composer-select-item:hover {
+  background: var(--color-control-hover);
+  color: var(--color-text-primary);
+}
+
+.composer-select-item.active {
+  color: var(--color-accent);
+}
+
+.composer-select--safety[data-level="safe"] .composer-select-trigger {
   color: var(--color-success);
 }
 
-.composer-select--safety[data-level="unrestricted"] {
+.composer-select--safety[data-level="unrestricted"] .composer-select-trigger {
   color: var(--color-warning);
 }
 

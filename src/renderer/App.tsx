@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import {
   FormEvent,
+  useCallback,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -545,6 +546,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [auditEntries, setAuditEntries] = useState<Array<{ id: string; timestamp: string; toolName: string; permissionDecision: string; queryPreview?: string; risk?: string }>>([]);
   const [effortLevel, setEffortLevel] = useState<EffortLevel>('medium');
   const [safetyLevel, setSafetyLevelState] = useState<SafetyLevel>('standard');
+  const [openDropdown, setOpenDropdown] = useState<string | null>(null);
+  const dropdownRef = useRef<HTMLDivElement | null>(null);
   const shellRef = useRef<HTMLElement | null>(null);
   const recentChatsRef = useRef<HTMLDivElement | null>(null);
   const schemaPanelRef = useRef<HTMLDivElement | null>(null);
@@ -632,6 +635,17 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   useEffect(() => {
     setModelSearch(settings.model);
   }, [settings.model]);
+
+  useEffect(() => {
+    if (!openDropdown) return;
+    function handlePointerDown(event: PointerEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setOpenDropdown(null);
+      }
+    }
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [openDropdown]);
 
   useEffect(() => {
     setSchemaSearch('');
@@ -2736,53 +2750,79 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                 >
                   {answerGenerating ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
                 </button>
-                <div className="composer-footer">
+                <div className="composer-footer" ref={dropdownRef}>
                   <div className="composer-footer-group">
-                    <label htmlFor="reasoning-select" className="composer-footer-label">Reasoning</label>
+                    <label className="composer-footer-label">Reasoning</label>
                     <div className="composer-select">
-                      <select
-                        id="reasoning-select"
-                        value={effortLevel}
-                        onChange={(event) => {
-                          const level = event.target.value as EffortLevel;
-                          setEffortLevel(level);
-                          setSettings((current) => ({ ...current, effortLevel: level }));
-                          void api?.saveSettings({ ...settings, effortLevel: level });
-                        }}
+                      <button
+                        type="button"
+                        className="composer-select-trigger"
+                        onClick={() => setOpenDropdown(openDropdown === 'reasoning' ? null : 'reasoning')}
+                        aria-expanded={openDropdown === 'reasoning'}
                         aria-label="Reasoning effort"
                       >
-                        <option value="none">Fast</option>
-                        <option value="low">Low</option>
-                        <option value="medium">Medium</option>
-                        <option value="high">High</option>
-                        <option value="max">Max</option>
-                      </select>
-                      <ChevronDown size={12} className="chevron" aria-hidden="true" />
+                        <span>{effortLevel === 'none' ? 'Fast' : effortLevel.charAt(0).toUpperCase() + effortLevel.slice(1)}</span>
+                        <ChevronDown size={12} className="chevron" />
+                      </button>
+                      {openDropdown === 'reasoning' && (
+                        <div className="composer-select-menu" role="menu">
+                          {(['none', 'low', 'medium', 'high', 'max'] as EffortLevel[]).map((level) => (
+                            <button
+                              key={level}
+                              type="button"
+                              role="menuitem"
+                              className={`composer-select-item ${effortLevel === level ? 'active' : ''}`}
+                              onClick={() => {
+                                setEffortLevel(level);
+                                setSettings((current) => ({ ...current, effortLevel: level }));
+                                void api?.saveSettings({ ...settings, effortLevel: level });
+                                setOpenDropdown(null);
+                              }}
+                            >
+                              {level === 'none' ? 'Fast' : level.charAt(0).toUpperCase() + level.slice(1)}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                   {connection && (
                     <div className="composer-footer-group">
-                      <label htmlFor="safety-select" className="composer-footer-label">Safety</label>
+                      <label className="composer-footer-label">Safety</label>
                       <div className="composer-select composer-select--safety" data-level={safetyLevel}>
-                        <ShieldCheck size={13} aria-hidden="true" />
-                        <select
-                          id="safety-select"
-                          value={safetyLevel}
-                          onChange={async (event) => {
-                            const next = event.target.value as SafetyLevel;
-                            setSafetyLevelState(next);
-                            if (api && connection) {
-                              await api.setSafetyLevel(connection.id, next);
-                              await refreshHistories();
-                            }
-                          }}
+                        <button
+                          type="button"
+                          className="composer-select-trigger"
+                          onClick={() => setOpenDropdown(openDropdown === 'safety' ? null : 'safety')}
+                          aria-expanded={openDropdown === 'safety'}
                           aria-label="Safety level"
                         >
-                          <option value="safe">Safe</option>
-                          <option value="standard">Standard</option>
-                          <option value="unrestricted">Unrestricted</option>
-                        </select>
-                        <ChevronDown size={12} className="chevron" aria-hidden="true" />
+                          <ShieldCheck size={13} aria-hidden="true" />
+                          <span>{safetyLevel === 'safe' ? 'Safe' : safetyLevel === 'unrestricted' ? 'Unrestricted' : 'Standard'}</span>
+                          <ChevronDown size={12} className="chevron" />
+                        </button>
+                        {openDropdown === 'safety' && (
+                          <div className="composer-select-menu" role="menu">
+                            {(['safe', 'standard', 'unrestricted'] as SafetyLevel[]).map((level) => (
+                              <button
+                                key={level}
+                                type="button"
+                                role="menuitem"
+                                className={`composer-select-item ${safetyLevel === level ? 'active' : ''}`}
+                                onClick={async () => {
+                                  setSafetyLevelState(level);
+                                  if (api && connection) {
+                                    await api.setSafetyLevel(connection.id, level);
+                                    await refreshHistories();
+                                  }
+                                  setOpenDropdown(null);
+                                }}
+                              >
+                                {level === 'safe' ? 'Safe' : level === 'unrestricted' ? 'Unrestricted' : 'Standard'}
+                              </button>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
