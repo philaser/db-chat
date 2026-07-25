@@ -12,13 +12,15 @@ export class QueryValidator {
   static validate(query: string, safetyLevel: SafetyLevel): ValidationResult {
     const normalized = query.trim();
 
-    if (QueryValidator.isDDL(normalized)) {
+    const isDDL = QueryValidator.isDDL(normalized);
+    const isWrite = QueryValidator.isWrite(normalized);
+
+    if (isDDL) {
       if (safetyLevel === 'safe' || safetyLevel === 'standard') {
         return { ok: false, reason: 'DDL statements are not permitted at this safety level.', isDDL: true };
       }
+      return { ok: true, isDDL: true };
     }
-
-    const isWrite = QueryValidator.isWrite(normalized);
 
     if (safetyLevel === 'safe' && isWrite) {
       return { ok: false, reason: 'Write queries are not permitted in Safe mode.', isWrite: true };
