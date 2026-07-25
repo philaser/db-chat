@@ -2556,6 +2556,15 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
       {/* Conversation Canvas */}
       <section className="conversation-pane" aria-label={activeView === 'workspace' ? 'Chat' : 'Workspace view'}>
+        <button
+          aria-label={inspectorOpen ? 'Hide inspector panel' : 'Show inspector panel'}
+          className="inspector-toggle"
+          onClick={() => { if (inspectorOpen) closeInspector(); else { setActiveInspector('schema'); setInspectorOpen(true); } }}
+          title={inspectorOpen ? 'Hide inspector panel' : 'Show inspector panel'}
+          type="button"
+        >
+          {inspectorOpen ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
+        </button>
         {renderFocusedView() ?? (
           <>
             <div className="conversation-header">
