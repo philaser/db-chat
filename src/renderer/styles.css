@@ -1083,6 +1083,35 @@ button:disabled {
   font-weight: 500;
 }
 
+.sidebar-row-action-icon {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-row);
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  display: flex;
+  height: 22px;
+  justify-content: center;
+  opacity: 0;
+  padding: 0;
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
+  width: 22px;
+}
+
+.sidebar-action-row:hover .sidebar-row-action-icon,
+.sidebar-action-row.selected .sidebar-row-action-icon {
+  opacity: 1;
+}
+
+.sidebar-row-action-icon:hover {
+  background: var(--color-control-hover);
+  color: var(--color-text-primary);
+}
+
 .sidebar-action-row svg {
   color: var(--color-text-secondary);
   flex: 0 0 auto;
@@ -1594,7 +1623,16 @@ button:disabled {
 }
 
 .composer-select-item.active {
-  color: var(--color-accent);
+  background: var(--color-accent);
+  border-radius: var(--radius-row);
+  color: var(--color-on-accent);
+  margin: 0 4px;
+  padding: 0 8px;
+  width: calc(100% - 8px);
+}
+
+.composer-select-item.active:hover {
+  background: var(--color-accent);
 }
 
 .composer-select--safety[data-level="safe"] .composer-select-trigger {
@@ -1736,50 +1774,61 @@ button:disabled {
   flex: 0 0 auto;
 }
 
-/* Inspector Tabs */
+/* Inspector Tabs — macOS segmented control */
 
 .inspector-tabs {
-  border-bottom: 1px solid var(--color-separator);
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--color-separator);
+  border-radius: var(--radius-control);
   display: flex;
-  gap: 32px;
-  height: 42px;
-  margin: 22px 28px 0;
-  padding: 0;
-  position: relative;
+  gap: 1px;
+  height: 28px;
+  margin: 22px 28px 10px;
+  padding: 1px;
+  width: calc(100% - 56px);
 }
 
 .inspector-tab {
   align-items: center;
   background: transparent;
   border: none;
-  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-row);
   color: var(--color-text-secondary);
   cursor: pointer;
   display: inline-flex;
-  font-size: 13px;
+  flex: 1 1 0;
+  font-size: 12px;
   font-weight: 500;
   height: 100%;
-  line-height: 20px;
+  justify-content: center;
+  line-height: 14px;
   margin: 0;
   padding: 0;
   position: relative;
   transition:
-    color var(--motion-fast) var(--ease-standard),
-    border-color var(--motion-fast) var(--ease-standard);
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
 }
 
 .inspector-tab:hover {
+  background: var(--color-control-hover);
   color: var(--color-text-primary);
 }
 
 .inspector-tab.selected {
-  border-bottom-color: var(--color-accent);
-  color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
 }
 
 .inspector-tab:focus-visible {
-  color: var(--color-accent);
   outline: none;
+  box-shadow: 0 0 0 2px var(--color-focus-ring);
+}
+
+.inspector-tab.selected:hover {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
 }
 
 /* Inspector Body */

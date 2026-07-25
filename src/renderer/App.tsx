@@ -332,8 +332,8 @@ function loadInitialTheme(): ThemeMode {
   return stored && validThemeIds.has(stored) ? stored as ThemeMode : 'light';
 }
 
-function createInitialMessages(): ChatMessage[] {
-  return [nowMessage('assistant', initialAssistantMessage)];
+function createInitialMessages(connected = false): ChatMessage[] {
+  return connected ? [] : [nowMessage('assistant', initialAssistantMessage)];
 }
 
 function buildChatTitle(messages: ChatMessage[], connection: ConnectionConfig | null): string {
@@ -561,6 +561,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   const [connectingProjectId, setConnectingProjectId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
+  const [chatRenameValue, setChatRenameValue] = useState('');
   const [elasticsearchFormOpen, setElasticsearchFormOpen] = useState(false);
   const [elasticsearchHost, setElasticsearchHost] = useState('localhost');
   const [elasticsearchPort, setElasticsearchPort] = useState('9200');
@@ -996,7 +998,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
 
   function resetChat() {
     setActiveChatId(crypto.randomUUID());
-    setMessages(createInitialMessages());
+    setMessages(createInitialMessages(!connection));
     setPrompt('');
     setQuery('');
     setResult(null);
@@ -1275,6 +1277,27 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setRenamingId(null);
     await refreshHistories();
     updateStatus('Connection renamed');
+  }
+
+  function startChatRename(session: PersistedChatSession) {
+    setRenamingChatId(session.id);
+    setChatRenameValue(session.title);
+  }
+
+  async function commitChatRename(id: string) {
+    if (!api || !chatRenameValue.trim()) {
+      setRenamingChatId(null);
+      return;
+    }
+    const session = chatSessions.find((s) => s.id === id);
+    if (!session) {
+      setRenamingChatId(null);
+      return;
+    }
+    await api.saveChatSession({ ...session, title: chatRenameValue.trim() });
+    setRenamingChatId(null);
+    await refreshHistories();
+    updateStatus('Chat renamed');
   }
 
   function openDbForm(kind: 'mysql' | 'postgres' | 'mongodb') {
@@ -1624,13 +1647,17 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   }
 
   function chooseStarter(starterPrompt: string) {
+    const tempId = crypto.randomUUID();
+    setActiveChatId(tempId);
+    setMessages(createInitialMessages(true));
     setPrompt(starterPrompt);
+    setActiveView('workspace');
   }
 
   function chooseSchemaPrompt(starterPrompt: string) {
     const tempId = crypto.randomUUID();
     setActiveChatId(tempId);
-    setMessages(createInitialMessages());
+    setMessages(createInitialMessages(true));
     setPrompt(starterPrompt);
     setActiveView('workspace');
   }
@@ -2666,15 +2693,95 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                 .filter((session) => session.connection?.id === activeProject.id)
                 .slice(0, 6)
                 .map((session) => (
-                  <button
+                  <div
                     className={`sidebar-action-row ${activeChatId === session.id ? 'selected' : ''}`}
                     key={session.id}
-                    onClick={() => void openChatSession(session)}
-                    type="button"
                   >
-                    <MessageSquareText size={16} />
-                    <span className="sidebar-action-row-label">{session.title}</span>
-                  </button>
+                    {renamingChatId === session.id ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', width: '100%' }}>
+                        <input
+                          value={chatRenameValue}
+                          onChange={(e) => setChatRenameValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void commitChatRename(session.id);
+                            if (e.key === 'Escape') setRenamingChatId(null);
+                          }}
+                          onBlur={() => void commitChatRename(session.id)}
+                          autoFocus
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'var(--color-text-primary)',
+                            fontSize: '13px',
+                            lineHeight: '20px',
+                            outline: 'none',
+                            fontFamily: 'inherit',
+                            padding: 0
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => commitChatRename(session.id)}
+                          aria-label="Save rename"
+                          title="Save"
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'var(--color-accent)',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            padding: 0
+                          }}
+                        >
+                          <Check size={14} />
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void openChatSession(session)}
+                          style={{
+                            alignItems: 'center',
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'inherit',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            flex: 1,
+                            gap: '8px',
+                            minWidth: 0,
+                            padding: 0,
+                            font: 'inherit',
+                            textAlign: 'left'
+                          }}
+                        >
+                          <MessageSquareText size={16} />
+                          <span className="sidebar-action-row-label">{session.title}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="sidebar-row-action-icon"
+                          onClick={(e) => { e.stopPropagation(); startChatRename(session); }}
+                          aria-label="Rename chat"
+                          title="Rename"
+                        >
+                          <Pencil size={12} />
+                        </button>
+                        <button
+                          type="button"
+                          className="sidebar-row-action-icon"
+                          onClick={(e) => { e.stopPropagation(); void deleteChatSession(session.id); }}
+                          aria-label="Delete chat"
+                          title="Delete"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </>
+                    )}
+                  </div>
                 ))}
               {chatSessions.filter((session) => session.connection?.id === activeProject.id).length > 6 && (
                 <button
@@ -2746,7 +2853,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                   </div>
                 </section>
               )}
-              {messages.length > 1 && (
+              {messages.length > 0 && !hasOnlyWelcomeMessage && (
                 <div className="transcript-grid">
                   {messages.map((message) => {
                     const completedActivity = message.role === 'assistant' ? messageActivities[message.id] : undefined;
