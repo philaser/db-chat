@@ -34,6 +34,7 @@ import {
 import {
   Component,
   FormEvent,
+  memo,
   useCallback,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -47,6 +48,39 @@ import {
 } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { splitContent, type ContentBlock } from './components/ContentSplitter.js';
+import { BlockRenderer } from './components/BlockRenderer.js';
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  ComposedChart,
+  Funnel,
+  FunnelChart,
+  Legend,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  PolarAngleAxis,
+  PolarGrid,
+  PolarRadiusAxis,
+  Radar,
+  RadarChart,
+  RadialBar,
+  RadialBarChart,
+  ResponsiveContainer,
+  Scatter,
+  ScatterChart,
+  SunburstChart,
+  Tooltip as RechartsTooltip,
+  Treemap,
+  XAxis,
+  YAxis
+} from 'recharts';
 import {
   siElasticsearch,
   siMongodb,
@@ -471,6 +505,284 @@ function formatTimestamp(iso: string): string {
     minute: '2-digit'
   }).format(new Date(iso));
 }
+
+function ChartBlock({ spec: specString }: { spec: string }) {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(specString);
+  } catch {
+    return <pre style={{ color: 'var(--color-danger)', fontSize: '12px', padding: '8px', background: 'var(--color-control)', borderRadius: '8px' }}>Invalid chart specification</pre>;
+  }
+
+  const chartType = parsed.chartType as string | undefined;
+  const title = parsed.title as string | undefined;
+
+  // Accept both old format (labels/values) and new format (columns/rows)
+  let columns = parsed.columns as string[] | undefined;
+  let rows = parsed.rows as Record<string, unknown>[] | undefined;
+  const labels = parsed.labels as string[] | undefined;
+  const values = parsed.values as number[] | undefined;
+
+  if (!columns && labels && values) {
+    columns = ['name', 'value'];
+    rows = labels.map((label, i) => ({ name: label, value: values[i] }));
+  }
+
+  const nameKey = (parsed.nameKey ?? columns?.[0]) as string;
+  const valueKeys = parsed.valueKeys as string[] | undefined;
+  const series = parsed.series as Array<{ key: string; type?: string; name?: string }> | undefined;
+  const options = parsed.options as Record<string, unknown> | undefined;
+  const colors = parsed.colors as string[] | undefined;
+
+  const missing: string[] = [];
+  if (!chartType) missing.push('chartType');
+  if (!columns) missing.push('columns');
+  if (!rows) missing.push('rows');
+  if (!nameKey) missing.push('nameKey');
+  if (missing.length > 0) {
+    return <pre style={{ color: 'var(--color-danger)', fontSize: '12px', padding: '8px', background: 'var(--color-control)', borderRadius: '8px' }}>Invalid chart data: missing {missing.join(', ')}</pre>;
+  }
+
+  const keys = valueKeys ?? (columns as string[]).filter((c) => c !== nameKey);
+  const palette = colors ?? ['var(--color-accent, #007aff)', 'var(--color-warning, #ff9f0a)', 'var(--color-success, #34c759)', 'var(--color-danger, #ff3b30)'];
+
+  const showLegend = options?.showLegend !== false && keys.length > 1;
+  const showGrid = options?.showGrid !== false;
+  const stacked = options?.stacked === true;
+  const layout = (options?.layout as string) ?? 'vertical';
+  const isDonut = options?.donut === true;
+  const gridColor = 'var(--color-separator, rgba(60,60,67,0.12))';
+  const textColor = 'var(--color-text-secondary, #6e6e73)';
+  const bgColor = 'var(--color-control, rgba(250,250,252,0.92))';
+  const sepColor = 'var(--color-separator, rgba(60,60,67,0.12))';
+
+  function renderCartesianChart(ChartComponent: any, seriesRenderer: (dataKey: string, index: number) => ReactNode, extraProps?: Record<string, unknown>) {
+    const horizontal = layout === 'horizontal';
+    return (
+      <ChartComponent data={rows} margin={{ top: 5, right: 10, left: 0, bottom: 5 }} {...extraProps}>
+        {showGrid && <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />}
+        {!horizontal && <XAxis dataKey={nameKey} tick={{ fontSize: 11, fill: textColor }} />}
+        {horizontal && <YAxis dataKey={nameKey} type="category" tick={{ fontSize: 11, fill: textColor }} />}
+        {!horizontal && <YAxis tick={{ fontSize: 11, fill: textColor }} />}
+        {horizontal && <XAxis type="number" tick={{ fontSize: 11, fill: textColor }} />}
+        <RechartsTooltip />
+        {showLegend && <Legend wrapperStyle={{ fontSize: '11px' }} />}
+        {keys.map((key, i) => seriesRenderer(key, i))}
+      </ChartComponent>
+    );
+  }
+
+  function renderChart(): ReactNode {
+    if (!rows || !columns || !nameKey) return null;
+
+    switch (chartType) {
+      case 'bar': {
+        return renderCartesianChart(BarChart, (key, i) => (
+          <Bar
+            key={key}
+            dataKey={key}
+            fill={palette[i % palette.length]}
+            radius={[4, 4, 0, 0]}
+            stackId={stacked ? 'stack' : undefined}
+          />
+        ), { layout: layout === 'horizontal' ? 'vertical' : undefined, barCategoryGap: '20%' });
+      }
+
+      case 'line': {
+        return renderCartesianChart(LineChart, (key, i) => (
+          <Line
+            key={key}
+            type="monotone"
+            dataKey={key}
+            stroke={palette[i % palette.length]}
+            strokeWidth={2}
+            dot={{ fill: palette[i % palette.length], r: 3 }}
+            activeDot={{ r: 5 }}
+          />
+        ));
+      }
+
+      case 'area': {
+        return renderCartesianChart(AreaChart, (key, i) => (
+          <Area
+            key={key}
+            type="monotone"
+            dataKey={key}
+            fill={palette[i % palette.length]}
+            stroke={palette[i % palette.length]}
+            fillOpacity={0.15 + (keys.length > 1 ? 0.1 * (keys.length - i) : 0.2)}
+            stackId={stacked ? 'stack' : undefined}
+          />
+        ));
+      }
+
+      case 'composed': {
+        return renderCartesianChart(ComposedChart, (key, i) => {
+          const s = series?.find((se) => se.key === key);
+          const st = s?.type ?? 'bar';
+          const name = s?.name ?? key;
+          if (st === 'line') {
+            return <Line key={key} type="monotone" dataKey={key} stroke={palette[i % palette.length]} strokeWidth={2} name={name} />;
+          }
+          if (st === 'area') {
+            return <Area key={key} type="monotone" dataKey={key} fill={palette[i % palette.length]} stroke={palette[i % palette.length]} fillOpacity={0.2} name={name} />;
+          }
+          return <Bar key={key} dataKey={key} fill={palette[i % palette.length]} radius={[3, 3, 0, 0]} name={name} />;
+        });
+      }
+
+      case 'scatter': {
+        const xKey = keys[0];
+        const yKeys_ = keys.length >= 2 ? keys.slice(1) : [keys[0]];
+        return (
+          <ScatterChart margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+            {showGrid && <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />}
+            <XAxis dataKey={xKey} name={xKey} tick={{ fontSize: 11, fill: textColor }} />
+            <YAxis tick={{ fontSize: 11, fill: textColor }} />
+            <RechartsTooltip cursor={{ strokeDasharray: '3 3' }} />
+            {showLegend && <Legend wrapperStyle={{ fontSize: '11px' }} />}
+            {yKeys_.map((key, i) => (
+              <Scatter key={key} data={rows} dataKey={key} fill={palette[i % palette.length]} name={key} />
+            ))}
+          </ScatterChart>
+        );
+      }
+
+      case 'pie': {
+        return (
+          <PieChart>
+            <Pie
+              data={rows}
+              dataKey={keys[0]}
+              nameKey={nameKey}
+              cx="50%"
+              cy="50%"
+              innerRadius={isDonut ? 60 : 0}
+              outerRadius={100}
+              label={({ name, percent }: { name?: string; percent?: number }) => `${name ?? ''} ${percent != null ? (percent * 100).toFixed(0) : ''}%`}
+              labelLine
+            >
+              {rows.map((_row: unknown, i: number) => (
+                <Cell key={i} fill={palette[i % palette.length]} />
+              ))}
+            </Pie>
+            <RechartsTooltip />
+            {showLegend && <Legend wrapperStyle={{ fontSize: '11px' }} />}
+          </PieChart>
+        );
+      }
+
+      case 'radialBar': {
+        return (
+          <RadialBarChart
+            data={rows}
+            innerRadius={isDonut ? 30 : 0}
+            outerRadius={120}
+            startAngle={180}
+            endAngle={0}
+          >
+            <RadialBar
+              dataKey={keys[0]}
+              label={{ fill: textColor, fontSize: 11, position: 'insideStart' }}
+              background={{ fill: gridColor }}
+            >
+              {rows.map((_, i) => (
+                <Cell key={i} fill={palette[i % palette.length]} />
+              ))}
+            </RadialBar>
+            <Legend wrapperStyle={{ fontSize: '11px' }} iconSize={10} />
+            <RechartsTooltip />
+          </RadialBarChart>
+        );
+      }
+
+      case 'radar': {
+        return (
+          <RadarChart data={rows} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
+            <PolarGrid stroke={gridColor} />
+            <PolarAngleAxis dataKey={nameKey} tick={{ fontSize: 11, fill: textColor }} />
+            <PolarRadiusAxis tick={{ fontSize: 10, fill: textColor }} />
+            <RechartsTooltip />
+            {showLegend && <Legend wrapperStyle={{ fontSize: '11px' }} />}
+            {keys.map((key, i) => (
+              <Radar
+                key={key}
+                dataKey={key}
+                stroke={palette[i % palette.length]}
+                fill={palette[i % palette.length]}
+                fillOpacity={0.15}
+              />
+            ))}
+          </RadarChart>
+        );
+      }
+
+      case 'funnel': {
+        return (
+          <FunnelChart margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
+            <RechartsTooltip />
+            <Funnel
+              dataKey={keys[0]}
+              nameKey={nameKey}
+              data={rows}
+              isAnimationActive
+            >
+              {rows.map((_row: unknown, i: number) => (
+                <Cell key={i} fill={palette[i % palette.length]} />
+              ))}
+            </Funnel>
+          </FunnelChart>
+        );
+      }
+
+      case 'treemap': {
+        return (
+          <Treemap
+            data={rows}
+            dataKey={keys[0]}
+            nameKey={nameKey}
+            aspectRatio={4 / 3}
+            stroke={sepColor}
+            fill={palette[0]}
+          />
+        );
+      }
+
+      case 'sunburst': {
+        return (
+          <SunburstChart
+            data={rows as never}
+            dataKey={keys[0]}
+            nameKey={nameKey}
+          />
+        );
+      }
+
+      default:
+        return <pre style={{ color: 'var(--color-danger)', fontSize: '12px', padding: '8px', background: bgColor, borderRadius: '8px' }}>Unsupported chart type: {chartType}</pre>;
+    }
+  }
+
+  return (
+    <div style={{ margin: '12px 0', padding: '12px', background: bgColor, borderRadius: '8px' }}>
+      {title && <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px', color: 'var(--color-text-primary)' }}>{title}</div>}
+      <ResponsiveContainer width="100%" height={Math.min(320, Math.max(180, (rows as Record<string, unknown>[]).length * 28 + 60))}>
+        {renderChart()}
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+const MemoChartBlock = memo(ChartBlock);
+
+const markdownComponents = {
+  code({ className, children, ...props }: { className?: string; children?: ReactNode }) {
+    if (className === 'language-chart') {
+      return <MemoChartBlock spec={String(children)} />;
+    }
+    return <code className={className} {...props}>{children}</code>;
+  }
+} as any;
 
 class ErrorBoundary extends Component<
   { children: ReactNode },
@@ -2864,7 +3176,34 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                           {message.role === 'assistant' ? 'DB Chat' : 'You'}
                         </div>
                         <div className="transcript-content">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                          {(() => {
+                            const segments = splitContent(message.content);
+                            return segments.map((seg, segIndex) => {
+                              if (seg.type === 'blocks' && seg.blocks) {
+                                return <BlockRenderer key={segIndex} blocks={seg.blocks} />;
+                              }
+                              if (seg.type === 'markdown') {
+                                const chartMatch = seg.content.match(/```chart\s*\n([\s\S]*?)```/);
+                                if (chartMatch) {
+                                  try {
+                                    const chartSpec = JSON.parse(chartMatch[1]);
+                                    return <ChartBlock key={segIndex} spec={JSON.stringify(chartSpec)} />;
+                                  } catch {
+                                    // fall through
+                                  }
+                                }
+                              }
+                              return (
+                                <ReactMarkdown
+                                  key={segIndex}
+                                  remarkPlugins={[remarkGfm]}
+                                  components={markdownComponents}
+                                >
+                                  {seg.content}
+                                </ReactMarkdown>
+                              );
+                            });
+                          })()}
                           {message.role === 'assistant' && result && (
                             <button
                               className="result-link"

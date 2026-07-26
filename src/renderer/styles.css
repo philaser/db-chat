@@ -1328,14 +1328,35 @@ button:disabled {
 .transcript-content table {
   border-collapse: collapse;
   display: block;
+  font-size: 12px;
+  line-height: 18px;
   max-width: 100%;
   overflow: auto;
+  width: 100%;
 }
 
-.transcript-content th,
+.transcript-content th {
+  background: var(--color-control);
+  border-bottom: 1px solid var(--color-separator);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  padding: 6px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+
 .transcript-content td {
-  max-width: none;
-  white-space: normal;
+  border-bottom: 1px solid var(--color-separator);
+  max-width: 280px;
+  overflow: hidden;
+  padding: 6px 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transcript-content tbody tr:hover td {
+  background: var(--color-control-hover);
 }
 
 .transcript-time {
@@ -3551,6 +3572,147 @@ button:disabled {
   font-size: 11px;
   line-height: 16px;
   padding: 8px 10px;
+}
+
+/* ── Content Blocks ─────────────────────────────────────────── */
+
+.content-blocks {
+  width: 100%;
+}
+
+.content-block-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 18px;
+  min-width: 100%;
+}
+
+.content-block-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.content-block-table th {
+  background: var(--color-control);
+  border-bottom: 1px solid var(--color-separator);
+  font-size: 11px;
+  font-weight: 600;
+  height: 34px;
+  line-height: 16px;
+  padding: 0 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.content-block-table th:first-child {
+  padding-left: 14px;
+}
+
+.content-block-table th:last-child {
+  padding-right: 14px;
+}
+
+.content-block-table th.numeric {
+  text-align: right;
+}
+
+.content-block-table td {
+  border-bottom: 1px solid var(--color-separator);
+  height: 36px;
+  line-height: 18px;
+  max-width: 240px;
+  overflow: hidden;
+  padding: 0 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.content-block-table td:first-child {
+  padding-left: 14px;
+}
+
+.content-block-table td:last-child {
+  padding-right: 14px;
+}
+
+.content-block-table td.numeric {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.content-block-table td.null {
+  color: var(--color-text-tertiary);
+}
+
+.content-block-table tbody tr:hover td {
+  background: var(--color-control-hover);
+}
+
+/* ── Code Block ──────────────────────────────────────────────── */
+
+.code-block-wrap {
+  border: 1px solid var(--color-separator);
+  border-radius: var(--radius-control);
+  margin: 8px 0;
+  overflow: hidden;
+}
+
+.code-block-header {
+  align-items: center;
+  background: var(--color-control);
+  border-bottom: 1px solid var(--color-separator);
+  display: flex;
+  height: 28px;
+  justify-content: space-between;
+  padding: 0 10px;
+}
+
+.code-block-lang {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.code-block-copy {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-row);
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  display: flex;
+  height: 20px;
+  justify-content: center;
+  padding: 0;
+  transition: color var(--motion-fast) var(--ease-standard);
+  width: 20px;
+}
+
+.code-block-copy:hover {
+  color: var(--color-text-primary);
+}
+
+.code-block-body {
+  background: var(--code-bg);
+  color: var(--code-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 18px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
+}
+
+.code-block-body code {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  padding: 0;
 }
 
 /* Reduced Motion */
