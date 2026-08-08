@@ -3715,6 +3715,21 @@ button:disabled {
   padding: 0;
 }
 
+/* ── Query Entry ────────────────────────────────────────────── */
+
+.query-entry:first-child {
+  border-top: none;
+}
+
+.query-entry-header {
+  border-radius: var(--radius-row);
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.query-entry-header:hover {
+  background: var(--color-control-hover);
+}
+
 /* Reduced Motion */
 
 @media (prefers-reduced-motion: reduce) {

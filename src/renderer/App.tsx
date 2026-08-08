@@ -110,7 +110,7 @@ import type {
 const fallbackApi = typeof window !== 'undefined' ? window.dbchat : undefined;
 const themeStorageKey = 'dbchat:theme';
 
-type InspectorTab = 'results' | 'query' | 'schema' | 'audit';
+type InspectorTab = 'schema' | 'audit';
 type AppView = 'workspace' | 'history' | 'settings';
 type SidebarMode = 'projects' | 'project';
 type ConnectionLogoKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres' | 'mongodb';
@@ -905,7 +905,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     queryPreview?: string;
     risk: 'none' | 'low' | 'medium' | 'high';
   } | null>(null);
-  const [auditEntries, setAuditEntries] = useState<Array<{ id: string; timestamp: string; toolName: string; permissionDecision: string; queryPreview?: string; risk?: string }>>([]);
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
+  const [expandedAuditId, setExpandedAuditId] = useState<string | null>(null);
   const [effortLevel, setEffortLevel] = useState<EffortLevel>('medium');
   const [safetyLevel, setSafetyLevelState] = useState<SafetyLevel>('standard');
   const [pendingSafetyConfirm, setPendingSafetyConfirm] = useState(false);
@@ -1501,7 +1502,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setActivityOpen(false);
     setMessageActivities({});
     setMessageActivityOpen({});
-    setActiveInspector(session.result ? 'results' : session.query ? 'query' : 'schema');
+    setActiveInspector('schema');
     setInspectorOpen(Boolean(session.result || session.query));
     setActiveView('workspace');
     setShowFlyoutChats(false);
@@ -1860,7 +1861,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     try {
       const nextResult = await api.executeQuery(query);
       setResult(nextResult);
-      setActiveInspector('results');
       setInspectorOpen(true);
       updateStatus(`Returned ${nextResult.rowCount} rows in ${nextResult.elapsedMs} ms`);
       await persistChatSession(messages, { query, result: nextResult });
@@ -2054,68 +2054,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   // ----- Render Helpers -----
 
   function renderInspectorContent() {
-    if (activeInspector === 'results') {
-      return (
-        <div className="inspector-body" aria-label="Data results">
-          {result ? (
-            <>
-              <div className="result-metadata">
-                <span>{result.rowCount} {result.rowCount === 1 ? 'row' : 'rows'} · {result.columns.length} {result.columns.length === 1 ? 'column' : 'columns'}</span>
-                {result.elapsedMs > 0 && <span> · {result.elapsedMs} ms</span>}
-              </div>
-              <div className="result-table-wrap">
-                <table className="result-table">
-                  <thead>
-                    <tr>
-                      {result.columns.map((column) => {
-                        const isNumeric = result.rows.some((row) => typeof row[column] === 'number');
-                        return <th key={column} className={isNumeric ? 'numeric' : ''} scope="col">{column}</th>;
-                      })}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.rows.map((row, index) => (
-                      <tr key={index}>
-                        {result.columns.map((column) => {
-                          const val = row[column];
-                          const isNumeric = typeof val === 'number';
-                          const isNull = val === null || val === undefined;
-                          return (
-                            <td key={column} className={`${isNumeric ? 'numeric' : ''} ${isNull ? 'null' : ''}`}>
-                              {isNull ? '\u2014' : String(val)}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          ) : (
-            <div className="schema-empty">
-              <Table2 size={20} />
-              <span>Ask a data question to see rows here.</span>
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    if (activeInspector === 'query') {
-      return (
-        <div className="inspector-body query-view" aria-label="Query editor">
-          <textarea
-            className="query-editor"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={connection?.kind === 'elasticsearch' || connection?.kind === 'mongodb' ? 'Generated JSON will appear here.' : 'Generated SQL will appear here.'}
-            spellCheck={false}
-          />
-        </div>
-      );
-    }
-
     if (activeInspector === 'schema') {
       return (
         <div className="inspector-body schema-view" aria-label="Schema" onScroll={handleSchemaScroll} ref={schemaPanelRef}>
@@ -2240,37 +2178,85 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     }
 
     if (activeInspector === 'audit') {
-      const entries = auditEntries;
+      const entries = auditEntries.filter((e) => e.toolName === 'run_database_query');
       return (
-        <div className="inspector-body" aria-label="Audit log" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', padding: '16px 28px' }}>
+        <div className="inspector-body" aria-label="Queries" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', padding: '16px 28px' }}>
           {entries.length === 0 ? (
             <div className="schema-empty">
-              <span>No audit entries yet. Tool calls will be logged here.</span>
+              <span>No queries yet. Agent database queries will be logged here.</span>
             </div>
           ) : (
-            entries.map((entry) => (
-              <div key={entry.id} style={{
-                borderBottom: '1px solid var(--color-separator)',
-                padding: '10px 0',
-                display: 'grid',
-                gap: '4px'
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                  <span style={{ fontSize: '12px', fontWeight: 500, color: 'var(--color-text-primary)' }}>{entry.toolName}</span>
-                  <time style={{ color: 'var(--color-text-tertiary)', fontSize: '11px' }}>{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+            entries.map((entry) => {
+              const isExpanded = expandedAuditId === entry.id;
+              const fullQuery = String((entry.toolInput as Record<string, unknown>)?.query ?? entry.queryPreview ?? '');
+              return (
+                <div key={entry.id} className="query-entry" style={{ borderBottom: '1px solid var(--color-separator)' }}>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedAuditId(isExpanded ? null : entry.id)}
+                    className="query-entry-header"
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      padding: '10px 0',
+                      width: '100%',
+                      color: 'inherit',
+                      font: 'inherit',
+                      textAlign: 'left'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
+                      <span style={{
+                        fontSize: '11px',
+                        color: 'var(--color-text-tertiary)',
+                        transition: 'transform var(--motion-fast) var(--ease-standard)',
+                        transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                        flexShrink: 0
+                      }}>&#x25B6;</span>
+                      <code style={{
+                        fontSize: '12px',
+                        color: 'var(--color-text-primary)',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
+                      }}>{entry.queryPreview ?? fullQuery}</code>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0, marginLeft: '8px' }}>
+                      {entry.elapsedMs != null && (
+                        <span style={{ color: 'var(--color-text-tertiary)', fontSize: '11px', fontVariantNumeric: 'tabular-nums' }}>{entry.elapsedMs}ms</span>
+                      )}
+                      <time style={{ color: 'var(--color-text-tertiary)', fontSize: '11px' }}>{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+                    </div>
+                  </button>
+                  {isExpanded && (
+                    <div style={{ padding: '0 0 10px 20px' }}>
+                      <pre style={{
+                        background: 'var(--code-bg)',
+                        color: 'var(--code-text)',
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: '12px',
+                        lineHeight: '18px',
+                        padding: '10px',
+                        borderRadius: 'var(--radius-row)',
+                        overflow: 'auto',
+                        margin: 0,
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word'
+                      }}>{fullQuery}</pre>
+                      {Boolean((entry.toolInput as Record<string, unknown>)?.purpose) && (
+                        <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--color-text-tertiary)' }}>
+                          Purpose: {String((entry.toolInput as Record<string, unknown>).purpose)}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-                {entry.queryPreview && (
-                  <code style={{ fontSize: '11px', background: 'var(--code-bg)', color: 'var(--code-text)', padding: '4px 8px', borderRadius: 'var(--radius-row)', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{entry.queryPreview}</code>
-                )}
-                <span style={{
-                  fontSize: '11px',
-                  color: entry.permissionDecision === 'allow' ? 'var(--color-success)' : entry.permissionDecision === 'denied' ? 'var(--color-danger)' : 'var(--color-warning)'
-                }}>
-                  {entry.permissionDecision}
-                  {entry.risk ? ` · ${entry.risk}` : ''}
-                </span>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       );
@@ -2280,51 +2266,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   function renderInspector() {
     const inspectorFooter = (
       <div className="inspector-footer">
-        {activeInspector === 'results' ? (
-          <>
-            <button
-              className="inspector-footer-action"
-              disabled={!result}
-              onClick={() => void copyResult()}
-              type="button"
-              aria-label={copiedFeedback ? 'Copied' : 'Copy'}
-            >
-              <Copy size={14} />
-              {copiedFeedback ? 'Copied' : 'Copy'}
-            </button>
-            <button
-              className="inspector-footer-action"
-              disabled={!result || exportingCsv}
-              onClick={() => void exportCsv()}
-              type="button"
-              aria-label={exportingCsv ? 'Exporting…' : 'Export CSV'}
-            >
-              <Download size={14} />
-              {exportingCsv ? 'Exporting\u2026' : 'Export CSV'}
-            </button>
-          </>
-        ) : activeInspector === 'query' ? (
-          <>
-            <button
-              className="inspector-footer-action"
-              disabled={!query.trim()}
-              onClick={() => void navigator.clipboard.writeText(query)}
-              type="button"
-            >
-              <Copy size={14} />
-              Copy Query
-            </button>
-            <button
-              className="inspector-footer-action"
-              disabled={busy || !query.trim()}
-              onClick={() => void runQuery()}
-              type="button"
-            >
-              <Play size={14} />
-              Run Query
-            </button>
-          </>
-        ) : null}
+        {null}
       </div>
     );
 
@@ -2335,7 +2277,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         <div className="inspector-header">
           <div className="inspector-header-top">
             <h2 className="inspector-title">
-              {activeInspector === 'results' ? 'Data' : activeInspector === 'query' ? 'Query' : activeInspector === 'audit' ? 'Audit' : 'Schema'}
+              {activeInspector === 'audit' ? 'Queries' : 'Schema'}
             </h2>
           </div>
           {connection && (
@@ -2346,26 +2288,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           )}
         </div>
         <div className="inspector-tabs" role="tablist" aria-label="Inspector views">
-          <button
-            className={`inspector-tab ${activeInspector === 'results' ? 'selected' : ''}`}
-            onClick={() => setActiveInspector('results')}
-            role="tab"
-            aria-selected={activeInspector === 'results'}
-            aria-controls="inspector-results-panel"
-            type="button"
-          >
-            Results
-          </button>
-          <button
-            className={`inspector-tab ${activeInspector === 'query' ? 'selected' : ''}`}
-            onClick={() => setActiveInspector('query')}
-            role="tab"
-            aria-selected={activeInspector === 'query'}
-            aria-controls="inspector-query-panel"
-            type="button"
-          >
-            Query
-          </button>
           <button
             className={`inspector-tab ${activeInspector === 'schema' ? 'selected' : ''}`}
             onClick={() => setActiveInspector('schema')}
@@ -2387,7 +2309,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             aria-controls="inspector-audit-panel"
             type="button"
           >
-            Audit
+            Queries
           </button>
         </div>
         <div
@@ -3204,15 +3126,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                               );
                             });
                           })()}
-                          {message.role === 'assistant' && result && (
-                            <button
-                              className="result-link"
-                              onClick={() => openOrFocusInspector('results')}
-                              type="button"
-                            >
-                              View {result.rowCount} {result.rowCount === 1 ? 'row' : 'rows'}
-                            </button>
-                          )}
                           {shouldShowCompletedActivity && (
                             <div className="inline-activity">
                               <button

@@ -140,10 +140,11 @@ export async function runAgentLoop(
         const permission = config.permissionManager.check(toolName, input);
 
         if (permission === 'deny') {
+          const currentLevel = config.permissionManager.getSafetyLevel();
           const denyResult: AgentToolResult = {
             ok: false,
-            summary: `Tool "${toolName}" is blocked by safety settings`,
-            error: `Permission denied for "${toolName}" at safety level`
+            summary: `Blocked by safety level "${currentLevel}". The user can switch to a higher safety level (elevated or unrestricted) in the composer footer to allow this operation.`,
+            error: `Permission denied at safety level "${currentLevel}". Ask the user to switch to elevated or unrestricted mode if they want to proceed.`
           };
           const toolMessage: ModelChatMessage = {
             role: 'tool',
@@ -334,6 +335,23 @@ async function executeToolAndRecord(
 
   const result = await toolRegistry.execute(toolName, input, toolContext);
   const elapsedMs = Math.round(performance.now() - startTime);
+
+  // Refresh schema after successful DDL so subsequent tool calls see the updated structure
+  if (toolName === 'run_database_query' && result.ok) {
+    const query = (input.query as string) ?? '';
+    const isDDL = /^\s*(CREATE|DROP|ALTER|TRUNCATE|RENAME|GRANT|REVOKE)\s/i.test(query.trim());
+    if (isDDL && toolContext.connector) {
+      try {
+        const freshSchema = await toolContext.controller.refreshSchema();
+        if (freshSchema) {
+          toolContext.schema = freshSchema;
+          activity.status('Schema refreshed after DDL operation');
+        }
+      } catch {
+        // Non-critical — the DDL itself succeeded
+      }
+    }
+  }
 
   const toolMessage: ModelChatMessage = {
     role: 'tool',
