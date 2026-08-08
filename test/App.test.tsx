@@ -646,14 +646,18 @@ describe('App', () => {
     });
   });
 
-  it('shows SQL placeholder in Query tab', async () => {
+  it('switches between inspector tabs', async () => {
     const api = makeApi();
     render(<App api={api} />);
 
     fireEvent.click(screen.getByLabelText('Expand inspector sidebar'));
-    const queryTab = within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Query' });
-    fireEvent.click(queryTab);
-    expect(screen.getByPlaceholderText('Generated SQL will appear here.')).toBeInTheDocument();
+    const schemaTab = within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Schema' });
+    fireEvent.click(schemaTab);
+    expect(schemaTab).toHaveAttribute('aria-selected', 'true');
+
+    const auditTab = within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Queries' });
+    fireEvent.click(auditTab);
+    expect(auditTab).toHaveAttribute('aria-selected', 'true');
   });
 
   it('opens db form for password entry when reconnecting a MySQL history without saved password', async () => {
@@ -711,15 +715,14 @@ describe('App', () => {
     expect(screen.queryByLabelText('MySQL connection')).not.toBeInTheDocument();
   });
 
-  it('footer actions are disabled without results', async () => {
+  it('opens the queries tab', async () => {
     const api = makeApi();
     render(<App api={api} />);
 
     fireEvent.click(screen.getByLabelText('Expand inspector sidebar'));
-    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Results' }));
+    fireEvent.click(within(screen.getByLabelText('Inspector')).getByRole('tab', { name: 'Queries' }));
 
-    expect(screen.getByLabelText('Copy')).toBeDisabled();
-    expect(screen.getByLabelText('Export CSV')).toBeDisabled();
+    expect(api.getAuditLog).toHaveBeenCalled();
   });
 
   it('composer sends on Enter and inserts newline on Shift+Enter', () => {

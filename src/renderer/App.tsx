@@ -34,6 +34,7 @@ import {
 import {
   Component,
   FormEvent,
+  memo,
   useCallback,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -47,6 +48,39 @@ import {
 } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { splitContent, type ContentBlock } from './components/ContentSplitter.js';
+import { BlockRenderer } from './components/BlockRenderer.js';
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  ComposedChart,
+  Funnel,
+  FunnelChart,
+  Legend,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  PolarAngleAxis,
+  PolarGrid,
+  PolarRadiusAxis,
+  Radar,
+  RadarChart,
+  RadialBar,
+  RadialBarChart,
+  ResponsiveContainer,
+  Scatter,
+  ScatterChart,
+  SunburstChart,
+  Tooltip as RechartsTooltip,
+  Treemap,
+  XAxis,
+  YAxis
+} from 'recharts';
 import {
   siElasticsearch,
   siMongodb,
@@ -76,7 +110,7 @@ import type {
 const fallbackApi = typeof window !== 'undefined' ? window.dbchat : undefined;
 const themeStorageKey = 'dbchat:theme';
 
-type InspectorTab = 'results' | 'query' | 'schema' | 'audit';
+type InspectorTab = 'schema' | 'audit';
 type AppView = 'workspace' | 'history' | 'settings';
 type SidebarMode = 'projects' | 'project';
 type ConnectionLogoKind = 'sqlite' | 'elasticsearch' | 'mysql' | 'postgres' | 'mongodb';
@@ -472,6 +506,284 @@ function formatTimestamp(iso: string): string {
   }).format(new Date(iso));
 }
 
+function ChartBlock({ spec: specString }: { spec: string }) {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(specString);
+  } catch {
+    return <pre style={{ color: 'var(--color-danger)', fontSize: '12px', padding: '8px', background: 'var(--color-control)', borderRadius: '8px' }}>Invalid chart specification</pre>;
+  }
+
+  const chartType = parsed.chartType as string | undefined;
+  const title = parsed.title as string | undefined;
+
+  // Accept both old format (labels/values) and new format (columns/rows)
+  let columns = parsed.columns as string[] | undefined;
+  let rows = parsed.rows as Record<string, unknown>[] | undefined;
+  const labels = parsed.labels as string[] | undefined;
+  const values = parsed.values as number[] | undefined;
+
+  if (!columns && labels && values) {
+    columns = ['name', 'value'];
+    rows = labels.map((label, i) => ({ name: label, value: values[i] }));
+  }
+
+  const nameKey = (parsed.nameKey ?? columns?.[0]) as string;
+  const valueKeys = parsed.valueKeys as string[] | undefined;
+  const series = parsed.series as Array<{ key: string; type?: string; name?: string }> | undefined;
+  const options = parsed.options as Record<string, unknown> | undefined;
+  const colors = parsed.colors as string[] | undefined;
+
+  const missing: string[] = [];
+  if (!chartType) missing.push('chartType');
+  if (!columns) missing.push('columns');
+  if (!rows) missing.push('rows');
+  if (!nameKey) missing.push('nameKey');
+  if (missing.length > 0) {
+    return <pre style={{ color: 'var(--color-danger)', fontSize: '12px', padding: '8px', background: 'var(--color-control)', borderRadius: '8px' }}>Invalid chart data: missing {missing.join(', ')}</pre>;
+  }
+
+  const keys = valueKeys ?? (columns as string[]).filter((c) => c !== nameKey);
+  const palette = colors ?? ['var(--color-accent, #007aff)', 'var(--color-warning, #ff9f0a)', 'var(--color-success, #34c759)', 'var(--color-danger, #ff3b30)'];
+
+  const showLegend = options?.showLegend !== false && keys.length > 1;
+  const showGrid = options?.showGrid !== false;
+  const stacked = options?.stacked === true;
+  const layout = (options?.layout as string) ?? 'vertical';
+  const isDonut = options?.donut === true;
+  const gridColor = 'var(--color-separator, rgba(60,60,67,0.12))';
+  const textColor = 'var(--color-text-secondary, #6e6e73)';
+  const bgColor = 'var(--color-control, rgba(250,250,252,0.92))';
+  const sepColor = 'var(--color-separator, rgba(60,60,67,0.12))';
+
+  function renderCartesianChart(ChartComponent: any, seriesRenderer: (dataKey: string, index: number) => ReactNode, extraProps?: Record<string, unknown>) {
+    const horizontal = layout === 'horizontal';
+    return (
+      <ChartComponent data={rows} margin={{ top: 5, right: 10, left: 0, bottom: 5 }} {...extraProps}>
+        {showGrid && <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />}
+        {!horizontal && <XAxis dataKey={nameKey} tick={{ fontSize: 11, fill: textColor }} />}
+        {horizontal && <YAxis dataKey={nameKey} type="category" tick={{ fontSize: 11, fill: textColor }} />}
+        {!horizontal && <YAxis tick={{ fontSize: 11, fill: textColor }} />}
+        {horizontal && <XAxis type="number" tick={{ fontSize: 11, fill: textColor }} />}
+        <RechartsTooltip />
+        {showLegend && <Legend wrapperStyle={{ fontSize: '11px' }} />}
+        {keys.map((key, i) => seriesRenderer(key, i))}
+      </ChartComponent>
+    );
+  }
+
+  function renderChart(): ReactNode {
+    if (!rows || !columns || !nameKey) return null;
+
+    switch (chartType) {
+      case 'bar': {
+        return renderCartesianChart(BarChart, (key, i) => (
+          <Bar
+            key={key}
+            dataKey={key}
+            fill={palette[i % palette.length]}
+            radius={[4, 4, 0, 0]}
+            stackId={stacked ? 'stack' : undefined}
+          />
+        ), { layout: layout === 'horizontal' ? 'vertical' : undefined, barCategoryGap: '20%' });
+      }
+
+      case 'line': {
+        return renderCartesianChart(LineChart, (key, i) => (
+          <Line
+            key={key}
+            type="monotone"
+            dataKey={key}
+            stroke={palette[i % palette.length]}
+            strokeWidth={2}
+            dot={{ fill: palette[i % palette.length], r: 3 }}
+            activeDot={{ r: 5 }}
+          />
+        ));
+      }
+
+      case 'area': {
+        return renderCartesianChart(AreaChart, (key, i) => (
+          <Area
+            key={key}
+            type="monotone"
+            dataKey={key}
+            fill={palette[i % palette.length]}
+            stroke={palette[i % palette.length]}
+            fillOpacity={0.15 + (keys.length > 1 ? 0.1 * (keys.length - i) : 0.2)}
+            stackId={stacked ? 'stack' : undefined}
+          />
+        ));
+      }
+
+      case 'composed': {
+        return renderCartesianChart(ComposedChart, (key, i) => {
+          const s = series?.find((se) => se.key === key);
+          const st = s?.type ?? 'bar';
+          const name = s?.name ?? key;
+          if (st === 'line') {
+            return <Line key={key} type="monotone" dataKey={key} stroke={palette[i % palette.length]} strokeWidth={2} name={name} />;
+          }
+          if (st === 'area') {
+            return <Area key={key} type="monotone" dataKey={key} fill={palette[i % palette.length]} stroke={palette[i % palette.length]} fillOpacity={0.2} name={name} />;
+          }
+          return <Bar key={key} dataKey={key} fill={palette[i % palette.length]} radius={[3, 3, 0, 0]} name={name} />;
+        });
+      }
+
+      case 'scatter': {
+        const xKey = keys[0];
+        const yKeys_ = keys.length >= 2 ? keys.slice(1) : [keys[0]];
+        return (
+          <ScatterChart margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+            {showGrid && <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />}
+            <XAxis dataKey={xKey} name={xKey} tick={{ fontSize: 11, fill: textColor }} />
+            <YAxis tick={{ fontSize: 11, fill: textColor }} />
+            <RechartsTooltip cursor={{ strokeDasharray: '3 3' }} />
+            {showLegend && <Legend wrapperStyle={{ fontSize: '11px' }} />}
+            {yKeys_.map((key, i) => (
+              <Scatter key={key} data={rows} dataKey={key} fill={palette[i % palette.length]} name={key} />
+            ))}
+          </ScatterChart>
+        );
+      }
+
+      case 'pie': {
+        return (
+          <PieChart>
+            <Pie
+              data={rows}
+              dataKey={keys[0]}
+              nameKey={nameKey}
+              cx="50%"
+              cy="50%"
+              innerRadius={isDonut ? 60 : 0}
+              outerRadius={100}
+              label={({ name, percent }: { name?: string; percent?: number }) => `${name ?? ''} ${percent != null ? (percent * 100).toFixed(0) : ''}%`}
+              labelLine
+            >
+              {rows.map((_row: unknown, i: number) => (
+                <Cell key={i} fill={palette[i % palette.length]} />
+              ))}
+            </Pie>
+            <RechartsTooltip />
+            {showLegend && <Legend wrapperStyle={{ fontSize: '11px' }} />}
+          </PieChart>
+        );
+      }
+
+      case 'radialBar': {
+        return (
+          <RadialBarChart
+            data={rows}
+            innerRadius={isDonut ? 30 : 0}
+            outerRadius={120}
+            startAngle={180}
+            endAngle={0}
+          >
+            <RadialBar
+              dataKey={keys[0]}
+              label={{ fill: textColor, fontSize: 11, position: 'insideStart' }}
+              background={{ fill: gridColor }}
+            >
+              {rows.map((_, i) => (
+                <Cell key={i} fill={palette[i % palette.length]} />
+              ))}
+            </RadialBar>
+            <Legend wrapperStyle={{ fontSize: '11px' }} iconSize={10} />
+            <RechartsTooltip />
+          </RadialBarChart>
+        );
+      }
+
+      case 'radar': {
+        return (
+          <RadarChart data={rows} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
+            <PolarGrid stroke={gridColor} />
+            <PolarAngleAxis dataKey={nameKey} tick={{ fontSize: 11, fill: textColor }} />
+            <PolarRadiusAxis tick={{ fontSize: 10, fill: textColor }} />
+            <RechartsTooltip />
+            {showLegend && <Legend wrapperStyle={{ fontSize: '11px' }} />}
+            {keys.map((key, i) => (
+              <Radar
+                key={key}
+                dataKey={key}
+                stroke={palette[i % palette.length]}
+                fill={palette[i % palette.length]}
+                fillOpacity={0.15}
+              />
+            ))}
+          </RadarChart>
+        );
+      }
+
+      case 'funnel': {
+        return (
+          <FunnelChart margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
+            <RechartsTooltip />
+            <Funnel
+              dataKey={keys[0]}
+              nameKey={nameKey}
+              data={rows}
+              isAnimationActive
+            >
+              {rows.map((_row: unknown, i: number) => (
+                <Cell key={i} fill={palette[i % palette.length]} />
+              ))}
+            </Funnel>
+          </FunnelChart>
+        );
+      }
+
+      case 'treemap': {
+        return (
+          <Treemap
+            data={rows}
+            dataKey={keys[0]}
+            nameKey={nameKey}
+            aspectRatio={4 / 3}
+            stroke={sepColor}
+            fill={palette[0]}
+          />
+        );
+      }
+
+      case 'sunburst': {
+        return (
+          <SunburstChart
+            data={rows as never}
+            dataKey={keys[0]}
+            nameKey={nameKey}
+          />
+        );
+      }
+
+      default:
+        return <pre style={{ color: 'var(--color-danger)', fontSize: '12px', padding: '8px', background: bgColor, borderRadius: '8px' }}>Unsupported chart type: {chartType}</pre>;
+    }
+  }
+
+  return (
+    <div style={{ margin: '12px 0', padding: '12px', background: bgColor, borderRadius: '8px' }}>
+      {title && <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px', color: 'var(--color-text-primary)' }}>{title}</div>}
+      <ResponsiveContainer width="100%" height={Math.min(320, Math.max(180, (rows as Record<string, unknown>[]).length * 28 + 60))}>
+        {renderChart()}
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+const MemoChartBlock = memo(ChartBlock);
+
+const markdownComponents = {
+  code({ className, children, ...props }: { className?: string; children?: ReactNode }) {
+    if (className === 'language-chart') {
+      return <MemoChartBlock spec={String(children)} />;
+    }
+    return <code className={className} {...props}>{children}</code>;
+  }
+} as any;
+
 class ErrorBoundary extends Component<
   { children: ReactNode },
   { error: Error | null }
@@ -593,7 +905,8 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     queryPreview?: string;
     risk: 'none' | 'low' | 'medium' | 'high';
   } | null>(null);
-  const [auditEntries, setAuditEntries] = useState<Array<{ id: string; timestamp: string; toolName: string; permissionDecision: string; queryPreview?: string; risk?: string }>>([]);
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
+  const [expandedAuditId, setExpandedAuditId] = useState<string | null>(null);
   const [effortLevel, setEffortLevel] = useState<EffortLevel>('medium');
   const [safetyLevel, setSafetyLevelState] = useState<SafetyLevel>('standard');
   const [pendingSafetyConfirm, setPendingSafetyConfirm] = useState(false);
@@ -1189,7 +1502,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     setActivityOpen(false);
     setMessageActivities({});
     setMessageActivityOpen({});
-    setActiveInspector(session.result ? 'results' : session.query ? 'query' : 'schema');
+    setActiveInspector('schema');
     setInspectorOpen(Boolean(session.result || session.query));
     setActiveView('workspace');
     setShowFlyoutChats(false);
@@ -1548,7 +1861,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     try {
       const nextResult = await api.executeQuery(query);
       setResult(nextResult);
-      setActiveInspector('results');
       setInspectorOpen(true);
       updateStatus(`Returned ${nextResult.rowCount} rows in ${nextResult.elapsedMs} ms`);
       await persistChatSession(messages, { query, result: nextResult });
@@ -1742,68 +2054,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   // ----- Render Helpers -----
 
   function renderInspectorContent() {
-    if (activeInspector === 'results') {
-      return (
-        <div className="inspector-body" aria-label="Data results">
-          {result ? (
-            <>
-              <div className="result-metadata">
-                <span>{result.rowCount} {result.rowCount === 1 ? 'row' : 'rows'} · {result.columns.length} {result.columns.length === 1 ? 'column' : 'columns'}</span>
-                {result.elapsedMs > 0 && <span> · {result.elapsedMs} ms</span>}
-              </div>
-              <div className="result-table-wrap">
-                <table className="result-table">
-                  <thead>
-                    <tr>
-                      {result.columns.map((column) => {
-                        const isNumeric = result.rows.some((row) => typeof row[column] === 'number');
-                        return <th key={column} className={isNumeric ? 'numeric' : ''} scope="col">{column}</th>;
-                      })}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.rows.map((row, index) => (
-                      <tr key={index}>
-                        {result.columns.map((column) => {
-                          const val = row[column];
-                          const isNumeric = typeof val === 'number';
-                          const isNull = val === null || val === undefined;
-                          return (
-                            <td key={column} className={`${isNumeric ? 'numeric' : ''} ${isNull ? 'null' : ''}`}>
-                              {isNull ? '\u2014' : String(val)}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          ) : (
-            <div className="schema-empty">
-              <Table2 size={20} />
-              <span>Ask a data question to see rows here.</span>
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    if (activeInspector === 'query') {
-      return (
-        <div className="inspector-body query-view" aria-label="Query editor">
-          <textarea
-            className="query-editor"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={connection?.kind === 'elasticsearch' || connection?.kind === 'mongodb' ? 'Generated JSON will appear here.' : 'Generated SQL will appear here.'}
-            spellCheck={false}
-          />
-        </div>
-      );
-    }
-
     if (activeInspector === 'schema') {
       return (
         <div className="inspector-body schema-view" aria-label="Schema" onScroll={handleSchemaScroll} ref={schemaPanelRef}>
@@ -1928,37 +2178,85 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
     }
 
     if (activeInspector === 'audit') {
-      const entries = auditEntries;
+      const entries = auditEntries.filter((e) => e.toolName === 'run_database_query');
       return (
-        <div className="inspector-body" aria-label="Audit log" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', padding: '16px 28px' }}>
+        <div className="inspector-body" aria-label="Queries" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', padding: '16px 28px' }}>
           {entries.length === 0 ? (
             <div className="schema-empty">
-              <span>No audit entries yet. Tool calls will be logged here.</span>
+              <span>No queries yet. Agent database queries will be logged here.</span>
             </div>
           ) : (
-            entries.map((entry) => (
-              <div key={entry.id} style={{
-                borderBottom: '1px solid var(--color-separator)',
-                padding: '10px 0',
-                display: 'grid',
-                gap: '4px'
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                  <span style={{ fontSize: '12px', fontWeight: 500, color: 'var(--color-text-primary)' }}>{entry.toolName}</span>
-                  <time style={{ color: 'var(--color-text-tertiary)', fontSize: '11px' }}>{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+            entries.map((entry) => {
+              const isExpanded = expandedAuditId === entry.id;
+              const fullQuery = String((entry.toolInput as Record<string, unknown>)?.query ?? entry.queryPreview ?? '');
+              return (
+                <div key={entry.id} className="query-entry" style={{ borderBottom: '1px solid var(--color-separator)' }}>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedAuditId(isExpanded ? null : entry.id)}
+                    className="query-entry-header"
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      padding: '10px 0',
+                      width: '100%',
+                      color: 'inherit',
+                      font: 'inherit',
+                      textAlign: 'left'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
+                      <span style={{
+                        fontSize: '11px',
+                        color: 'var(--color-text-tertiary)',
+                        transition: 'transform var(--motion-fast) var(--ease-standard)',
+                        transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                        flexShrink: 0
+                      }}>&#x25B6;</span>
+                      <code style={{
+                        fontSize: '12px',
+                        color: 'var(--color-text-primary)',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
+                      }}>{entry.queryPreview ?? fullQuery}</code>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexShrink: 0, marginLeft: '8px' }}>
+                      {entry.elapsedMs != null && (
+                        <span style={{ color: 'var(--color-text-tertiary)', fontSize: '11px', fontVariantNumeric: 'tabular-nums' }}>{entry.elapsedMs}ms</span>
+                      )}
+                      <time style={{ color: 'var(--color-text-tertiary)', fontSize: '11px' }}>{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+                    </div>
+                  </button>
+                  {isExpanded && (
+                    <div style={{ padding: '0 0 10px 20px' }}>
+                      <pre style={{
+                        background: 'var(--code-bg)',
+                        color: 'var(--code-text)',
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: '12px',
+                        lineHeight: '18px',
+                        padding: '10px',
+                        borderRadius: 'var(--radius-row)',
+                        overflow: 'auto',
+                        margin: 0,
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word'
+                      }}>{fullQuery}</pre>
+                      {Boolean((entry.toolInput as Record<string, unknown>)?.purpose) && (
+                        <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--color-text-tertiary)' }}>
+                          Purpose: {String((entry.toolInput as Record<string, unknown>).purpose)}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-                {entry.queryPreview && (
-                  <code style={{ fontSize: '11px', background: 'var(--code-bg)', color: 'var(--code-text)', padding: '4px 8px', borderRadius: 'var(--radius-row)', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{entry.queryPreview}</code>
-                )}
-                <span style={{
-                  fontSize: '11px',
-                  color: entry.permissionDecision === 'allow' ? 'var(--color-success)' : entry.permissionDecision === 'denied' ? 'var(--color-danger)' : 'var(--color-warning)'
-                }}>
-                  {entry.permissionDecision}
-                  {entry.risk ? ` · ${entry.risk}` : ''}
-                </span>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       );
@@ -1968,51 +2266,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
   function renderInspector() {
     const inspectorFooter = (
       <div className="inspector-footer">
-        {activeInspector === 'results' ? (
-          <>
-            <button
-              className="inspector-footer-action"
-              disabled={!result}
-              onClick={() => void copyResult()}
-              type="button"
-              aria-label={copiedFeedback ? 'Copied' : 'Copy'}
-            >
-              <Copy size={14} />
-              {copiedFeedback ? 'Copied' : 'Copy'}
-            </button>
-            <button
-              className="inspector-footer-action"
-              disabled={!result || exportingCsv}
-              onClick={() => void exportCsv()}
-              type="button"
-              aria-label={exportingCsv ? 'Exporting…' : 'Export CSV'}
-            >
-              <Download size={14} />
-              {exportingCsv ? 'Exporting\u2026' : 'Export CSV'}
-            </button>
-          </>
-        ) : activeInspector === 'query' ? (
-          <>
-            <button
-              className="inspector-footer-action"
-              disabled={!query.trim()}
-              onClick={() => void navigator.clipboard.writeText(query)}
-              type="button"
-            >
-              <Copy size={14} />
-              Copy Query
-            </button>
-            <button
-              className="inspector-footer-action"
-              disabled={busy || !query.trim()}
-              onClick={() => void runQuery()}
-              type="button"
-            >
-              <Play size={14} />
-              Run Query
-            </button>
-          </>
-        ) : null}
+        {null}
       </div>
     );
 
@@ -2023,7 +2277,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
         <div className="inspector-header">
           <div className="inspector-header-top">
             <h2 className="inspector-title">
-              {activeInspector === 'results' ? 'Data' : activeInspector === 'query' ? 'Query' : activeInspector === 'audit' ? 'Audit' : 'Schema'}
+              {activeInspector === 'audit' ? 'Queries' : 'Schema'}
             </h2>
           </div>
           {connection && (
@@ -2034,26 +2288,6 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
           )}
         </div>
         <div className="inspector-tabs" role="tablist" aria-label="Inspector views">
-          <button
-            className={`inspector-tab ${activeInspector === 'results' ? 'selected' : ''}`}
-            onClick={() => setActiveInspector('results')}
-            role="tab"
-            aria-selected={activeInspector === 'results'}
-            aria-controls="inspector-results-panel"
-            type="button"
-          >
-            Results
-          </button>
-          <button
-            className={`inspector-tab ${activeInspector === 'query' ? 'selected' : ''}`}
-            onClick={() => setActiveInspector('query')}
-            role="tab"
-            aria-selected={activeInspector === 'query'}
-            aria-controls="inspector-query-panel"
-            type="button"
-          >
-            Query
-          </button>
           <button
             className={`inspector-tab ${activeInspector === 'schema' ? 'selected' : ''}`}
             onClick={() => setActiveInspector('schema')}
@@ -2075,7 +2309,7 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
             aria-controls="inspector-audit-panel"
             type="button"
           >
-            Audit
+            Queries
           </button>
         </div>
         <div
@@ -2864,16 +3098,34 @@ export function App({ api = fallbackApi }: { api?: typeof window.dbchat }) {
                           {message.role === 'assistant' ? 'DB Chat' : 'You'}
                         </div>
                         <div className="transcript-content">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                          {message.role === 'assistant' && result && (
-                            <button
-                              className="result-link"
-                              onClick={() => openOrFocusInspector('results')}
-                              type="button"
-                            >
-                              View {result.rowCount} {result.rowCount === 1 ? 'row' : 'rows'}
-                            </button>
-                          )}
+                          {(() => {
+                            const segments = splitContent(message.content);
+                            return segments.map((seg, segIndex) => {
+                              if (seg.type === 'blocks' && seg.blocks) {
+                                return <BlockRenderer key={segIndex} blocks={seg.blocks} />;
+                              }
+                              if (seg.type === 'markdown') {
+                                const chartMatch = seg.content.match(/```chart\s*\n([\s\S]*?)```/);
+                                if (chartMatch) {
+                                  try {
+                                    const chartSpec = JSON.parse(chartMatch[1]);
+                                    return <ChartBlock key={segIndex} spec={JSON.stringify(chartSpec)} />;
+                                  } catch {
+                                    // fall through
+                                  }
+                                }
+                              }
+                              return (
+                                <ReactMarkdown
+                                  key={segIndex}
+                                  remarkPlugins={[remarkGfm]}
+                                  components={markdownComponents}
+                                >
+                                  {seg.content}
+                                </ReactMarkdown>
+                              );
+                            });
+                          })()}
                           {shouldShowCompletedActivity && (
                             <div className="inline-activity">
                               <button

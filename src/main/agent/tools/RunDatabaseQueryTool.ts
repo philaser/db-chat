@@ -1,11 +1,14 @@
 import type { Tool } from '../types.js';
 
+const DDL_PATTERN = /^\s*(CREATE|DROP|ALTER|TRUNCATE|RENAME|GRANT|REVOKE)\s/i;
+const WRITE_PATTERN = /^\s*(INSERT|UPDATE|DELETE|REPLACE|MERGE|UPSERT)\s/i;
+
 export const runDatabaseQueryTool: Tool = {
   definition: {
     type: 'function',
     function: {
       name: 'run_database_query',
-      description: 'Execute a read-only database query against the connected database. Use this whenever you need to retrieve data.',
+      description: 'Execute a SQL query or database command against the connected database. Supports read queries, write operations (INSERT/UPDATE/DELETE), and DDL statements (CREATE/DROP/ALTER) subject to the current safety level.',
       parameters: {
         type: 'object',
         properties: {
@@ -33,11 +36,46 @@ export const runDatabaseQueryTool: Tool = {
     try {
       const result = await context.connector.executeQuery(query);
       const elapsedMs = Date.now() - startTime;
+
+      const isDDL = DDL_PATTERN.test(query.trim());
+      const isWrite = WRITE_PATTERN.test(query.trim());
+
+      if (isDDL) {
+        return {
+          ok: true,
+          summary: `DDL statement executed successfully in ${elapsedMs}ms`,
+          data: {
+            queryType: 'ddl',
+            rowCount: result.rowCount,
+            elapsedMs,
+            columns: result.columns.map((c: string) => c),
+            preview: result.rows.slice(0, 10),
+            totalRows: result.rowCount
+          }
+        };
+      }
+
+      if (isWrite) {
+        return {
+          ok: true,
+          summary: `Write query affected ${result.rowCount} row(s) in ${elapsedMs}ms`,
+          data: {
+            queryType: 'write',
+            rowCount: result.rowCount,
+            elapsedMs,
+            columns: result.columns.map((c: string) => c),
+            preview: result.rows.slice(0, 10),
+            totalRows: result.rowCount
+          }
+        };
+      }
+
       const preview = result.rows.slice(0, 10);
       return {
         ok: true,
         summary: `Query returned ${result.rowCount} row(s) in ${elapsedMs}ms`,
         data: {
+          queryType: 'read',
           columns: result.columns.map((c: string) => c),
           rowCount: result.rowCount,
           elapsedMs,

@@ -52,6 +52,12 @@ export class IpcController {
     return this.currentConnectionId ?? 'unknown';
   }
 
+  async refreshSchema(): Promise<DatabaseSchema | null> {
+    if (!this.connector) return null;
+    this.schema = await this.connector.introspect();
+    return this.schema;
+  }
+
   async chooseSqliteFile(): Promise<ConnectionConfig | null> {
     const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
     const dialogOptions: OpenDialogOptions = {

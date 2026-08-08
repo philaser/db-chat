@@ -18,11 +18,18 @@ export class PermissionManager {
       { toolName: 'sample_data', action: 'allow' },
       { toolName: 'save_memory', action: 'ask' },
       { toolName: 'run_database_query', action: 'allow' },
+      { toolName: 'visualize_data', action: 'allow' },
+      { toolName: 'export_report', action: 'allow' },
+      { toolName: 'search_memory', action: 'allow' },
     ];
   }
 
   setSafetyLevel(level: SafetyLevel): void {
     this.safetyLevel = level;
+  }
+
+  getSafetyLevel(): SafetyLevel {
+    return this.safetyLevel;
   }
 
   check(toolName: string, input: Record<string, unknown>): PermissionAction {

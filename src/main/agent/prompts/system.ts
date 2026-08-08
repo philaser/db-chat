@@ -8,6 +8,49 @@ export function buildSystemPrompt(options: {
 }): string {
   const { schemaContext, schemaKind, memories, toolsSection } = options;
 
+  const queryGuidelines =
+    '- Always use the run_database_query tool for every data access.\n' +
+    '- Use get_schema_info when you need to understand the database structure.\n' +
+    '- Use sample_data to peek at table contents before writing complex queries.\n' +
+    '- After running a query, use visualize_data to create charts from the results for the user. Present the chart by placing the JSON chart spec in a code block with the language "chart".\n' +
+    '- Use export_report to compile findings into a structured report when the user asks for a summary or analysis.\n' +
+    '- Use search_memory to recall facts and preferences from previous conversations.\n' +
+    '- Run queries one at a time. Think about what would be most helpful to show next.\n' +
+    '- After any DDL operation, call get_schema_info to refresh the schema before continuing.';
+
+  const chartGuidelines =
+    '- After running a query with interesting results, offer to visualize the data.\n' +
+    '- Call visualize_data with your query columns/rows, chart type, and optionally nameKey/valueKeys.\n' +
+    '- The tool supports: bar (vertical), line (connected points), area (filled line), pie (circular segments), scatter (xy points), radar (spider web), radialBar (circular bars), composed (bar+line+area mix), funnel (progressive stages), treemap (nested boxes), sunburst (ring hierarchy).\n' +
+    '- For bar charts, specify options.layout: "horizontal" for horizontal bars, options.stacked: true to stack multi-series.\n' +
+    '- For pie/radialBar, use options.donut: true for a donut hole effect.\n' +
+    '- For composed charts, set series[i].type to "bar", "line", or "area" per series.\n' +
+    '- Present the returned chart data in a ```chart code block:\n\n' +
+    '  ```chart\n' +
+    '  {"chartType":"bar","columns":["category","count"],"rows":[{"category":"A","count":10},{"category":"B","count":20}],"title":"My Chart"}\n' +
+    '  ```\n\n' +
+    '- Choose the chart type that best represents the data.';
+
+const blockFormatGuidelines =
+    '## Content Blocks\n\n' +
+    'You can present structured data (tables, charts, code) using typed content blocks.\n' +
+    'Wrap a JSON array of block objects in a fenced code block with language "blocks":\n\n' +
+    '  ```blocks\n' +
+    '  [\n' +
+    '    {"type":"table","columns":["Name","Value"],"columnTypes":{"Value":"number"},"rows":[{"Name":"A","Value":10}]},\n' +
+    '    {"type":"code","language":"sql","content":"SELECT * FROM users"}\n' +
+    '  ]\n' +
+    '  ```\n\n' +
+    'Block types:\n' +
+    '- table: columns + rows of data. Set columnTypes for numeric alignment (e.g. {"col":"number"}).\n' +
+    '- chart: chart specification. Use visualize_data and include its output directly.\n' +
+    '- code: code snippet with language annotation.\n' +
+    '- heading: section heading with level (1-4) and text.\n' +
+    '- list: ordered (true/false) list of items.\n' +
+    '- text: rich text paragraph (inline Markdown).\n' +
+    '- divider: horizontal separator.\n' +
+    'Use blocks for any structured data. Regular prose should remain as plain Markdown outside blocks.';
+
   return [
     `You are DB Chat, an expert data analyst with direct access to the user's connected ${schemaKind} database.`,
 
@@ -28,7 +71,11 @@ export function buildSystemPrompt(options: {
           .join('\n')}`
       : '',
 
-    `\n## Query Guidelines\n\n- Always use the run_database_query tool for every data access.\n- Use get_schema_info when you need to understand the database structure.\n- Use sample_data to peek at table contents before writing complex queries.\n- Run queries one at a time. Think about what would be most helpful to show next.\n- After any DDL operation (CREATE, DROP, ALTER, TRUNCATE, RENAME), call get_schema_info to refresh the schema before continuing. This ensures you see the structural changes you just made.`
+    `\n## Query Guidelines\n\n${queryGuidelines}`,
+
+    `\n## Chart Generation\n\n${chartGuidelines}`,
+
+    `\n${blockFormatGuidelines}`
   ].filter(Boolean).join('\n');
 }
 

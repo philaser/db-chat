@@ -21,7 +21,8 @@ export class ApprovalManager {
   ): ApprovalInterruption {
     const id = crypto.randomUUID();
     const query = (input.query as string) ?? '';
-    const isWrite = /^\s*(INSERT|UPDATE|DELETE|REPLACE|MERGE|UPSERT|CREATE|DROP|ALTER)\s/i.test(query.trim());
+    const isDDL = /^\s*(CREATE|DROP|ALTER|TRUNCATE|RENAME|GRANT|REVOKE)\s/i.test(query.trim());
+    const isWrite = /^\s*(INSERT|UPDATE|DELETE|REPLACE|MERGE|UPSERT)\s/i.test(query.trim());
 
     const interruption: ApprovalInterruption = {
       id,
@@ -29,7 +30,7 @@ export class ApprovalManager {
       toolName,
       toolInput: input,
       purpose: (input.purpose as string) ?? `Execute ${toolName}`,
-      risk: isWrite ? 'medium' : 'low',
+      risk: isDDL ? 'high' : isWrite ? 'medium' : 'low',
       queryPreview: query ? (query.length > 200 ? query.slice(0, 197) + '...' : query) : undefined,
       timestamp: new Date().toISOString()
     };
