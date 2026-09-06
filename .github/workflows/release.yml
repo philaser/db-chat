@@ -1,4 +1,4 @@
-name: Release binaries
+name: Optional desktop release
 
 on:
   release:
@@ -70,8 +70,12 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Build
-        run: npm run build
+      - name: Build desktop shell
+        env:
+          DBCHAT_DESKTOP_URL: ${{ vars.DBCHAT_DESKTOP_URL }}
+        run: |
+          node -e "if (!process.env.DBCHAT_DESKTOP_URL) throw new Error('Configure the hosted desktop URL before publishing a shell')"
+          npm run desktop:build
 
       - name: Package macOS release
         if: matrix.platform == 'mac'

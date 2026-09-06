@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { MongoDBConnector } from '../src/main/connectors/MongoDBConnector';
+import { MongoDBConnector } from '../src/server/connectors/MongoDBConnector';
 
 describe('MongoDBConnector', () => {
   it('introspects every visible collection instead of truncating large databases', async () => {

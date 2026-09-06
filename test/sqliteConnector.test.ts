@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { SQLiteConnector } from '../src/main/connectors/SQLiteConnector';
+import { SQLiteConnector } from '../src/server/connectors/SQLiteConnector';
 
 describe('SQLiteConnector', () => {
   it('introspects and executes read-only queries', async () => {

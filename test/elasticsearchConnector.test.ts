@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ElasticsearchConnector } from '../src/main/connectors/ElasticsearchConnector';
+import { ElasticsearchConnector } from '../src/server/connectors/ElasticsearchConnector';
 
 describe('ElasticsearchConnector', () => {
   afterEach(() => {

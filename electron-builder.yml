@@ -1,15 +1,18 @@
 appId: com.philaser.dbchat
 productName: DB Chat
 directories:
+  app: dist-desktop
   output: release
   buildResources: build
-npmRebuild: true
+npmRebuild: false
 asar: true
+afterPack: scripts/verify-desktop-package.cjs
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 files:
-  - dist-electron/**
-  - dist-renderer/**
+  - "*.js"
+  - application.json
   - package.json
+  - "!node_modules/**/*"
 mac:
   icon: build/icon.png
   category: public.app-category.developer-tools
@@ -32,7 +35,7 @@ linux:
   icon: build/icon.png
   category: Development
   maintainer: DB Chat contributors
-  synopsis: Chat with database contents from a desktop workspace.
+  synopsis: Desktop access to the hosted DB Chat workspace.
   target:
     - target: AppImage
       arch:

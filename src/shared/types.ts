@@ -6,6 +6,8 @@ export type SafetyLevel = 'safe' | 'standard' | 'elevated' | 'unrestricted';
 export type EffortLevel = 'none' | 'low' | 'medium' | 'high' | 'max';
 
 export interface ConnectionConfig {
+  /** Server-only checked address; never accepted from request payloads or persisted. */
+  resolvedAddress?: string;
   id: string;
   kind: DatabaseKind;
   label: string;
@@ -29,6 +31,7 @@ export interface ConnectionConfig {
   hasSavedPassword?: boolean;
   authDatabase?: string;
   mongodbUri?: string;
+  mongodbDirectConnection?: boolean;
   safetyLevel?: SafetyLevel;
   createdAt: string;
 }
@@ -52,10 +55,37 @@ export interface DatabaseSchema {
 }
 
 export interface QueryResult {
+  truncated?: boolean;
+  rowLimit?: number;
   columns: string[];
   rows: Record<string, unknown>[];
   rowCount: number;
   elapsedMs: number;
+}
+
+export interface QueryResultArtifact {
+  messageId?: string;
+  kind: 'query-result';
+  queryId: string;
+  query: string;
+  result: QueryResult;
+  purpose?: string;
+  schema?: DatabaseSchema;
+}
+
+export interface WebChatSummary {
+  id: string;
+  title: string;
+  connectionId?: string;
+  messageCount: number;
+  artifactCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebChatSession extends WebChatSummary {
+  messages: ChatMessage[];
+  artifacts: QueryResultArtifact[];
 }
 
 export interface ChatMessage {
@@ -80,28 +110,11 @@ export interface ChatActivityStep {
 export interface ChatTurnResponse {
   message: ChatMessage;
   events?: AgentEvent[];
+  artifacts?: QueryResultArtifact[];
 }
 
-export interface ConnectionHistoryItem extends ConnectionConfig {
-  lastConnectedAt: string;
-}
 
-export interface PersistedChatSession {
-  id: string;
-  title: string;
-  messages: ChatMessage[];
-  connection?: ConnectionConfig;
-  query?: string;
-  result?: QueryResult;
-  createdAt: string;
-  updatedAt: string;
-}
 
-export interface PersistedSettings {
-  provider: ModelProviderKind;
-  model: string;
-  effortLevel?: EffortLevel;
-}
 
 export interface ModelInfo {
   id: string;
@@ -157,9 +170,10 @@ export interface ModelProvider {
 }
 
 export interface DatabaseConnector {
+  setResultLimit?(maxRows: number): void;
   connect(config: ConnectionConfig): Promise<void>;
   introspect(): Promise<DatabaseSchema>;
-  executeQuery(query: string): Promise<QueryResult>;
+  executeQuery(query: string, options?: { signal?: AbortSignal }): Promise<QueryResult>;
   getContextForPrompt(): Promise<string>;
   setSafetyLevel(level: SafetyLevel): void;
   close(): void;
@@ -177,6 +191,7 @@ export type AgentEventType =
   | 'thinking-start'
   | 'thinking-delta'
   | 'status'
+  | 'result'
   | 'complete'
   | 'error'
   | 'aborted'
@@ -203,6 +218,7 @@ export interface AgentToolResult {
   ok: boolean;
   summary: string;
   data?: Record<string, unknown>;
+  artifact?: QueryResult;
   error?: string;
 }
 
@@ -226,31 +242,4 @@ export interface AuditEntry {
   queryPreview?: string;
   risk?: string;
   elapsedMs?: number;
-}
-
-export interface DbChatApi {
-  chooseSqliteFile(): Promise<ConnectionConfig | null>;
-  connect(config: ConnectionConfig): Promise<DatabaseSchema>;
-  getSchema(): Promise<DatabaseSchema | null>;
-  executeQuery(query: string): Promise<QueryResult>;
-  sendChat(messages: ModelChatMessage[], turnId?: string): Promise<ChatTurnResponse>;
-  subscribeToAgentEvents(turnId: string, listener: (event: AgentEvent) => void): () => void;
-  abortChat(turnId: string): Promise<void>;
-  approveInterruption(turnId: string, interruptionId: string): Promise<void>;
-  denyInterruption(turnId: string, interruptionId: string): Promise<void>;
-  loadSettings(): Promise<PersistedSettings & { hasApiKey: boolean }>;
-  saveSettings(settings: PersistedSettings): Promise<void>;
-  saveApiKey(provider: ModelProviderKind, apiKey: string): Promise<void>;
-  listModels(): Promise<ModelInfo[]>;
-  listChatSessions(): Promise<PersistedChatSession[]>;
-  saveChatSession(session: PersistedChatSession): Promise<PersistedChatSession>;
-  deleteChatSession(id: string): Promise<void>;
-  clearChatSessions(): Promise<void>;
-  listConnections(): Promise<ConnectionHistoryItem[]>;
-  deleteConnection(id: string): Promise<void>;
-  renameConnection(id: string, label: string): Promise<void>;
-  setSafetyLevel(connectionId: string, level: SafetyLevel): Promise<void>;
-  getAuditLog(): Promise<AuditEntry[]>;
-  saveCsvFile(request: { content: string; defaultName: string }): Promise<void>;
-  rendererLog(level: string, message: string): Promise<void>;
 }

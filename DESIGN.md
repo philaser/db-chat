@@ -1,16 +1,22 @@
 # DB Chat Design
 
-The canonical DB Chat interface specification is the Scape/macOS redesign pack:
+DB Chat is a hosted web product. Before changing any customer-facing interface,
+read these canonical documents in order:
 
-1. [`docs/scape-redesign/README.md`](./docs/scape-redesign/README.md)
-2. [`docs/scape-redesign/REFERENCE-ANALYSIS.md`](./docs/scape-redesign/REFERENCE-ANALYSIS.md)
-3. [`docs/scape-redesign/DESIGN-SYSTEM.md`](./docs/scape-redesign/DESIGN-SYSTEM.md)
-4. [`docs/scape-redesign/LAYOUT-AND-SCREEN-SPEC.md`](./docs/scape-redesign/LAYOUT-AND-SCREEN-SPEC.md)
-5. [`docs/scape-redesign/COMPONENT-SPEC.md`](./docs/scape-redesign/COMPONENT-SPEC.md)
-6. [`docs/scape-redesign/OPENCODE-HANDOFF.md`](./docs/scape-redesign/OPENCODE-HANDOFF.md)
+1. [Web product specification](docs/SDD-WEB-CHAT.md)
+2. [Web screen design](docs/WEB-DESIGN.md)
+3. [Web style guide](docs/WEB-STYLE-GUIDE.md)
 
-Read the complete pack in that order before changing the renderer, window chrome,
-layout, styling, UI states, or interaction design.
+The web application in `src/web` is the only product interface. The optional
+Electron shell displays that hosted interface and uses native window controls;
+it does not maintain its own renderer, visual system, settings or query engine.
 
-The older [`docs/codex-style-guide.md`](./docs/codex-style-guide.md) is historical
-context for the pre-redesign UI and is not an implementation source.
+Customers create accounts and add their own database connections. Supabase stores
+DB Chat account and application records, not a catalog of customer-accessible
+databases. Email/password authentication is the initial scope; OAuth is deferred.
+There is no invitation-only or bounded-beta requirement. Validate each supported
+engine and extend the engine list as the product develops.
+
+The Scape/macOS pack in `docs/scape-redesign/` and the older Codex style guide
+are historical documentation for the retired desktop renderer. They are not
+implementation sources for the hosted product or its thin desktop wrapper.

@@ -1,0 +1,23 @@
+services:
+  dbchat:
+    build: .
+    ports:
+      - "8787:8787"
+    environment:
+      NODE_ENV: production
+      DBCHAT_STORAGE_MODE: supabase
+      DBCHAT_WEB_AUTH_MODE: app
+      DBCHAT_WEB_ALLOWED_ORIGIN: ${DBCHAT_WEB_ALLOWED_ORIGIN:?Set the public HTTPS application origin}
+      SUPABASE_URL: ${SUPABASE_URL:?Set the Supabase project URL}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:?Set the Supabase publishable key}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?Set the server-only service role key}
+      DBCHAT_WEB_SECRET_KEY: ${DBCHAT_WEB_SECRET_KEY:?Set a stable random encryption key}
+      DBCHAT_WEB_OPENROUTER_API_KEY: ${DBCHAT_WEB_OPENROUTER_API_KEY:?Set the server-managed model key}
+      DBCHAT_WEB_MODEL: ${DBCHAT_WEB_MODEL:-deepseek/deepseek-v4-flash-0731}
+      DBCHAT_WEB_ALLOWED_DATABASE_HOSTS: ${DBCHAT_WEB_ALLOWED_DATABASE_HOSTS:-}
+    volumes:
+      - dbchat-data:/data
+    restart: unless-stopped
+
+volumes:
+  dbchat-data:

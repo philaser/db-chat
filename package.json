@@ -1,28 +1,28 @@
 {
   "name": "db-chat",
   "version": "0.1.0",
-  "description": "A desktop AI chat agent for databases.",
+  "description": "Ask questions of your own databases through a hosted web workspace.",
   "author": "DB Chat contributors",
   "private": true,
   "type": "module",
-  "main": "dist-electron/main/main.js",
   "scripts": {
-    "predev": "npm run rebuild:sqlite:electron",
-    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
-    "dev:renderer": "vite --host 127.0.0.1",
-    "dev:electron": "wait-on tcp:5173 && tsc -p tsconfig.electron.json && electron .",
-    "rebuild:sqlite:electron": "npm rebuild better-sqlite3 --runtime=electron --target=$(node -p \"require('./node_modules/electron/package.json').version\") --dist-url=https://electronjs.org/headers",
-    "rebuild:sqlite:node": "npm rebuild better-sqlite3",
-    "build": "tsc -p tsconfig.electron.json && vite build",
-    "package": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder",
-    "dist:mac": "npm run build && electron-builder --mac dmg",
-    "dist:win": "npm run build && electron-builder --win nsis",
-    "dist:linux": "npm run build && electron-builder --linux AppImage deb",
+    "dev": "node --env-file-if-exists=.env scripts/dev.mjs",
+    "build": "npm run web:client:build && npm run web:server:build",
+    "start": "node --env-file-if-exists=.env dist-web-server/server/server.js",
+    "web:client:build": "vite build",
+    "web:server:build": "node scripts/build-server.mjs",
+    "web:build": "npm run build",
+    "web:start": "npm start",
+    "web:dev": "npm run dev",
+    "desktop:build": "node scripts/build-desktop.mjs",
+    "desktop:dev": "node scripts/build-desktop.mjs --development && electron dist-desktop",
+    "desktop:package": "npm run desktop:build && electron-builder --dir",
+    "desktop:dist": "npm run desktop:build && electron-builder",
     "pretest": "npm run rebuild:sqlite:node",
+    "rebuild:sqlite:node": "npm rebuild better-sqlite3",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.web-server.json --noEmit && tsc -p tsconfig.desktop.json --noEmit"
   },
   "dependencies": {
     "@openrouter/sdk": "^1.1.2",
@@ -47,13 +47,11 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
-    "concurrently": "^9.2.1",
     "electron": "^39.8.10",
     "electron-builder": "^26.8.1",
     "jsdom": "^27.3.0",
     "typescript": "^5.9.3",
     "vite": "^7.2.7",
-    "vitest": "^4.0.15",
-    "wait-on": "^9.0.3"
+    "vitest": "^4.0.15"
   }
 }
