@@ -15,9 +15,4 @@ services:
       DBCHAT_WEB_OPENROUTER_API_KEY: ${DBCHAT_WEB_OPENROUTER_API_KEY:?Set the server-managed model key}
       DBCHAT_WEB_MODEL: ${DBCHAT_WEB_MODEL:-deepseek/deepseek-v4-flash-0731}
       DBCHAT_WEB_ALLOWED_DATABASE_HOSTS: ${DBCHAT_WEB_ALLOWED_DATABASE_HOSTS:-}
-    volumes:
-      - dbchat-data:/data
     restart: unless-stopped
-
-volumes:
-  dbchat-data:

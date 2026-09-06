@@ -165,6 +165,7 @@ function safeHost(config: ConnectionConfig): string | undefined {
 }
 
 function sqliteFileName(config: ConnectionConfig): string | undefined {
+  if (config.kind === 'sqlite' && config.sqliteObjectKey) return config.sqliteFileName;
   return config.kind === 'sqlite' && config.databasePath
     ? path.basename(config.databasePath)
     : undefined;
@@ -734,7 +735,7 @@ export class AccountStore {
     if (!['sqlite', 'postgres', 'mysql', 'mongodb', 'elasticsearch'].includes(input.kind)) {
       throw new Error('Choose a supported database type.');
     }
-    if (input.kind === 'sqlite' && !input.databasePath?.trim()) {
+    if (input.kind === 'sqlite' && !input.databasePath?.trim() && !input.sqliteObjectKey) {
       throw new Error('Choose a SQLite database file.');
     }
     if (input.kind !== 'sqlite' && !input.host && !input.elasticsearchHost && !input.mongodbUri) {

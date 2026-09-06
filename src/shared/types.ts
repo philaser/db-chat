@@ -12,6 +12,9 @@ export interface ConnectionConfig {
   kind: DatabaseKind;
   label: string;
   databasePath?: string;
+  /** Private Storage object key, assigned by the backend; never accepted from clients. */
+  sqliteObjectKey?: string;
+  sqliteFileName?: string;
   elasticsearchUrl?: string;
   elasticsearchHost?: string;
   elasticsearchPort?: number;

@@ -181,6 +181,7 @@ export class SupabaseAccountStore implements AccountRepository {
   private connectionValues(input: ConnectionConfig, test?: ConnectionTestResult) {
     if (!input.label?.trim()) throw new Error('Give this connection a name.');
     if (!['sqlite', 'postgres', 'mysql', 'mongodb', 'elasticsearch'].includes(input.kind)) throw new Error('Choose a supported database type.');
+    if (input.kind === 'sqlite' && !input.databasePath && !input.sqliteObjectKey) throw new Error('Choose a SQLite file.');
     const split = splitSecrets({ ...input, label: input.label.trim(), safetyLevel: 'safe', createdAt: input.createdAt || new Date().toISOString() });
     return { config: split.config, encrypted_secrets: split.secrets ? this.vault.encrypt(JSON.stringify(split.secrets)) : null, status: test ? (test.ok ? 'ready' : 'unavailable') : 'unavailable', last_tested_at: test ? new Date().toISOString() : null, table_count: test?.tableCount ?? null, last_error: test?.error ?? null };
   }

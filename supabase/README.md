@@ -4,7 +4,7 @@ DB Chat's Node backend uses Supabase Auth for email/password identity and Postgr
 
 ## Deployment prerequisites
 
-1. Create the intended Supabase project and apply `migrations/202609050001_dbchat_accounts.sql` with your normal migration process. This changes remote data and must be explicitly authorized. The schema requires Postgres 15 or newer. No sample customer records or default accounts are seeded.
+1. Create the intended Supabase project and apply all SQL files in `migrations/` in filename order with your normal migration process. This changes remote data and must be explicitly authorized. The schema requires Postgres 15 or newer. No sample customer records or default accounts are seeded.
 2. Configure the backend's `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` (or legacy `SUPABASE_ANON_KEY`), `SUPABASE_SERVICE_ROLE_KEY`, `DBCHAT_STORAGE_MODE=supabase`, `DBCHAT_WEB_ALLOWED_ORIGIN`, and `DBCHAT_WEB_SECRET_KEY` (at least 32 random characters). Keep both server secrets outside source control and outside frontend build variables. Production configuration rejects local JSON storage.
 3. Enable email confirmations and configure production SMTP, sending domain, rate limits and allowed redirect URLs in Supabase. Set Site URL to the hosted app origin. The backend uses token-hash email verification, not bearer tokens in browser URLs.
 4. Configure the **Confirm signup** template link as `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup` and **Reset password** as `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=recovery`. The web page strips the token from history and posts it to the backend. Do not use the default implicit-flow template that sends access/refresh tokens in URL fragments.
@@ -20,6 +20,12 @@ All application tables enable RLS and revoke access from `anon` and `authenticat
 Connection passwords, full MongoDB/Elasticsearch URIs, provider keys and Auth token bundles use AES-256-GCM encryption. Sanitized metadata is returned separately. Retain the stable encryption key independently of database backups; losing it makes saved credentials unusable. This version supports one key, so rotation requires a controlled decrypt/re-encrypt migration and verification before replacing the key. Never just change the environment value against existing ciphertext.
 
 Messages and artifacts are separate ordered rows, with chat counts and titles stored on the parent. Turn claiming atomically appends the user's message and deduplicates `(owner, request_id)`. Finalization atomically appends the assistant/result records exactly once. After durable turns exist, stale browser autosave can edit metadata but cannot overwrite committed messages or artifacts. Startup recovery preserves the user's question and records an interrupted terminal turn. Deleting the Auth user cascades all their application rows without affecting other owners.
+
+## SQLite file storage
+
+The `dbchat-sqlite` bucket is private. The Node backend uploads validated SQLite files under the authenticated account ID and stores the object key with the connection. Browser roles cannot access this bucket directly. Each test, schema request or chat turn downloads its own size-limited copy to a private temporary directory, then removes it on success, error or cancellation. No persistent host disk is needed in Supabase mode. Saved connections survive process restarts; an upload not yet attached to a connection must be selected again after a restart.
+
+Deleting a connection removes its object; deleting an account removes all objects under its owner prefix, including unattached uploads. Storage and Postgres deletion are not a single transaction: operational cleanup should reconcile orphaned objects after failures or abandoned uploads. A hard process termination can leave temporary files until the host clears its ephemeral disk. Existing local SQLite files are not automatically migrated; upload them again before switching an existing deployment. The bucket caps files at 50 MiB. Storage capacity and download egress count against your Supabase plan; every query turn downloads the file again. Single-instance deployment is still required for turn recovery, independently of file storage.
 
 ## Operations and migration
 

@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: db-chat
+    runtime: docker
+    plan: free
+    region: frankfurt
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: node dist-web-server/server/server.js
+    healthCheckPath: /api/v1/health
+    autoDeployTrigger: off
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DBCHAT_STORAGE_MODE
+        value: supabase
+      - key: DBCHAT_WEB_AUTH_MODE
+        value: app
+      - key: DBCHAT_WEB_HOST
+        value: 0.0.0.0
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DBCHAT_WEB_SECRET_KEY
+        sync: false
+      - key: DBCHAT_WEB_OPENROUTER_API_KEY
+        sync: false

@@ -62,10 +62,29 @@ Place the service behind HTTPS and set the public application origin accordingly
 Static-only hosting is insufficient: database drivers, SSE, secret decryption and
 SQLite execution require the Node service.
 
+For Render Free, `render.yaml` uses the existing Dockerfile, one Frankfurt web
+service, and `/api/v1/health`, without a Render database or persistent disk.
+Supply the prompted environment variables through Render's secret settings;
+retain the existing encryption key. The app uses Render's `RENDER_EXTERNAL_URL` as its origin automatically; set
+`DBCHAT_WEB_ALLOWED_ORIGIN` only when using a custom domain. Do not upload `.env`. Automatic deploys are
+disabled: suspend the existing service before deploying a replacement because
+startup recovery currently assumes no other active instance. Verify it is stopped
+before resuming/deploying; this entails downtime. Configure the same public origin
+in Supabase Auth and complete email setup before customer signup.
+
+Render Free sleeps after 15 idle minutes and can take about a minute to wake.
+Its monthly limits and service-initiated traffic restrictions apply to calls to
+Supabase, model APIs, and customer databases. Do not upgrade or enable paid
+resources automatically. Supabase sends Auth emails through its configured SMTP
+provider, so Render Free's SMTP-port restriction does not block that integration.
+See [Render Free limits](https://render.com/docs/free).
+
 Keep the service role key, model key and connection-encryption key server-only.
 Do not use browser build variables for secrets. Retain the encryption key securely
 and separately from database backups; losing it makes saved connection secrets
-unrecoverable. Persist the `/data` volume for local working/upload files. Configure
+unrecoverable. Uploaded SQLite files live in the private Supabase Storage bucket
+`dbchat-sqlite`; the Node service uses temporary files during queries and needs no
+persistent disk in Supabase mode. Apply both SQL migrations before use. Configure
 outbound network rules, process/resource limits, model spend limits, monitoring,
 backup restore checks and rollback before serving customers. Review the migration
 and operations documentation shipped with the Supabase adapter.

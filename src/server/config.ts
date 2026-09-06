@@ -121,6 +121,7 @@ export function loadWebServerConfig(env: NodeJS.ProcessEnv = process.env): WebSe
     throw new Error('DBCHAT_WEB_AUTH_MODE must be app in production.');
   }
 
+  const allowedOrigin = env.DBCHAT_WEB_ALLOWED_ORIGIN ?? env.RENDER_EXTERNAL_URL;
   const supabaseUrl = env.SUPABASE_URL;
   const storageMode = env.DBCHAT_STORAGE_MODE ?? (supabaseUrl ? 'supabase' : 'local');
   if (!['local', 'supabase'].includes(storageMode)) throw new Error('Unsupported DBCHAT_STORAGE_MODE.');
@@ -133,7 +134,7 @@ export function loadWebServerConfig(env: NodeJS.ProcessEnv = process.env): WebSe
     serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY ?? ''
   } : undefined;
   if (supabase && (!supabase.url || !supabase.publishableKey || !supabase.serviceRoleKey
-    || !env.DBCHAT_WEB_SECRET_KEY || env.DBCHAT_WEB_SECRET_KEY.length < 32 || !env.DBCHAT_WEB_ALLOWED_ORIGIN)) {
+    || !env.DBCHAT_WEB_SECRET_KEY || env.DBCHAT_WEB_SECRET_KEY.length < 32 || !allowedOrigin)) {
     throw new Error('Supabase mode requires URL, publishable key, service-role key, a secret encryption key of at least 32 characters, and the public app origin.');
   }
   if (supabase) {
@@ -141,9 +142,9 @@ export function loadWebServerConfig(env: NodeJS.ProcessEnv = process.env): WebSe
     if (address.protocol !== 'https:' && !['127.0.0.1', 'localhost'].includes(address.hostname)) throw new Error('Supabase URL must use HTTPS.');
   }
   if (supabase && authMode !== 'app') throw new Error('Supabase requires app authentication.');
-  if (env.DBCHAT_WEB_ALLOWED_ORIGIN) {
-    const origin = new URL(env.DBCHAT_WEB_ALLOWED_ORIGIN);
-    if (origin.origin !== env.DBCHAT_WEB_ALLOWED_ORIGIN || (env.NODE_ENV === 'production' && origin.protocol !== 'https:')) throw new Error('Set the public app origin to its HTTPS origin without a path.');
+  if (allowedOrigin) {
+    const origin = new URL(allowedOrigin);
+    if (origin.origin !== allowedOrigin || (env.NODE_ENV === 'production' && origin.protocol !== 'https:')) throw new Error('Set the public app origin to its HTTPS origin without a path.');
   }
   const dataDirectory = path.resolve(env.DBCHAT_WEB_DATA_DIR ?? path.join(os.homedir(), '.dbchat'));
 
@@ -156,7 +157,7 @@ export function loadWebServerConfig(env: NodeJS.ProcessEnv = process.env): WebSe
     authMode,
     accountStorePath: path.resolve(env.DBCHAT_WEB_ACCOUNT_STORE_PATH ?? path.join(dataDirectory, 'accounts.json')),
     secretKeyPath: path.resolve(env.DBCHAT_WEB_SECRET_KEY_FILE ?? path.join(dataDirectory, 'secret.key')),
-    allowedOrigin: env.DBCHAT_WEB_ALLOWED_ORIGIN,
+    allowedOrigin,
     sessionTtlMs: numberFromEnv(env.DBCHAT_WEB_SESSION_TTL_MS, 30 * 60 * 1000),
     sessionAbsoluteTtlMs: numberFromEnv(env.DBCHAT_WEB_SESSION_ABSOLUTE_TTL_MS, 30 * 24 * 60 * 60 * 1000),
     turnTimeoutMs: numberFromEnv(env.DBCHAT_WEB_TURN_TIMEOUT_MS, 120_000),

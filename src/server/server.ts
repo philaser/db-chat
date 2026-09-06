@@ -1,3 +1,4 @@
+import { SupabaseSqliteStorage, type SqliteObjectStorage } from './supabaseSqliteStorage.js';
 import { prepareConnectionDestination } from './connectionPolicy.js';
 import http, { type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -178,13 +179,15 @@ function publicConfiguredConnection(config: ConnectionConfig, ready: boolean): W
 export interface WebServerOptions {
   modelClient?: import('./agent/types.js').AgentModelClient;
   accounts?: AccountRepository;
+  sqliteStorage?: SqliteObjectStorage;
   connector?: import('../shared/types.js').DatabaseConnector;
 }
 
 interface UploadedSqliteFile {
   principalId: string;
   fileName: string;
-  filePath: string;
+  filePath?: string;
+  objectKey?: string;
   bytes: number;
 }
 
@@ -197,6 +200,7 @@ export class WebServer {
   readonly accounts: AccountRepository;
   readonly sessions: WebSessionStore;
   readonly service: WebAgentService;
+  private readonly sqliteStorage?: SqliteObjectStorage;
   private readonly submittedTurns = new Map<string, string>();
   private readonly sqliteUploads = new Map<string, UploadedSqliteFile>();
   private readonly requestBudgets = new Map<string, { count: number; resetAt: number }>();
@@ -218,6 +222,8 @@ export class WebServer {
       secretKeyPath: config.secretKeyPath,
       storePath: config.accountStorePath
     }));
+    this.sqliteStorage = options.sqliteStorage ?? (config.storageMode === 'supabase'
+      ? new SupabaseSqliteStorage({ url: config.supabase!.url, key: config.supabase!.serviceRoleKey, maxBytes: config.maxSqliteUploadBytes ?? 50 * 1024 * 1024 }) : undefined);
     this.sessions = new WebSessionStore(config.sessionTtlMs);
     this.service = new WebAgentService(config, options);
   }
@@ -225,7 +231,7 @@ export class WebServer {
   async initialize(): Promise<void> {
     await this.accounts.interruptPendingTurns?.();
     await this.service.initialize();
-    if (this.config.sqliteUploadDir) {
+    if (!this.sqliteStorage && this.config.sqliteUploadDir) {
       await fs.mkdir(this.config.sqliteUploadDir, { recursive: true });
     }
     if (this.config.authMode === 'dev') {
@@ -396,9 +402,10 @@ export class WebServer {
         await this.accounts.revokeSession(confirmation.sessionId);
         const connections = await this.accounts.listConnections(principal.id);
         const files = await Promise.all(connections.map(c => this.accounts.getConnectionConfig(principal.id, c.id)));
+        await this.sqliteStorage?.removeOwner(principal.id);
         await this.accounts.deleteAccount(principal.id);
         for (const file of files) if (file?.kind === 'sqlite' && file.databasePath) await this.removeManagedSqliteFile(file.databasePath);
-        for (const [id, upload] of this.sqliteUploads) if (upload.principalId === principal.id) { await this.removeManagedSqliteFile(upload.filePath); this.sqliteUploads.delete(id); }
+        for (const [id, upload] of this.sqliteUploads) if (upload.principalId === principal.id) { if (upload.filePath) await this.removeManagedSqliteFile(upload.filePath); this.sqliteUploads.delete(id); }
         sendJson(response, 200, { ok: true }, clearAuthCookie(secure));
       } catch { sendJson(response, 400, { error: 'Account could not be deleted. Check your password and try again.' }); }
       return;
@@ -514,7 +521,7 @@ export class WebServer {
     }
 
     if (request.method === 'POST' && route === '/sqlite-files') {
-      if (!this.config.sqliteUploadDir || !this.config.maxSqliteUploadBytes) {
+      if ((!this.sqliteStorage && !this.config.sqliteUploadDir) || !this.config.maxSqliteUploadBytes) {
         sendJson(response, 503, { error: 'SQLite uploads are not configured on this server.' }, legacyCookie);
         return;
       }
@@ -522,10 +529,15 @@ export class WebServer {
         const fileName = uploadedFileName(request.headers['x-dbchat-filename']);
         const contents = await readBuffer(request, this.config.maxSqliteUploadBytes);
         const uploadId = 'upload_' + randomBytes(18).toString('base64url');
-        const uploadDirectory = await fs.mkdtemp(path.join(this.config.sqliteUploadDir, uploadId + '-'));
-        const filePath = path.join(uploadDirectory, fileName);
-        await fs.writeFile(filePath, contents, { flag: 'wx' });
-        this.sqliteUploads.set(uploadId, { principalId: principal.id, fileName, filePath, bytes: contents.length });
+        if (this.sqliteStorage) {
+          const objectKey = await this.sqliteStorage.upload(principal.id, contents);
+          this.sqliteUploads.set(uploadId, { principalId: principal.id, fileName, objectKey, bytes: contents.length });
+        } else {
+          const uploadDirectory = await fs.mkdtemp(path.join(this.config.sqliteUploadDir!, uploadId + '-'));
+          const filePath = path.join(uploadDirectory, fileName);
+          await fs.writeFile(filePath, contents, { flag: 'wx', mode: 0o600 });
+          this.sqliteUploads.set(uploadId, { principalId: principal.id, fileName, filePath, bytes: contents.length });
+        }
         sendJson(response, 201, { uploadId, fileName, bytes: contents.length }, legacyCookie);
       } catch (error) {
         const message = safeClientError(error, 'The SQLite file could not be uploaded.');
@@ -613,7 +625,10 @@ export class WebServer {
 
     if (connectionMatch && request.method === 'PATCH') {
       const body = this.requireRecord(await readJson(request, this.config.maxBodyBytes));
-      const connection = await this.accounts.updateConnection(principal.id, connectionMatch[1], this.parseConnectionPatch(body, principal));
+      const previous = await this.connectionConfigForPrincipal(principal, connectionMatch[1]);
+      const patch = this.parseConnectionPatch(body, principal);
+      const connection = await this.accounts.updateConnection(principal.id, connectionMatch[1], patch);
+      if (previous && patch.sqliteObjectKey && previous.sqliteObjectKey !== patch.sqliteObjectKey) await this.removeSqliteConnection(principal.id, previous);
       sendJson(response, 200, { connection }, legacyCookie);
       return;
     }
@@ -624,9 +639,7 @@ export class WebServer {
         sendJson(response, 404, { error: 'Connection not found.' }, legacyCookie);
         return;
       }
-      if (connectionConfig?.kind === 'sqlite' && connectionConfig.databasePath) {
-        await this.removeManagedSqliteFile(connectionConfig.databasePath);
-      }
+      if (connectionConfig) await this.removeSqliteConnection(principal.id, connectionConfig);
       sendJson(response, 200, { ok: true }, legacyCookie);
       return;
     }
@@ -646,7 +659,7 @@ export class WebServer {
       }
       try {
         await prepareConnectionDestination(connectionConfig, this.config.allowedDatabaseHosts);
-        const schema = await this.service.getSchema(connectionConfig);
+        const schema = await this.withSqliteConnection(principal.id, connectionConfig, local => this.service.getSchema(local));
         const isVirtualConfiguredConnection = this.config.authMode === 'dev'
           && this.config.database?.id === testMatch[1];
         const connection = isVirtualConfiguredConnection
@@ -678,7 +691,7 @@ export class WebServer {
       }
       try {
         await prepareConnectionDestination(connectionConfig, this.config.allowedDatabaseHosts);
-        const schema = await this.service.testConnection(connectionConfig);
+        const schema = await this.withSqliteConnection(principal.id, connectionConfig, local => this.service.testConnection(local));
         sendJson(response, 200, { schema }, legacyCookie);
       } catch (error) {
         sendJson(response, 422, { error: safeClientError(error, 'The schema could not be loaded.') }, legacyCookie);
@@ -948,12 +961,28 @@ export class WebServer {
     return await this.accounts.getConnectionConfig(principal.id, id);
   }
 
-  private resolveSqliteUpload(principal: Principal, uploadId: string): string {
+  private resolveSqliteUpload(principal: Principal, uploadId: string): Partial<ConnectionConfig> {
     const upload = this.sqliteUploads.get(uploadId);
     if (!upload || upload.principalId !== principal.id) {
       throw new Error('Choose a SQLite file again.');
     }
-    return upload.filePath;
+    // Each uploaded asset belongs to one connection; prevent reuse and shared deletion.
+    this.sqliteUploads.delete(uploadId);
+    return upload.objectKey ? { sqliteObjectKey: upload.objectKey, sqliteFileName: upload.fileName, databasePath: '' } : { databasePath: upload.filePath };
+  }
+
+  private async withSqliteConnection<T>(owner: string, config: ConnectionConfig, run: (local: ConnectionConfig) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (config.kind !== 'sqlite' || !config.sqliteObjectKey) return run(config);
+    if (!this.sqliteStorage) throw new Error('Cloud SQLite storage is not configured.');
+    return this.sqliteStorage.withConnection(owner, config, run, signal);
+  }
+
+  private async removeSqliteConnection(owner: string, config: ConnectionConfig): Promise<void> {
+    if (config.kind !== 'sqlite') return;
+    if (config.sqliteObjectKey) {
+      if (!this.sqliteStorage) throw new Error('Cloud SQLite storage is not configured.');
+      await this.sqliteStorage.remove(owner, config.sqliteObjectKey);
+    } else if (config.databasePath) await this.removeManagedSqliteFile(config.databasePath);
   }
 
   private async removeManagedSqliteFile(filePath: string): Promise<void> {
@@ -1012,9 +1041,9 @@ export class WebServer {
       await prepareConnectionDestination(connection, this.config.allowedDatabaseHosts);
       const provider = await this.accounts.resolveProviderKey(turn.principalId, this.config.openRouterApiKey);
       const settings = await this.accounts.getSettings(turn.principalId);
-      const result = await this.service.run(turn.messages, turn.id,
+      const result = await this.withSqliteConnection(turn.principalId, connection, local => this.service.run(turn.messages, turn.id,
         event => this.sessions.publishAgentEvent(turn, event), turn.abortController.signal,
-        connection, provider.apiKey, settings.model, settings.effortLevel);
+        local, provider.apiKey, settings.model, settings.effortLevel), turn.abortController.signal);
       if (turn.abortController.signal.aborted) throw new Error(turn.error ?? 'Turn cancelled.');
       if (turn.assistantMessageId) {
         result.message.id = turn.assistantMessageId;
@@ -1114,10 +1143,11 @@ export class WebServer {
     const kind = stringField(body, 'kind', true) as ConnectionConfig['kind'];
     const label = stringField(body, 'label', true)!;
     let databasePath = stringField(body, 'databasePath');
+    let sqliteFields: Partial<ConnectionConfig> = {};
     if (kind === 'sqlite') {
       const uploadId = stringField(body, 'sqliteUploadId');
       if (uploadId) {
-        databasePath = this.resolveSqliteUpload(principal, uploadId);
+        sqliteFields = this.resolveSqliteUpload(principal, uploadId);
       } else if (this.config.authMode !== 'dev') {
         databasePath = undefined;
       }
@@ -1128,6 +1158,7 @@ export class WebServer {
       label,
       createdAt: new Date().toISOString(),
       databasePath,
+      ...sqliteFields,
       host: stringField(body, 'host'),
       port: numberField(body, 'port'),
       database: stringField(body, 'database'),
@@ -1152,7 +1183,7 @@ export class WebServer {
     if ('label' in body) patch.label = stringField(body, 'label', true);
     if ('kind' in body) patch.kind = stringField(body, 'kind', true) as ConnectionConfig['kind'];
     if ('sqliteUploadId' in body) {
-      patch.databasePath = this.resolveSqliteUpload(principal, stringField(body, 'sqliteUploadId', true)!);
+      Object.assign(patch, this.resolveSqliteUpload(principal, stringField(body, 'sqliteUploadId', true)!));
     } else if ('databasePath' in body && this.config.authMode === 'dev') {
       patch.databasePath = stringField(body, 'databasePath');
     }

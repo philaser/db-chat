@@ -1,3 +1,5 @@
+import Database from 'better-sqlite3';
+import { SupabaseSqliteStorage } from '../src/server/supabaseSqliteStorage.js';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -137,6 +139,52 @@ describe('web server', () => {
     await rm(testUploadDir, { recursive: true, force: true });
   });
 
+  it('persists cloud SQLite connections across server restarts and deletes their objects', async () => {
+    const objects = new Map<string, Uint8Array>();
+    const storageFetch: typeof fetch = async (url, init) => {
+      const route = new URL(String(url)).pathname;
+      if (init?.method === 'DELETE') {
+        for (const key of JSON.parse(String(init.body)).prefixes) objects.delete(key);
+        return Response.json({});
+      }
+      const key = route.split('/dbchat-sqlite/')[1];
+      if (init?.method === 'POST') { objects.set(key, init.body as Uint8Array); return Response.json({}); }
+      const bytes = objects.get(key);
+      return bytes ? new Response(Buffer.from(bytes)) : new Response('', { status: 404 });
+    };
+    const start = async () => {
+      server = new WebServer(appConfig(), { modelClient: new FixtureModel(), sqliteStorage: new SupabaseSqliteStorage({ url: 'https://storage.example', key: 'sb_secret_fixture', maxBytes: 1024 * 1024, fetch: storageFetch }) });
+      const address = (await server.listen()).address() as AddressInfo;
+      return `http://127.0.0.1:${address.port}/api/v1`;
+    };
+    let base = await start();
+    const signup = await fetch(base + '/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'storage@example.com', password: 'HostedQA123!', displayName: 'Storage' }) });
+    expect(signup.status).toBe(201);
+    const owner = (await signup.json()).user.id;
+    const Cookie = signup.headers.get('set-cookie')!.split(';')[0];
+    const db = new Database(':memory:');
+    db.exec("create table users (id integer primary key, name text); insert into users values (1, 'Ada')");
+    const bytes = db.serialize(); db.close();
+    const upload = await fetch(base + '/sqlite-files', { method: 'POST', headers: { Cookie, 'X-DBChat-Filename': 'customer.sqlite' }, body: new Uint8Array(bytes) });
+    expect(upload.status).toBe(201);
+    const { uploadId } = await upload.json();
+    const created = await fetch(base + '/connections', { method: 'POST', headers: { Cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'sqlite', label: 'Customer', sqliteUploadId: uploadId }) });
+    expect(created.status).toBe(201);
+    const { connection } = await created.json();
+    const saved = await server!.accounts.getConnectionConfig(owner, connection.id);
+    expect(saved?.sqliteObjectKey).toMatch(new RegExp('^' + owner + '/'));
+    expect(saved?.databasePath).toBeFalsy();
+    expect(objects.size).toBe(1);
+    await server!.close();
+    base = await start();
+    const schema = await fetch(base + '/connections/' + connection.id + '/schema', { headers: { Cookie } });
+    expect(schema.status).toBe(200);
+    expect((await schema.json()).schema.tables).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'users' })]));
+    expect((await server!.accounts.getConnectionConfig(owner, connection.id))?.databasePath).toBeFalsy();
+    const deleted = await fetch(base + '/connections/' + connection.id, { method: 'DELETE', headers: { Cookie } });
+    expect(deleted.status).toBe(200); expect(objects.size).toBe(0);
+  });
+
   it('requires proxy authentication in production', () => {
     expect(loadWebServerConfig({}).authMode).toBe('app');
     expect(() => loadWebServerConfig({
@@ -146,6 +194,12 @@ describe('web server', () => {
     expect(() => loadWebServerConfig({
       DBCHAT_WEB_AUTH_MODE: 'header'
     })).toThrow('Unsupported DBCHAT_WEB_AUTH_MODE: header');
+  });
+
+  it('uses Render origin unless explicitly overridden and rejects invalid origins', () => {
+    expect(loadWebServerConfig({ RENDER_EXTERNAL_URL: 'https://example.onrender.com' }).allowedOrigin).toBe('https://example.onrender.com');
+    expect(loadWebServerConfig({ RENDER_EXTERNAL_URL: 'https://example.onrender.com', DBCHAT_WEB_ALLOWED_ORIGIN: 'https://custom.example' }).allowedOrigin).toBe('https://custom.example');
+    expect(() => loadWebServerConfig({ RENDER_EXTERNAL_URL: 'https://example.onrender.com/path' })).toThrow('public app origin');
   });
 
   it('uses the DeepSeek V4 Flash 0731 model by default', () => {
