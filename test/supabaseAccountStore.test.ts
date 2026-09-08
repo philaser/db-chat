@@ -9,6 +9,34 @@ function mockFetch(handler: (url: URL, init: RequestInit) => unknown) {
   return vi.fn(async (url: string | URL | Request, init?: RequestInit) => new Response(JSON.stringify(await handler(new URL(String(url)), init ?? {})), { status: 200 })) as unknown as Fetch;
 }
 describe('Supabase account repository', () => {
+  it('atomically stores and resolves direct provider key envelopes', async () => {
+    const vault = new SecretVault(options.secretKey);
+    let profile = { user_id: user.id, email: user.email, email_verified: true, display_name: 'Person', created_at: user.created_at, settings: { provider: 'openrouter' as const, model: 'managed-model', effortLevel: 'low' as const }, encrypted_provider_key: null as string | null };
+    const writes: Array<Record<string, unknown>> = [];
+    const fetch = mockFetch((url, init) => {
+      if (url.pathname.endsWith('dbchat_profiles') && init.method === 'PATCH') { const body = JSON.parse(String(init.body)); writes.push(body); profile = { ...profile, ...body }; return []; }
+      if (url.pathname.endsWith('dbchat_profiles')) return [profile];
+      return [];
+    });
+    const store = new SupabaseAccountStore({ ...options, fetch });
+    await store.setUserProviderKey(user.id, 'deepseek', 'deepseek-personal-secret');
+    expect(JSON.stringify(writes[0])).not.toContain('deepseek-personal-secret');
+    expect(JSON.parse(vault.decrypt(writes[0].encrypted_provider_key as string))).toEqual({ provider: 'deepseek', apiKey: 'deepseek-personal-secret' });
+    expect(await store.resolveProviderKey(user.id, 'managed-secret')).toEqual({ provider: 'deepseek', source: 'user', apiKey: 'deepseek-personal-secret', hasUserKey: true });
+    expect(writes[0].settings).toMatchObject({ provider: 'deepseek', model: 'deepseek-v4-flash' });
+  });
+
+  it('ignores legacy raw OpenRouter keys and fails closed for corrupt encrypted credentials', async () => {
+    const vault = new SecretVault(options.secretKey);
+    let encrypted = vault.encrypt('legacy-openrouter-secret');
+    const fetch = mockFetch((url) => url.pathname.endsWith('dbchat_profiles') ? [{ user_id: user.id, settings: { provider: 'openrouter', model: 'managed-model', effortLevel: 'low' }, encrypted_provider_key: encrypted }] : []);
+    const store = new SupabaseAccountStore({ ...options, fetch });
+    expect(await store.hasUserKey(user.id)).toBe(false);
+    expect(await store.resolveProviderKey(user.id, 'managed-secret')).toMatchObject({ provider: 'openrouter', source: 'internal', hasUserKey: false });
+    encrypted = 'corrupt-ciphertext';
+    await expect(store.resolveProviderKey(user.id, 'managed-secret')).rejects.toThrow();
+  });
+
   it.each([false, true])('applies measured defaults only when no profile exists (existing=%s)', async (existing) => {
     const writes: Array<Record<string, unknown>> = [];
     const profile = { user_id: user.id, email: user.email, email_verified: true, display_name: 'Person', created_at: user.created_at, settings: { provider: 'openrouter', model: 'chosen-model', effortLevel: 'high' } };

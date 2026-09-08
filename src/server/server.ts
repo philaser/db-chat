@@ -1,3 +1,4 @@
+import { DEFAULT_PERSONAL_PROVIDER_MODELS, PERSONAL_PROVIDER_MODELS, validatePersonalProviderKey } from './model/providers.js';
 import { conversationContext, invalidateKnowledge, parseKnowledge, schemaFingerprint, schemaSuggestions } from './conversationContext.js';
 import { SupabaseSqliteStorage, type SqliteObjectStorage } from './supabaseSqliteStorage.js';
 import { prepareConnectionDestination } from './connectionPolicy.js';
@@ -6,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadWebServerConfig, type WebServerConfig } from './config.js';
+import { defaultEffortForModel, loadWebServerConfig, type WebServerConfig } from './config.js';
 import { AccountStore } from './accountStore.js';
 import type { AccountRepository } from './accountRepository.js';
 import { SupabaseAccountStore } from './supabaseAccountStore.js';
@@ -182,6 +183,7 @@ function publicConfiguredConnection(config: ConnectionConfig, ready: boolean): W
 }
 
 export interface WebServerOptions {
+  validateProviderKey?: typeof validatePersonalProviderKey;
   modelClient?: import('./agent/types.js').AgentModelClient;
   accounts?: AccountRepository;
   sqliteStorage?: SqliteObjectStorage;
@@ -205,6 +207,7 @@ export class WebServer {
   readonly accounts: AccountRepository;
   readonly sessions: WebSessionStore;
   readonly service: WebAgentService;
+  private readonly validateProviderKey: typeof validatePersonalProviderKey;
   private readonly sqliteStorage?: SqliteObjectStorage;
   private readonly submittedTurns = new Map<string, string>();
   private readonly sqliteUploads = new Map<string, UploadedSqliteFile>();
@@ -227,6 +230,7 @@ export class WebServer {
       secretKeyPath: config.secretKeyPath,
       storePath: config.accountStorePath
     }));
+    this.validateProviderKey = options.validateProviderKey ?? validatePersonalProviderKey;
     this.sqliteStorage = options.sqliteStorage ?? (config.storageMode === 'supabase'
       ? new SupabaseSqliteStorage({ url: config.supabase!.url, key: config.supabase!.serviceRoleKey, maxBytes: config.maxSqliteUploadBytes ?? 50 * 1024 * 1024 }) : undefined);
     this.sessions = new WebSessionStore(config.sessionTtlMs);
@@ -486,7 +490,20 @@ export class WebServer {
 
     if (request.method === 'PATCH' && route === '/settings') {
       const body = this.requireRecord(await readJson(request, this.config.maxBodyBytes));
-      const result = await this.accounts.updateSettings(principal.id, {
+      const inference = await this.effectiveInference(principal.id);
+      if (body.model !== undefined || body.effortLevel !== undefined || body.provider !== undefined) {
+        if (!inference.canChangeModel) {
+          sendJson(response, 403, { error: 'Add your own DeepSeek or OpenAI key to choose a model.' }, legacyCookie);
+          return;
+        }
+        if ((body.provider !== undefined && body.provider !== inference.settings.provider)
+          || (body.model !== undefined && !inference.models.some(model => model.id === body.model))
+          || (body.effortLevel !== undefined && !['none', 'low', 'medium', 'high', 'max'].includes(String(body.effortLevel)))) {
+          sendJson(response, 400, { error: 'Choose a supported model and reasoning level for your connected provider.' }, legacyCookie);
+          return;
+        }
+      }
+      await this.accounts.updateSettings(principal.id, {
         displayName: stringField(body, 'displayName'),
         activeConnectionId: body.activeConnectionId === null ? null : stringField(body, 'activeConnectionId'),
         model: stringField(body, 'model'),
@@ -494,7 +511,7 @@ export class WebServer {
         currentPassword: stringField(body, 'currentPassword'),
         newPassword: stringField(body, 'newPassword')
       });
-      sendJson(response, 200, { user: result.user, settings: result.settings }, legacyCookie);
+      sendJson(response, 200, await this.settingsResponse(principal), legacyCookie);
       return;
     }
 
@@ -505,23 +522,38 @@ export class WebServer {
     }
 
     if (request.method === 'POST' && route === '/settings/openrouter-key') {
-      const body = this.requireRecord(await readJson(request, this.config.maxBodyBytes));
-      await this.accounts.setUserKey(principal.id, stringField(body, 'apiKey', true)!);
-      sendJson(response, 202, {
-        hasUserKey: true,
-        credentialSource: 'user',
-        userKeyUiEnabled: Boolean(this.config.userKeyUiEnabled)
-      }, legacyCookie);
+      sendJson(response, 410, { error: 'Personal OpenRouter keys are no longer supported. Connect a DeepSeek or OpenAI key in Inference settings.' }, legacyCookie);
       return;
     }
 
-    if (request.method === 'DELETE' && route === '/settings/openrouter-key') {
+    if (request.method === 'POST' && route === '/settings/provider-key') {
+      if (!this.takeBudget('provider-key:' + principal.id, 10, 60_000)) {
+        sendJson(response, 429, { error: 'Too many connection attempts. Try again in a minute.' }, legacyCookie);
+        return;
+      }
+      const body = this.requireRecord(await readJson(request, this.config.maxBodyBytes));
+      if (body.provider !== 'openai' && body.provider !== 'deepseek') {
+        sendJson(response, 400, { error: 'Choose DeepSeek or OpenAI.' }, legacyCookie);
+        return;
+      }
+      const apiKey = stringField(body, 'apiKey')?.trim();
+      if (!apiKey || apiKey.length < 10 || apiKey.length > 1024 || /[\r\n]/.test(apiKey)) {
+        sendJson(response, 400, { error: 'Enter a valid provider key.' }, legacyCookie);
+        return;
+      }
+      try { await this.validateProviderKey(body.provider, apiKey); }
+      catch {
+        sendJson(response, 422, { error: 'Could not verify this key with the selected provider. Check the key and model access, then try again.' }, legacyCookie);
+        return;
+      }
+      await this.accounts.setUserProviderKey(principal.id, body.provider, apiKey);
+      sendJson(response, 202, await this.settingsResponse(principal), legacyCookie);
+      return;
+    }
+
+    if (request.method === 'DELETE' && (route === '/settings/provider-key' || route === '/settings/openrouter-key')) {
       await this.accounts.removeUserKey(principal.id);
-      sendJson(response, 202, {
-        hasUserKey: false,
-        credentialSource: this.config.openRouterApiKey ? 'internal' : 'none',
-        userKeyUiEnabled: Boolean(this.config.userKeyUiEnabled)
-      }, legacyCookie);
+      sendJson(response, 202, await this.settingsResponse(principal), legacyCookie);
       return;
     }
 
@@ -953,8 +985,10 @@ export class WebServer {
     activeConnectionId?: string;
     settings: WebAccountSettings;
     inference: {
-      provider: 'openrouter';
+      provider: WebAccountSettings['provider'];
       model: string;
+      canChangeModel: boolean;
+      models: Array<{ id: string; name: string }>;
       credentialSource: 'user' | 'internal' | 'none';
       hasUserKey: boolean;
       userKeyUiEnabled: boolean;
@@ -970,18 +1004,13 @@ export class WebServer {
     };
   }> {
     const user = await this.userForPrincipal(principal);
-    let settings: WebAccountSettings;
-    try {
-      settings = await this.accounts.getSettings(principal.id);
-    } catch {
-      settings = { provider: 'openrouter', model: this.config.model, effortLevel: 'medium' };
-    }
+    const effective = await this.effectiveInference(principal.id);
+    const { settings, credential } = effective;
     let connections = await this.connectionsForPrincipal(principal);
     if (connections.length === 0 && this.config.database && this.config.authMode === 'dev') {
       connections = [publicConfiguredConnection(this.config.database, this.service.getBootstrap().ready)];
     }
     const activeConnectionId = settings.activeConnectionId ?? connections.find((connection) => connection.status === 'ready')?.id;
-    const credential = await this.accounts.resolveProviderKey(principal.id, this.config.openRouterApiKey);
     return {
       ready: Boolean(activeConnectionId && connections.some((connection) => connection.id === activeConnectionId && connection.status === 'ready')),
       user,
@@ -989,11 +1018,13 @@ export class WebServer {
       activeConnectionId,
       settings,
       inference: {
-        provider: 'openrouter',
-        model: settings.model || this.config.model,
+        provider: settings.provider,
+        model: settings.model,
+        canChangeModel: effective.canChangeModel,
+        models: effective.models,
         credentialSource: credential.source,
         hasUserKey: credential.hasUserKey,
-        userKeyUiEnabled: Boolean(this.config.userKeyUiEnabled),
+        userKeyUiEnabled: true,
         status: credential.source === 'none' ? 'unavailable' : 'ready'
       },
       capabilities: { queryResults: true, csvExport: true, charts: true },
@@ -1005,6 +1036,22 @@ export class WebServer {
         maxSqliteUploadBytes: this.config.maxSqliteUploadBytes
       }
     };
+  }
+
+  private async effectiveInference(userId: string) {
+    const stored = await this.accounts.getSettings(userId);
+    const credential = await this.accounts.resolveProviderKey(userId, this.config.openRouterApiKey);
+    const personal = credential.source === 'user' && (credential.provider === 'openai' || credential.provider === 'deepseek');
+    if (!personal) {
+      return {
+        settings: { ...stored, provider: 'openrouter' as const, model: this.config.model, effortLevel: defaultEffortForModel(this.config.model) },
+        credential, canChangeModel: false, models: [{ id: this.config.model, name: this.config.model === 'google/gemini-2.5-flash' ? 'Gemini 2.5 Flash' : this.config.model }]
+      };
+    }
+    const provider = credential.provider as 'openai' | 'deepseek';
+    const models = PERSONAL_PROVIDER_MODELS[provider];
+    const model = stored.provider === provider && models.some(option => option.id === stored.model) ? stored.model : DEFAULT_PERSONAL_PROVIDER_MODELS[provider];
+    return { settings: { ...stored, provider, model }, credential, canChangeModel: true, models };
   }
 
   private async settingsResponse(principal: Principal): Promise<Record<string, unknown>> {
@@ -1124,8 +1171,7 @@ export class WebServer {
       const connection = turn.connectionId ? await this.connectionConfigForPrincipal(principal, turn.connectionId) : this.config.database;
       if (!connection) throw new Error('The selected connection is no longer available.');
       await prepareConnectionDestination(connection, this.config.allowedDatabaseHosts);
-      const provider = await this.accounts.resolveProviderKey(turn.principalId, this.config.openRouterApiKey);
-      const settings = await this.accounts.getSettings(turn.principalId);
+      const { credential: provider, settings } = await this.effectiveInference(turn.principalId);
       const knowledge = await this.accounts.getConnectionKnowledge(turn.principalId, connection.id);
       const source: SourceSnapshot = { connectionId: connection.id, label: connection.label, kind: connection.kind, capturedAt: new Date().toISOString() };
       const result = await this.withSqliteConnection(turn.principalId, connection, local => this.service.run(turn.messages, turn.id,
@@ -1144,7 +1190,7 @@ export class WebServer {
             void turn.persistence.catch(() => undefined);
           }
         }, turn.abortController.signal,
-        local, provider.apiKey, settings.model, settings.effortLevel, { referencedArtifacts: turn.referencedArtifacts ?? [], knowledge, source, onSchema: async schema => { await this.refreshKnowledgeSchema(turn.principalId, connection.id, schema); } }), turn.abortController.signal);
+        local, provider.apiKey, settings.model, settings.effortLevel, { referencedArtifacts: turn.referencedArtifacts ?? [], knowledge, source, onSchema: async schema => { await this.refreshKnowledgeSchema(turn.principalId, connection.id, schema); } }, settings.provider), turn.abortController.signal);
       turn.metrics = result.metrics ?? result.message.metrics ?? turn.metrics;
       await turn.persistence;
       if (turn.abortController.signal.aborted) throw new Error(turn.error ?? 'Turn cancelled.');

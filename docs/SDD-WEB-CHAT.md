@@ -46,6 +46,14 @@ The conversation contract now includes:
   is unavailable rather than an invented zero. Synthetic evaluation distinguishes
   deterministic contracts from live model correctness and narrative review.
 
+The inference contract uses Gemini 2.5 Flash for every account through DB
+Chat's managed OpenRouter path. Managed accounts see the selected model as
+read-only. A user may switch models only after adding and validating their own
+OpenAI or DeepSeek API key; OpenRouter keys are not accepted as user keys.
+Personal keys remain server-side and are represented only by their configured
+state. Removing a personal key immediately returns the account to managed
+Gemini 2.5 Flash.
+
 The runtime remains a single Node instance for active-turn ownership. Additional
 instances require coordinated leases/recovery before horizontal scaling. New
 control-plane migrations must be applied before deploying a build that needs

@@ -69,7 +69,7 @@ describe('durable web turn integration', () => {
     f.accounts.updateChat(f.auth.user.id,f.chat.id,{artifacts:[artifact]});
     const id=await f.submit(); await vi.waitFor(async()=>expect((await f.snapshot(id)).status).toBe('error'));
     expect(f.accounts.getChat(f.auth.user.id,f.chat.id)?.artifacts).toEqual([artifact]);
-    expect(f.accounts.getChat(f.auth.user.id,f.chat.id)?.messages.at(-1)?.metrics).toMatchObject({ terminalReason: 'error', totalMs: expect.any(Number), model: 'fixture' });
+    expect(f.accounts.getChat(f.auth.user.id,f.chat.id)?.messages.at(-1)?.metrics).toMatchObject({ terminalReason: 'error', totalMs: expect.any(Number), model: 'google/gemini-2.5-flash' });
     const restartedBase=await start(f.accounts,f.model,f.database);
     const recovered=await f.snapshot(id,restartedBase); expect(recovered.status).toBe('error'); expect(recovered.events.at(-1)?.type).toBe('error');
     expect(f.accounts.interruptPendingTurns).toHaveBeenCalledTimes(2); expect(f.calls()).toBe(1);

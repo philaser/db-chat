@@ -1,10 +1,11 @@
 import { referencedResultIds } from './conversationContext.js';
 import { defaultEffortForModel } from './config.js';
+import { DEFAULT_PERSONAL_PROVIDER_MODELS } from './model/providers.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { SecretVault, splitSecrets, displayConnection, customChatTitle, type AccountStore, type ConnectionTestResult, type StoredConnection } from './accountStore.js';
 import { publicConnectionUri } from '../shared/connectionSecrets.js';
 import type { ConnectionKnowledge, SourceSnapshot, ChatMessage, ConnectionConfig, QueryResultArtifact, WebChatSession, WebChatSummary } from '../shared/types.js';
-import type { Principal, WebAccountSettings, WebUser, WebTurnSnapshot } from './types.js';
+import type { PersonalInferenceProvider, Principal, ResolvedProviderKey, WebAccountSettings, WebUser, WebTurnSnapshot } from './types.js';
 import type { AccountRepository } from './accountRepository.js';
 interface AuthUser { id: string; email?: string; email_confirmed_at?: string; created_at: string; user_metadata?: { display_name?: string } }
 interface AuthTokens { access_token: string; refresh_token: string; expires_in: number; user: AuthUser }
@@ -154,6 +155,7 @@ export class SupabaseAccountStore implements AccountRepository {
     if (patch.displayName !== undefined) { if (!patch.displayName.trim() || patch.displayName.trim().length > 80) throw new Error('Enter a display name of up to 80 characters.'); profile.display_name = patch.displayName.trim(); }
     if (patch.activeConnectionId !== undefined) { if (patch.activeConnectionId !== null && !await this.getConnectionSummary(userId, patch.activeConnectionId)) throw new Error('Choose one of your connections.'); settings.activeConnectionId = patch.activeConnectionId ?? undefined; }
     if (patch.model !== undefined) settings.model = patch.model.trim() || this.options.defaultModel;
+    if (patch.provider !== undefined) settings.provider = patch.provider;
     if (patch.effortLevel !== undefined) settings.effortLevel = patch.effortLevel;
     if (patch.newPassword !== undefined) {
       this.assertPassword(patch.newPassword);
@@ -271,10 +273,26 @@ export class SupabaseAccountStore implements AccountRepository {
     const chat = await this.getChat(userId, chatId); if (!chat) throw new Error('Chat not found.'); return chat;
   }
   async deleteChat(userId: string, id: string) { return this.remove('dbchat_chats', userId, this.idFilter(id)); }
-  async hasUserKey(userId: string) { return Boolean((await this.profile(userId)).encrypted_provider_key); }
+  async hasUserKey(userId: string) { const value = (await this.profile(userId)).encrypted_provider_key; return value ? this.personalProviderKey(value) !== null : false; }
+  /** @deprecated Retained for pre-provider OpenRouter credential compatibility. */
   async setUserKey(userId: string, key: string) { if (key.trim().length < 10) throw new Error('Enter a valid provider key.'); await this.patch('dbchat_profiles', userId, { encrypted_provider_key: this.vault.encrypt(key.trim()) }); }
-  async removeUserKey(userId: string) { await this.patch('dbchat_profiles', userId, { encrypted_provider_key: null }); }
-  async resolveProviderKey(userId: string, internalKey?: string): Promise<{ source: 'user' | 'internal' | 'none'; apiKey?: string; hasUserKey: boolean }> { const value = (await this.profile(userId)).encrypted_provider_key; return value ? { source: 'user', apiKey: this.vault.decrypt(value), hasUserKey: true } : { source: internalKey ? 'internal' : 'none', apiKey: internalKey, hasUserKey: false }; }
+  async setUserProviderKey(userId: string, provider: PersonalInferenceProvider, key: string) {
+    const value = key.trim(); if (value.length < 10) throw new Error('Enter a valid provider key.');
+    const profile = await this.profile(userId);
+    const settings: WebAccountSettings = { ...profile.settings, provider, model: DEFAULT_PERSONAL_PROVIDER_MODELS[provider], effortLevel: 'low' };
+    await this.patch('dbchat_profiles', userId, { encrypted_provider_key: this.vault.encrypt(JSON.stringify({ provider, apiKey: value })), settings });
+  }
+  async removeUserKey(userId: string) { const profile = await this.profile(userId); await this.patch('dbchat_profiles', userId, { encrypted_provider_key: null, settings: { ...profile.settings, ...this.defaultSettings() } }); }
+  async resolveProviderKey(userId: string, internalKey?: string): Promise<ResolvedProviderKey> { const value = (await this.profile(userId)).encrypted_provider_key; const personal = value ? this.personalProviderKey(value) : null; return personal ? { ...personal, source: 'user', hasUserKey: true } : { provider: 'openrouter', source: internalKey ? 'internal' : 'none', apiKey: internalKey, hasUserKey: false }; }
+  private personalProviderKey(encrypted: string): { provider: PersonalInferenceProvider; apiKey: string } | null {
+    const plaintext = this.vault.decrypt(encrypted);
+    if (!plaintext.trimStart().startsWith('{')) return null;
+    let value: unknown; try { value = JSON.parse(plaintext); } catch { throw new Error('Stored provider key is invalid. Remove it and add it again.'); }
+    if (!value || typeof value !== 'object') throw new Error('Stored provider key is invalid. Remove it and add it again.');
+    const envelope = value as { provider?: unknown; apiKey?: unknown };
+    if ((envelope.provider !== 'openai' && envelope.provider !== 'deepseek') || typeof envelope.apiKey !== 'string' || envelope.apiKey.trim().length < 10) throw new Error('Stored provider key is invalid. Remove it and add it again.');
+    return { provider: envelope.provider, apiKey: envelope.apiKey };
+  }
   async interruptPendingTurns(): Promise<void> { await this.request('/rest/v1/rpc/dbchat_interrupt_pending_turns', 'POST', {}); }
   async saveTurn(userId: string, snapshot: WebTurnSnapshot): Promise<void> { await this.request('/rest/v1/rpc/dbchat_save_turn', 'POST', { owner: userId, turn: snapshot }); }
   async getTurnByRequestId(userId: string, requestId: string): Promise<WebTurnSnapshot | null> {

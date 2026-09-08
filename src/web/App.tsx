@@ -97,7 +97,7 @@ interface WebConnection {
 }
 
 interface WebSettings {
-  provider: 'openrouter';
+  provider: 'openrouter' | 'openai' | 'deepseek';
   model: string;
   effortLevel: 'none' | 'low' | 'medium' | 'high' | 'max';
   activeConnectionId?: string;
@@ -110,11 +110,13 @@ interface BootstrapState {
   activeConnectionId?: string;
   settings: WebSettings;
   inference: {
-    provider: 'openrouter';
+    provider: 'openrouter' | 'openai' | 'deepseek';
     model: string;
     credentialSource: 'user' | 'internal' | 'none';
     hasUserKey: boolean;
     userKeyUiEnabled: boolean;
+    canChangeModel: boolean;
+    models: Array<{ id: string; name: string }>;
     status: 'ready' | 'unavailable';
   };
   capabilities: { queryResults: boolean; csvExport: boolean; charts: boolean };
@@ -137,7 +139,7 @@ export function getInferenceCallout(inference: BootstrapState['inference']): {
       available: false,
       title: 'Inference unavailable',
       description: inference.userKeyUiEnabled
-        ? 'Add an OpenRouter key to use chat.'
+        ? 'Add an OpenAI or DeepSeek key to use personal inference.'
         : 'Answers are temporarily unavailable. Your connections and saved chats are still accessible.'
     };
   }
@@ -146,12 +148,12 @@ export function getInferenceCallout(inference: BootstrapState['inference']): {
     ? {
         available: true,
         title: 'Provider key ready',
-        description: 'DB Chat will use your stored OpenRouter key.'
+        description: `DB Chat will use your stored ${inference.provider === 'openai' ? 'OpenAI' : 'DeepSeek'} key.`
       }
     : {
         available: true,
         title: 'Managed inference ready',
-        description: 'DB Chat will use the service OpenRouter key.'
+        description: 'DB Chat uses the shared managed model.'
       };
 }
 
@@ -2809,14 +2811,51 @@ export function ConnectionForm({
   );
 }
 
-function InferencePage({
+export function InferencePage({
   bootstrap,
-  onRefresh: _onRefresh
+  onRefresh
 }: {
   bootstrap: BootstrapState;
   onRefresh: () => Promise<void>;
 }) {
   const callout = getInferenceCallout(bootstrap.inference);
+  const personal = bootstrap.inference.canChangeModel && bootstrap.inference.credentialSource === 'user';
+  const [provider, setProvider] = useState<'openai' | 'deepseek'>(bootstrap.inference.provider === 'deepseek' ? 'deepseek' : 'openai');
+  const [apiKey, setApiKey] = useState('');
+  const [model, setModel] = useState(bootstrap.inference.model);
+  const [effortLevel, setEffortLevel] = useState(bootstrap.settings.effortLevel);
+  const [pending, setPending] = useState<'key' | 'settings' | 'remove' | null>(null);
+  const [status, setStatus] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setModel(bootstrap.inference.model);
+    setEffortLevel(bootstrap.settings.effortLevel);
+    if (bootstrap.inference.provider === 'openai' || bootstrap.inference.provider === 'deepseek') setProvider(bootstrap.inference.provider);
+  }, [bootstrap]);
+
+  const saveKey = async (event: FormEvent) => {
+    event.preventDefault(); setStatus(''); setError(''); setPending('key');
+    try {
+      await api('/api/v1/settings/provider-key', { method: 'POST', body: JSON.stringify({ provider, apiKey }) });
+      setApiKey(''); await onRefresh(); setStatus(`${provider === 'openai' ? 'OpenAI' : 'DeepSeek'} key saved.`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'The provider key could not be saved.'); }
+    finally { setPending(null); }
+  };
+  const saveSettings = async (event: FormEvent) => {
+    event.preventDefault(); setStatus(''); setError(''); setPending('settings');
+    try {
+      await api('/api/v1/settings', { method: 'PATCH', body: JSON.stringify({ model, ...(bootstrap.inference.provider === 'openai' ? { effortLevel } : {}) }) });
+      await onRefresh(); setStatus('Inference settings saved.');
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Inference settings could not be saved.'); }
+    finally { setPending(null); }
+  };
+  const removeKey = async () => {
+    setStatus(''); setError(''); setPending('remove');
+    try { await api('/api/v1/settings/provider-key', { method: 'DELETE' }); await onRefresh(); setStatus('Personal key removed. Managed inference is active.'); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'The provider key could not be removed.'); }
+    finally { setPending(null); }
+  };
 
   return (
     <div className="settings-sections">
@@ -2829,10 +2868,22 @@ function InferencePage({
           </div>
           <StatusLine status={callout.available ? 'healthy' : 'unavailable'} label={callout.available ? 'Ready' : 'Unavailable'} />
         </div>
+        {error && <Alert>{error}</Alert>}
+        {status && <Alert tone="success">{status}</Alert>}
         <div className="inference-summary">
-          <div className="inference-summary-row"><span>Provider</span><strong>OpenRouter</strong></div>
-          <div className="inference-summary-row"><span>Model</span><code>{bootstrap.inference.model}</code></div>
+          <div className="inference-summary-row"><span>Mode</span><strong>{personal ? 'Personal provider' : 'Managed by DB Chat'}</strong></div>
+          <div className="inference-summary-row"><span>Provider</span><strong>{personal ? bootstrap.inference.provider === 'openai' ? 'OpenAI' : 'DeepSeek' : 'DB Chat'}</strong></div>
+          <div className="inference-summary-row"><span>Model</span><strong>{bootstrap.inference.models.find((item) => item.id === bootstrap.inference.model)?.name ?? bootstrap.inference.model}</strong></div>
         </div>
+        {personal ? <form className="settings-form inference-form" onSubmit={(event) => void saveSettings(event)}>
+          <label className="field"><span className="field-label">Model</span><span className="select-wrap"><select aria-label="Model" value={model} onChange={(event) => setModel(event.target.value)}>{bootstrap.inference.models.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><ChevronDown size={14} aria-hidden="true" /></span></label>
+          {bootstrap.inference.provider === 'openai' && <label className="field"><span className="field-label">Reasoning effort</span><span className="select-wrap"><select aria-label="Reasoning effort" value={effortLevel} onChange={(event) => setEffortLevel(event.target.value as typeof effortLevel)}>{['none', 'low', 'medium', 'high', 'max'].map((value) => <option value={value} key={value}>{value.charAt(0).toUpperCase() + value.slice(1)}</option>)}</select><ChevronDown size={14} aria-hidden="true" /></span></label>}
+          <div className="form-actions"><Button variant="primary" type="submit" disabled={pending !== null}>{pending === 'settings' ? 'Saving…' : 'Save settings'}</Button><Button variant="destructive" type="button" disabled={pending !== null} onClick={() => void removeKey()}>{pending === 'remove' ? 'Removing…' : 'Remove personal key'}</Button></div>
+        </form> : bootstrap.inference.userKeyUiEnabled && <form className="settings-form inference-form" onSubmit={(event) => void saveKey(event)}>
+          <label className="field"><span className="field-label">Personal provider</span><span className="select-wrap"><select aria-label="Personal provider" value={provider} onChange={(event) => setProvider(event.target.value as 'openai' | 'deepseek')}><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option></select><ChevronDown size={14} aria-hidden="true" /></span><span className="field-helper">Add your own key to choose a model. OpenRouter keys are not accepted.</span></label>
+          <Field label={`${provider === 'openai' ? 'OpenAI' : 'DeepSeek'} API key`} name="provider-api-key" type="password" value={apiKey} onChange={setApiKey} autoComplete="off" required />
+          <Button variant="primary" type="submit" disabled={pending !== null || !apiKey.trim()}>{pending === 'key' ? 'Validating and saving…' : 'Save key'}</Button>
+        </form>}
         <details className="inference-disclosure"><summary>How your data is used</summary><p>Relevant schema context and query results are sent to the AI provider to answer your questions. DB Chat never sends your database credentials.</p></details>
       </section>
       <p className="inference-availability" role="status">{callout.available ? 'AI is ready for your questions.' : callout.description}</p>

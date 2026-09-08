@@ -451,7 +451,7 @@ describe('web server', () => {
     expect(knowledge.schemaFingerprint).not.toBe(initial.schemaFingerprint);
   });
 
-  it('supports hosted accounts, hidden provider keys, and user-owned connections', async () => {
+  it('supports hosted accounts, managed inference, and user-owned connections', async () => {
     server = new WebServer(appConfig(), { modelClient: new FixtureModel() });
     const httpServer = await server.listen();
     const address = httpServer.address() as AddressInfo;
@@ -496,7 +496,7 @@ describe('web server', () => {
       inference: {
         credentialSource: 'none',
         hasUserKey: false,
-        userKeyUiEnabled: false,
+        userKeyUiEnabled: true,
         status: 'unavailable'
       }
     });
@@ -547,7 +547,7 @@ describe('web server', () => {
       headers: { 'Content-Type': 'application/json', Cookie: cookie! },
       body: JSON.stringify({ apiKey: 'sk-or-v1-test-secret' })
     });
-    expect(keyResponse.status).toBe(202);
+    expect(keyResponse.status).toBe(410);
     expect(await keyResponse.json()).not.toHaveProperty('apiKey');
 
     const readyBootstrapResponse = await fetch(`${baseUrl}/api/v1/bootstrap`, {
@@ -559,7 +559,7 @@ describe('web server', () => {
         expect.objectContaining({ id: connectionBody.connection.id, status: 'unavailable' }),
         expect.objectContaining({ id: elasticsearchBody.connection.id, status: 'unavailable' })
       ]),
-      inference: { credentialSource: 'user', hasUserKey: true }
+      inference: { credentialSource: 'none', hasUserKey: false }
     });
 
     const logoutResponse = await fetch(`${baseUrl}/api/v1/auth/logout`, {
