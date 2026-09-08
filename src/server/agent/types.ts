@@ -1,4 +1,4 @@
-import type { EffortLevel, DatabaseConnector, DatabaseSchema, AgentMemory, AgentEvent, AgentToolDefinition, AgentToolResult, ModelChatMessage } from '../../shared/types.js';
+import type { EffortLevel, DatabaseConnector, DatabaseSchema, AgentMemory, AgentEvent, AgentToolDefinition, AgentToolResult, ModelChatMessage, QueryResultArtifact } from '../../shared/types.js';
 import type { MemoryStore } from './MemoryStore.js';
 
 export interface AgentModelClient {
@@ -20,6 +20,12 @@ export interface AgentModelClient {
       function?: { name?: string; arguments?: string };
     }>;
     finishReason?: string;
+    usage?: {
+      promptTokens?: number;
+      completionTokens?: number;
+      totalTokens?: number;
+      costUsd?: number;
+    };
   }>;
 }
 
@@ -47,6 +53,10 @@ export interface ToolContext {
   controller: AgentController;
   connector: DatabaseConnector | null;
   schema: DatabaseSchema | null;
+  /** Resolve only artifacts already authorized for this turn. */
+  resolveArtifact?: (resultId: string) => QueryResultArtifact | undefined;
+  /** Allocate a stable ID before a query result is returned to the model. */
+  allocateResultId?: () => string;
   emitEvent: (event: AgentEvent) => void;
 }
 

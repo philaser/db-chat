@@ -39,9 +39,9 @@ describe('visualization enrichment', () => {
     expect(inferChartType(messages, selected!.nameKey, artifact.result.rows)).toBe('line');
     expect(buildVisualizationInput(messages, selected!)).toMatchObject({
       chartType: 'line',
+      resultId: artifact.queryId,
       nameKey: 'month',
-      valueKeys: ['invoice_count'],
-      rows: artifact.result.rows
+      valueKeys: ['invoice_count']
     });
   });
 

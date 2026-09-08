@@ -64,7 +64,6 @@ describe('email account access', () => {
   });
   it('requires a password and explicit confirmation before account deletion', async () => {
     const fetcher = vi.fn(async (_url: string, _options?: RequestInit) => json({ ok: true })); vi.stubGlobal('fetch', fetcher);
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
     const logout = vi.fn(async () => undefined);
     const bootstrap = {
       ready: true, user: { id: 'fixture', email: 'reader@example.test', displayName: 'Reader', emailVerified: true, createdAt: '2026-09-05' }, connections: [],
@@ -78,8 +77,11 @@ describe('email account access', () => {
     fireEvent.change(screen.getByLabelText('Confirm account password'), { target: { value: 'fixture-password' } });
     fireEvent.click(screen.getByRole('button', { name: 'Delete account' }));
     expect(fetcher).not.toHaveBeenCalled();
-    confirm.mockReturnValue(true);
+    expect(screen.getByRole('dialog', { name: 'Delete your account?' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(fetcher).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Delete account' }));
+    fireEvent.click(screen.getByRole('dialog', { name: 'Delete your account?' }).querySelector('.button-destructive') as HTMLButtonElement);
     await waitFor(() => expect(logout).toHaveBeenCalledOnce());
     expect(fetcher).toHaveBeenCalledWith('/api/v1/account', expect.objectContaining({ method: 'DELETE', body: JSON.stringify({ password: 'fixture-password' }) }));
   });

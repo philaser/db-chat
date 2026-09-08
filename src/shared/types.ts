@@ -40,6 +40,7 @@ export interface ConnectionConfig {
 }
 
 export interface ColumnInfo {
+  foreignKey?: { schema?: string; table: string; column: string };
   name: string;
   type: string;
   nullable: boolean;
@@ -47,11 +48,16 @@ export interface ColumnInfo {
 }
 
 export interface TableInfo {
+  inference?: { partial: boolean; sampledDocuments: number; maxDocuments: number; note?: string };
+  schema?: string;
+  qualifiedName?: string;
+  relationships?: { columns: string[]; referencedSchema?: string; referencedTable: string; referencedColumns: string[] }[];
   name: string;
   columns: ColumnInfo[];
 }
 
 export interface DatabaseSchema {
+  inference?: { partial: boolean; sampledDocuments?: number; maxDocuments?: number; note?: string };
   kind: DatabaseKind;
   label: string;
   tables: TableInfo[];
@@ -67,6 +73,8 @@ export interface QueryResult {
 }
 
 export interface QueryResultArtifact {
+  source?: SourceSnapshot;
+  capturedAt?: string;
   messageId?: string;
   kind: 'query-result';
   queryId: string;
@@ -76,7 +84,48 @@ export interface QueryResultArtifact {
   schema?: DatabaseSchema;
 }
 
+export interface SourceSnapshot {
+  connectionId: string;
+  label: string;
+  kind: string;
+  capturedAt: string;
+}
+
+export interface FollowUpIntent {
+  action: 'compare' | 'filter' | 'explain' | 'inspect-exceptions' | 'change-chart' | 'rerun';
+  artifactId?: string;
+  messageId?: string;
+  text?: string;
+}
+
+export interface ConnectionKnowledge {
+  version: 1;
+  glossary: { id: string; term: string; definition: string; provenance: string; updatedAt: string }[];
+  examples: { id: string; question: string; query: string; provenance: string; verifiedAt: string; schemaFingerprint?: string; invalidatedAt?: string }[];
+  schemaFingerprint?: string;
+  updatedAt: string;
+}
+
+export interface ChatTurnSnapshot {
+  metrics?: TurnMetrics;
+  id: string;
+  chatId?: string;
+  connectionId?: string;
+  assistantMessageId?: string;
+  question?: string;
+  attemptOf?: string;
+  intent?: FollowUpIntent;
+  createdAt?: string;
+  status: 'queued' | 'running' | 'complete' | 'error' | 'aborted';
+  events: { id: number; turnId: string; type: string; timestamp: string; data: Record<string, unknown> }[];
+  message?: ChatMessage;
+  artifacts?: QueryResultArtifact[];
+  error?: string;
+}
+
 export interface WebChatSummary {
+  pinned?: boolean;
+  source?: SourceSnapshot;
   id: string;
   title: string;
   connectionId?: string;
@@ -87,11 +136,37 @@ export interface WebChatSummary {
 }
 
 export interface WebChatSession extends WebChatSummary {
+  latestTurn?: ChatTurnSnapshot;
+  sourceAvailable?: boolean;
+  historyHasMore?: boolean;
+  historyCursor?: string;
   messages: ChatMessage[];
   artifacts: QueryResultArtifact[];
 }
 
+export interface TurnMetrics {
+  promptVersion: string;
+  model: string;
+  startedAtMs?: number;
+  firstUsefulMs?: number;
+  completedAtMs?: number;
+  totalMs?: number;
+  phaseDurationsMs: Record<string, number>;
+  queryCount: number;
+  toolCallCount: number;
+  retryCount: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+  terminalReason: 'completed' | 'incomplete' | 'cancelled' | 'error' | 'length';
+}
+
 export interface ChatMessage {
+  metrics?: TurnMetrics;
+  pinned?: boolean;
+  feedback?: { rating: 'helpful' | 'unhelpful'; correction?: string; updatedAt: string };
+  turn?: { id: string; status: ChatTurnSnapshot['status']; question: string; attemptOf?: string; intent?: FollowUpIntent };
   id: string;
   role: ChatRole;
   content: string;

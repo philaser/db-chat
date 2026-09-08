@@ -89,7 +89,7 @@ becoming a generic dashboard?
 | [SAP: Evolving design systems for AI-driven UX](https://www.sap.com/uk/design/stories-resources/evolving-design-systems-for-ai-driven-ux) | AI interfaces increasingly compose the relevant parts of a workflow around user intent and context. | Define approved answer-packet compositions and state rules so the agent can adapt content without inventing visual language. |
 | [Vercel AI SDK 7](https://vercel.com/blog/ai-sdk-7) | Current AI application patterns include typed tool context, approvals, rich tool UI, and agent observability. | Show connection context and read-only policy as first-class UI, and expose progress without revealing secrets or internal chain-of-thought. |
 | [Vercel AI Elements](https://vercel.com/changelog/introducing-ai-elements) | AI interfaces are moving beyond a single chat bubble into composable messages, response actions, reasoning/tool states, and custom components. | Build the answer as a bounded packet with evidence, SQL disclosure, table, caveat, and refinement actions. |
-| [Linear account preferences](https://linear.app/docs/account-preferences) | Settings are grouped into understandable preference areas and keep personalization close to the account context. | Use a narrow, predictable settings navigation: Profile, Security, Connections, Inference, and Privacy. |
+| [Linear account preferences](https://linear.app/docs/account-preferences) | Settings are grouped into understandable preference areas and keep personalization close to the account context. | Use a narrow, predictable settings navigation for the implemented Profile, Security, Connections, and Inference surfaces. |
 | [Linear security and access](https://linear.app/docs/security-and-access) | Sessions, passkeys, applications, and access controls are visible as managed resources. | Give account security its own surface and show session/access state without mixing it into database connection setup. |
 | [Clerk sign-up and sign-in strategies](https://clerk.com/docs/guides/configure/auth-strategies/sign-up-sign-in-options) | Auth flows are explicit about sign-in methods, verification, recovery, passkeys, and profile management. | Keep sign-up/login focused, make verification and recovery first-class states, and leave provider configuration out of the first screen. |
 | [Stripe Dashboard basics](https://docs.stripe.com/dashboard/basics) | Personal, account, product, and team/security settings are separated into a comprehensible hierarchy. | Separate personal/security settings from product connections and inference settings. |
@@ -179,7 +179,7 @@ desktop token names or values.
 | surface-accent | #F7E9E2 | Selected/action context background |
 | ink | #17232D | Headings, primary body text, SQL |
 | ink-secondary | #536170 | Supporting copy, metadata, descriptions |
-| ink-muted | #7C858D | Placeholder and nonessential labels |
+| ink-muted | #536170 | Placeholder and nonessential labels when readable text is required |
 | border | #E3DED5 | Default separation and field boundaries |
 | border-strong | #C9C5BD | Focus-adjacent or selected boundaries |
 | primary | #C8491D | Main action, active navigation, focus accent |
@@ -203,30 +203,32 @@ single-series chart remains aligned with the primary action language.
 Color is never the only state channel. Pair it with text, icon shape, position,
 or an explicit status sentence. Validate all combinations in the browser
 against WCAG 2.2 AA before release; the values above are design inputs, not a
-completed contrast certification.
+completed contrast certification. Normal-size muted/supporting text must use a
+foreground/background pair with at least 4.5:1 contrast; do not use the muted
+role to justify faint, low-contrast copy.
 
 ### Typography
 
-Use a fast, platform-native sans stack:
+Use Georgia for editorial headings and a Helvetica-like stack for interface
+copy and controls:
 
 ~~~css
-font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-  "Segoe UI", sans-serif;
+font-family: Helvetica, Arial, ui-sans-serif, system-ui, sans-serif;
 ~~~
 
-If Inter is not already bundled, prefer the system fallback rather than adding
-a blocking font dependency.
+Headings use `Georgia, "Times New Roman", serif`. Do not add a blocking font
+dependency.
 
 | Role | Size / line height | Weight | Use |
 | --- | --- | --- | --- |
 | Display | 44 / 52 | 650 | Public-page promise and first-run welcome, desktop only |
 | Page title | 28 / 36 | 650 | Settings and workspace headings |
 | Section title | 20 / 28 | 650 | Panel headings and answer titles |
-| Body | 15 / 24 | 400 | Explanations, prompts, normal copy |
+| Body | 15–16 / 24 | 400 | Explanations, prompts, normal copy |
 | Body strong | 15 / 24 | 600 | Important inline labels |
 | Dense | 13 / 20 | 400 | Metadata, connection details, table controls |
 | Label | 12 / 16 | 600 | Form labels, overlines, status labels |
-| Caption | 11 / 16 | 500 | Timestamps and supporting metadata only |
+| Caption | 12 / 16 | 500 | Timestamps and supporting metadata only |
 | Code | 12 / 18 | 450 | SQL, identifiers, hostnames, error codes |
 
 Rules:
@@ -246,22 +248,25 @@ space-1   4px
 space-2   8px
 space-3  12px
 space-4  16px
-space-5  24px
-space-6  32px
-space-7  48px
-space-8  64px
+space-5  20px
+space-6  24px
+space-7  32px
+space-8  40px
+space-9  48px
+space-10 64px
+space-11 80px
 ~~~
 
-Do not introduce one-off spacing values unless a screenshot or responsive
-constraint proves they are needed.
+These are named 4-point scale tokens used by the current web implementation;
+the 20px, 40px, and 80px steps are intentional scale members, not ad hoc
+exceptions. Prefer these tokens over new one-off values.
 
 ### Radius
 
 ~~~text
-radius-control   8px
-radius-panel    12px
-radius-artifact 16px
-radius-auth     20px
+radius-control   5px
+radius-panel     7px
+radius-composer  9px
 radius-round   999px
 ~~~
 
@@ -271,13 +276,13 @@ tokens. The app should not look like it is made from pills.
 ### Borders and elevation
 
 ~~~text
-border-default  1px solid #DCE2EC
-border-strong   1px solid #C5CEDD
-shadow-soft     0 8px 24px rgba(22, 32, 51, 0.06)
-shadow-focus    0 0 0 3px rgba(79, 70, 229, 0.18)
+border-default  1px solid #E3DED5
+border-strong   1px solid #C9C5BD
+shadow-popover  0 12px 30px rgba(23, 35, 45, 0.12)
+shadow-focus    0 0 0 3px rgba(169, 71, 43, 0.2)
 ~~~
 
-Default surfaces are flat. Apply shadow-soft only to a raised answer packet,
+Default surfaces are flat. Apply shadow-popover only to a raised answer packet,
 modal, or floating account menu. Never use shadow as a substitute for visible
 focus.
 
@@ -343,7 +348,7 @@ chat answer column to remain narrower than the viewport.
 ### Standard behavior
 
 - two-column settings layout may appear if the local navigation remains at
-  least 216px wide;
+  least 224px wide;
 - connection form may use a form column plus a guidance column;
 - answer artifacts may use a result area plus a narrow metadata rail;
 - keep the active connection and account menu in the top bar.
@@ -351,7 +356,9 @@ chat answer column to remain narrower than the viewport.
 ### Wide behavior
 
 - use generous whitespace around the central chat column;
-- keep the main answer packet at 760–860px;
+- keep the main answer/form column bounded at 760px;
+- when an inspector/result rail is present, default it to about 400px and
+  allow resizing down to 360px;
 - optional conversation history may be a collapsible drawer, not a permanent
   desktop inspector;
 - never allow side rails to compress the answer below 640px without reason.
@@ -430,17 +437,15 @@ Settings
 ├── Profile
 ├── Security
 ├── Connections
-├── Inference
-└── Privacy
+└── Inference
 ~~~
 
-Desktop settings use a 216px local navigation column and a content column
+Desktop settings use a 224px local navigation column and a content column
 limited to 760px. Each page begins with a title, a sentence explaining what
 can be changed, and one or more task-oriented sections.
 
-Use a save action only when a group of fields needs transactional saving.
-Otherwise save simple profile preferences immediately and show a small
-confirmation message.
+Use explicit save actions for profile, password, and connection forms. Show a
+small confirmation message after a successful save.
 
 ### 6.5 Connections
 
@@ -548,7 +553,9 @@ Conversation column:
 - assistant response is not a speech bubble;
 - tool/progress events are compact and collapsible;
 - answer packets get the strongest visual frame;
-- follow-up suggestions are text actions or small outlined controls.
+- follow-up suggestions are simple text actions or small outlined controls,
+  with 12–16px vertical padding and 4–8px internal separation; avoid turning
+  each suggestion into a pill or card.
 
 Composer:
 
@@ -884,9 +891,19 @@ AI responses may choose among approved artifact types:
 - query disclosure;
 - warning or caveat;
 - follow-up suggestion.
+- validated KPI and report sections;
+- a focused clarification with selectable choices.
 
 The agent may choose the composition based on the result, but it may not emit
 arbitrary HTML, CSS, unapproved actions, or secret-bearing content.
+
+Report controls use the existing quiet text-action pattern. KPI values use
+tabular numerals and retain units; result controls wrap within their inspector
+surface. Chart controls change the saved display without adding another chat
+message. Pending structured output shows a short preparing state, never raw JSON.
+Failed or stopped attempts retain a plainly labeled state with Retry/Edit and
+their available evidence. Feedback/correction controls must have accessible names
+and a saved/error state. Avoid turning every answer into a toolbar-heavy card.
 
 ## 11. Quality bar
 
@@ -911,11 +928,11 @@ These are intentionally not settled by this guide:
 - final logo and wordmark geometry;
 - custom display typeface, if a later performance budget permits it;
 - dark mode;
-- saved conversations and collections;
+- collections beyond saved/pinned conversations and answers;
 - collaborative sharing;
 - additional database providers;
 - visible user-supplied OpenRouter key controls;
-- advanced chart interaction beyond the first answer packet.
+- linked multi-chart brushing and advanced statistical visualizations.
 
 Any future change to these choices should update this guide and the SDD
 together, with a short decision note explaining why the product boundary

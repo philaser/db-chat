@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useState } from 'react';
-import { AppBar, ChatWorkspace, DataInspector, draftForConnection, modelMessages } from '../src/web/App.js';
+import { AppBar, AssistantContent, ChatWorkspace, DataInspector, draftForConnection, modelMessages, resultLinkLabel } from '../src/web/App.js';
 import { buildConnectionPayload } from '../src/web/connectionPayload.js';
 import type { ChatMessage, QueryResultArtifact, WebChatSession } from '../src/shared/types.js';
 
@@ -36,6 +36,18 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView'); });
 
 describe('web audit regressions', () => {
+  it('renders prose soft line breaks while leaving Markdown list structure intact', () => {
+    const { container } = render(<AssistantContent content={'Ada: 300\nCara: 240\nBen: 170\n\n- one\n- two'} />);
+    expect(container.querySelector('p')).toHaveTextContent('Ada: 300Cara: 240Ben: 170');
+    expect(container.querySelectorAll('p br')).toHaveLength(2);
+    expect(container.querySelectorAll('li')).toHaveLength(2);
+  });
+
+  it('uses a neutral result label unless the server supplies a concise purpose', () => {
+    expect(resultLinkLabel({ ...artifact, result: { ...artifact.result, columns: ['customer', 'country', 'total_spend'] } })).toBe('View results');
+    expect(resultLinkLabel({ ...artifact, purpose: 'Customer spending by total.' })).toBe('View results: Customer spending by total');
+  });
+
   it('preserves port/TLS and nonsecret connection fields when renaming', () => {
     const draft = draftForConnection(connection);
     draft.label = 'Renamed';
@@ -68,6 +80,10 @@ describe('web audit regressions', () => {
     const view = render(<DataInspector artifact={{ ...artifact, result: { ...artifact.result, rows: [], rowCount: 0 } }} connectionId="db" connectionLabel="Analytics" inspectorWidth={384} onInspectorWidthChange={vi.fn()} onClose={close} />);
     expect(screen.getByRole('button', { name: 'Copy' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Export CSV' })).toBeDisabled();
+    const expand = screen.getByRole('button', { name: 'Expand data inspector' });
+    fireEvent.click(expand);
+    expect(screen.getByRole('button', { name: 'Restore data inspector width' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText('Data inspector')).toHaveClass('inspector-expanded');
     fireEvent.keyDown(screen.getByRole('button', { name: 'Close data inspector' }), { key: 'Escape' });
     expect(close).toHaveBeenCalledOnce();
     view.unmount();
@@ -122,6 +138,17 @@ describe('web audit regressions', () => {
     await screen.findByText('First answer');
     expect(within(screen.getByText('First answer').closest('article')!).getByRole('button', { name: /1 row/ })).toBeInTheDocument();
   });
+  it('keeps a saved mobile answer visible until its result is explicitly opened', async () => {
+    vi.stubGlobal('innerWidth', 390);
+    vi.stubGlobal('fetch', vi.fn(async () => response({ chat: savedChat })));
+    render(<ChatWorkspace bootstrap={bootstrap} onNavigate={vi.fn()} newChatKey={0} chatId="chat1" onCreateChat={vi.fn()} onChatChanged={vi.fn()} />);
+
+    await screen.findByText('First answer');
+    expect(screen.queryByLabelText('Data inspector')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /View results.*1 row/ }));
+    expect(screen.getByLabelText('Data inspector')).toBeInTheDocument();
+  });
+
   it('reuses submission identity after a transport failure without duplicating the question', async () => {
     const bodies: Array<Record<string, unknown>> = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
@@ -142,6 +169,169 @@ describe('web audit regressions', () => {
     expect(bodies[1]).toEqual(bodies[0]);
     expect((bodies[1].messages as Array<unknown>)).toHaveLength(3);
     expect(screen.getAllByText('Retry this question')).toHaveLength(1);
+  });
+
+  it('resumes the latest active turn when a saved chat is reloaded', async () => {
+    const activeChat = { ...savedChat, latestTurn: { id: 'turn-active', chatId: 'chat1', connectionId: 'db', assistantMessageId: 'a-active', question: 'Still working?', status: 'running' as const, events: [] } };
+    vi.stubGlobal('fetch', vi.fn(async () => response({ chat: activeChat })));
+    render(<ChatWorkspace bootstrap={bootstrap} onNavigate={vi.fn()} newChatKey={0} chatId="chat1" onCreateChat={vi.fn()} onChatChanged={vi.fn()} />);
+    await waitFor(() => expect(FixtureStream.streams).toHaveLength(1));
+    expect(FixtureStream.streams[0].url).toContain('/chat/turns/turn-active/events');
+    expect(screen.getByText('Recovering active work…')).toBeInTheDocument();
+    expect(screen.getByText('Preparing an answer…')).toBeInTheDocument();
+  });
+
+  it('does not abort an accepted turn when navigation wins the POST race', async () => {
+    let accept!: (value: Response) => void;
+    const calls: Array<{ url: string; method?: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
+      calls.push({ url, method: options?.method });
+      if (url.includes('/chat/turns')) return new Promise<Response>((resolve) => { accept = resolve; });
+      return response({ chat: savedChat });
+    }));
+    const view = render(<ChatWorkspace bootstrap={bootstrap} onNavigate={vi.fn()} newChatKey={0} chatId="chat1" onCreateChat={vi.fn()} onChatChanged={vi.fn()} />);
+    await screen.findByText('First answer');
+    fireEvent.change(screen.getByLabelText('Question'), { target: { value: 'Long question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send question' }));
+    await waitFor(() => expect(typeof accept).toBe('function'));
+    view.rerender(<ChatWorkspace bootstrap={bootstrap} onNavigate={vi.fn()} newChatKey={1} chatId={undefined} onCreateChat={vi.fn()} onChatChanged={vi.fn()} />);
+    accept(response({ turnId: 'accepted-turn' }));
+    await act(() => Promise.resolve());
+    expect(calls.some((call) => call.url.includes('/accepted-turn/abort'))).toBe(false);
+  });
+
+  it('keeps a filter bound to the selected result while the user writes the condition', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    const filterArtifact = { ...artifact, result: { ...artifact.result, rows: [{ revenue: 20 }, { revenue: 5 }], rowCount: 2 } };
+    const filterChat = { ...savedChat, artifacts: [filterArtifact] };
+    vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
+      if (url.includes('/chat/turns')) { bodies.push(JSON.parse(options?.body as string)); return response({ turnId: 'filtered-turn' }); }
+      return response({ chat: filterChat });
+    }));
+    render(<ChatWorkspace bootstrap={bootstrap} onNavigate={vi.fn()} newChatKey={0} chatId="chat1" onCreateChat={vi.fn()} onChatChanged={vi.fn()} />);
+    await screen.findByText('First answer');
+    fireEvent.click(screen.getByRole('button', { name: /^Filter/ }));
+    const composer = screen.getByLabelText('Question');
+    expect(composer).toHaveValue('Filter this result to ');
+    fireEvent.change(composer, { target: { value: 'Filter this result to revenue above 10' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send question' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0].intent).toMatchObject({ action: 'filter', artifactId: 'q1', messageId: 'a1' });
+    expect(bodies[0].question).toBe('Filter this result to revenue above 10');
+  });
+
+  it('keeps scalar answer controls compact and moves secondary refinements into More actions', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response({ chat: savedChat })));
+    render(<ChatWorkspace bootstrap={bootstrap} onNavigate={vi.fn()} newChatKey={0} chatId="chat1" onCreateChat={vi.fn()} onChatChanged={vi.fn()} />);
+    await screen.findByText('First answer');
+    expect(screen.getByRole('button', { name: /Explain/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Filter this result/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('More actions'));
+    expect(screen.getByRole('menuitem', { name: /Rerun with fresh data/ })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /Compare values/ })).not.toBeInTheDocument();
+  });
+
+  it('restores recovery actions from an aborted assistant turn and preserves edit attempt context', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    const abortedChat: WebChatSession = {
+      ...savedChat,
+      messages: [
+        messages[0],
+        {
+          id: 'assistant-aborted',
+          role: 'assistant',
+          content: 'The run was stopped.',
+          createdAt: '2026-09-05T12:00:01Z',
+          turn: { id: 'turn-aborted', status: 'aborted', question: 'First question' }
+        }
+      ],
+      artifacts: []
+    };
+    vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
+      if (url.includes('/chat/turns')) {
+        bodies.push(JSON.parse(options?.body as string));
+        return response({ turnId: 'edited-retry' });
+      }
+      return response({ chat: abortedChat });
+    }));
+    render(<ChatWorkspace bootstrap={bootstrap} onNavigate={vi.fn()} newChatKey={0} chatId="chat1" onCreateChat={vi.fn()} onChatChanged={vi.fn()} />);
+    const recovery = await screen.findByRole('group', { name: 'Cancelled question recovery' });
+    expect(within(recovery).getByRole('button', { name: /Retry/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Explain/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Save$/ })).not.toBeInTheDocument();
+    fireEvent.click(within(recovery).getByRole('button', { name: /Edit question/ }));
+    const composer = screen.getByLabelText('Question');
+    await waitFor(() => expect(composer).toHaveFocus());
+    expect(composer).toHaveValue('First question');
+    fireEvent.change(composer, { target: { value: 'First question, limited to this month' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send question' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toMatchObject({
+      question: 'First question, limited to this month',
+      attemptOf: 'turn-aborted',
+      intent: { action: 'rerun', messageId: 'assistant-aborted' }
+    });
+  });
+
+  it('keeps actions available on an earlier result after a later turn is aborted', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    const chat: WebChatSession = {
+      ...savedChat,
+      messages: [
+        ...messages,
+        { id: 'u2', role: 'user', content: 'Follow-up question', createdAt: '2026-09-05T12:01:00Z' },
+        {
+          id: 'assistant-aborted',
+          role: 'assistant',
+          content: 'The run was stopped.',
+          createdAt: '2026-09-05T12:01:01Z',
+          turn: { id: 'turn-aborted', status: 'aborted', question: 'Rerun this analysis with fresh data.', intent: { action: 'rerun', artifactId: 'q1', messageId: 'a1' } }
+        }
+      ]
+    };
+    vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
+      if (url.includes('/chat/turns')) { bodies.push(JSON.parse(options?.body as string)); return response({ turnId: 'retried-turn' }); }
+      return response({ chat });
+    }));
+    render(<ChatWorkspace bootstrap={bootstrap} onNavigate={vi.fn()} newChatKey={0} chatId="chat1" onCreateChat={vi.fn()} onChatChanged={vi.fn()} />);
+    const earlierAnswer = (await screen.findByText('First answer')).closest('article')!;
+    expect(within(earlierAnswer).getByRole('button', { name: /Explain/ })).toBeInTheDocument();
+    expect(within(earlierAnswer).getByText('Export')).toBeInTheDocument();
+    const recovery = await screen.findByRole('group', { name: 'Cancelled question recovery' });
+    fireEvent.click(within(recovery).getByRole('button', { name: /Edit question/ }));
+    fireEvent.change(screen.getByLabelText('Question'), { target: { value: 'Rerun this for the current month.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send question' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toMatchObject({ attemptOf: 'turn-aborted', intent: { action: 'rerun', artifactId: 'q1', messageId: 'a1' } });
+  });
+
+  it('bounds a 1000-message chat and prepends an older page without duplicates or a scroll jump', async () => {
+    const makeMessage = (index: number): ChatMessage => ({
+      id: `message-${index}`,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `Message ${index}`,
+      createdAt: new Date(Date.UTC(2026, 8, 5, 12, 0, index % 60)).toISOString()
+    });
+    const initial = Array.from({ length: 50 }, (_, index) => makeMessage(950 + index));
+    const older = [...Array.from({ length: 39 }, (_, index) => makeMessage(911 + index)), makeMessage(950)];
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      urls.push(url);
+      if (url.includes('before=message-950')) return response({ chat: { ...savedChat, messages: older, artifacts: [], messageCount: 1000, historyHasMore: true, historyCursor: 'message-911' } });
+      return response({ chat: { ...savedChat, messages: initial, artifacts: [], messageCount: 1000, historyHasMore: true, historyCursor: 'message-950' } });
+    }));
+    const view = render(<ChatWorkspace bootstrap={bootstrap} onNavigate={vi.fn()} newChatKey={0} chatId="chat1" onCreateChat={vi.fn()} onChatChanged={vi.fn()} />);
+    await screen.findByText('Message 999');
+    expect(view.container.querySelectorAll('article.message-row')).toHaveLength(50);
+    const scrollIntoView = vi.mocked(HTMLElement.prototype.scrollIntoView);
+    scrollIntoView.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Load earlier messages' }));
+    await screen.findByText('Message 911');
+    const mountedIds = [...view.container.querySelectorAll<HTMLElement>('article.message-row')].map((row) => row.dataset.messageId);
+    expect(mountedIds).toHaveLength(89);
+    expect(new Set(mountedIds).size).toBe(89);
+    expect(urls.some((url) => url.includes('before=message-950') && url.includes('limit=40'))).toBe(true);
+    expect(scrollIntoView).not.toHaveBeenCalled();
   });
 
 });

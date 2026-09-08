@@ -20,6 +20,7 @@ import {
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT_CAP = 500;
+const SCHEMA_SAMPLE_DOCUMENTS = 20;
 
 export class MongoDBConnector implements DatabaseConnector {
   private client: unknown = null;
@@ -61,11 +62,14 @@ export class MongoDBConnector implements DatabaseConnector {
       .filter((c: { name: string }) => !c.name.startsWith('system.') && !c.name.startsWith('_'));
 
     const tables: TableInfo[] = [];
+    let sampledDocuments = 0;
     for (const coll of visible) {
-      const sample = await db.collection(coll.name).findOne({}, { projection: {}, limit: 1 });
-      const columns = sample ? sampleToColumns(sample) : [];
+      const samples = await db.collection(coll.name).find({}, { projection: {}, maxTimeMS: 30_000 }).limit(SCHEMA_SAMPLE_DOCUMENTS).toArray();
+      sampledDocuments += samples.length;
+      const columns = samplesToColumns(samples);
       tables.push({
         name: coll.name,
+        inference: { partial: true, sampledDocuments: samples.length, maxDocuments: SCHEMA_SAMPLE_DOCUMENTS, note: 'Sampled field names and types; absence is not proof a field does not exist.' },
         columns
       });
     }
@@ -73,11 +77,17 @@ export class MongoDBConnector implements DatabaseConnector {
     return {
       kind: 'mongodb',
       label: this.config?.label ?? 'MongoDB database',
-      tables
+      tables,
+      inference: {
+        partial: true,
+        sampledDocuments,
+        maxDocuments: SCHEMA_SAMPLE_DOCUMENTS * visible.length,
+        note: `Field inference is based on at most ${SCHEMA_SAMPLE_DOCUMENTS} documents per collection. Sparse or differently shaped fields may be absent.`
+      }
     };
   }
 
-  async executeQuery(query: string): Promise<QueryResult> {
+  async executeQuery(query: string, options?: { signal?: AbortSignal }): Promise<QueryResult> {
     const parsed = parseMongoDBQuery(query) as MongoDBParsedRequest;
     const blockedKey = findBlockedKey(parsed);
     if (blockedKey) throw new Error(`MongoDB blocked key "${blockedKey}".`);
@@ -89,17 +99,17 @@ export class MongoDBConnector implements DatabaseConnector {
       return this.executeDocumentWrite(parsed as MongoDBWriteRequest);
     }
 
-    return this.executeRead(parsed as MongoDBReadRequest);
+    return this.executeRead(parsed as MongoDBReadRequest, options?.signal);
   }
 
-  private async executeRead(parsed: MongoDBReadRequest): Promise<QueryResult> {
+  private async executeRead(parsed: MongoDBReadRequest, signal?: AbortSignal): Promise<QueryResult> {
     const db = this.requireDb();
     const collection = db.collection(parsed.collection);
     const start = performance.now();
 
     if (parsed.method === 'count') {
       const filter = (parsed.body.filter ?? {}) as Record<string, unknown>;
-      const count = await collection.countDocuments(filter, { maxTimeMS: 30_000 });
+      const count = await collection.countDocuments(filter, { maxTimeMS: 30_000, signal });
       const elapsedMs = Math.round(performance.now() - start);
       return {
         columns: ['count'],
@@ -117,7 +127,7 @@ export class MongoDBConnector implements DatabaseConnector {
       }
       // Always append a terminal cap: an earlier limit can be expanded by unwind.
       const cappedPipeline = [...pipeline, { $limit: this.maxRows + 1 }];
-      const rows = await collection.aggregate(cappedPipeline, { maxTimeMS: 30_000 }).toArray();
+      const rows = await collection.aggregate(cappedPipeline, { maxTimeMS: 30_000, signal }).toArray();
       const elapsedMs = Math.round(performance.now() - start);
       const resultRows = rows.map((doc: Record<string, unknown>) => normalizeDocument(doc));
       const columns = collectColumns(resultRows);
@@ -132,7 +142,7 @@ export class MongoDBConnector implements DatabaseConnector {
       : DEFAULT_LIMIT;
     const limit = resultLimit(userLimit, this.maxRows);
 
-    const cursor = collection.find(filter, { ...options, maxTimeMS: 30_000 });
+    const cursor = collection.find(filter, { ...options, maxTimeMS: 30_000, signal });
     cursor.limit(parsed.body.limit === undefined || userLimit > this.maxRows ? limit + 1 : limit);
     const docs = await cursor.toArray();
     const elapsedMs = Math.round(performance.now() - start);
@@ -190,7 +200,7 @@ export class MongoDBConnector implements DatabaseConnector {
       return 'The connected MongoDB database has no visible collections.';
     }
 
-    return schema.tables
+    return 'Field inference is partial, based on at most ' + SCHEMA_SAMPLE_DOCUMENTS + ' documents per collection. Sparse fields may be absent.\n' + schema.tables
       .map((coll) => {
         const fields = coll.columns.map((column) => `${column.name} ${column.type}`).join(', ');
         return `MongoDB collection ${coll.name}: ${fields || 'no sample fields available'}`;
@@ -214,8 +224,8 @@ export class MongoDBConnector implements DatabaseConnector {
       collection: (name: string) => {
         findOne: (filter: Record<string, unknown>, options: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
         find: (filter: Record<string, unknown>, options?: Record<string, unknown>) => { limit: (n: number) => { toArray: () => Promise<Record<string, unknown>[]> } & Record<string, unknown> } & { toArray: () => Promise<Record<string, unknown>[]> };
-        aggregate: (pipeline: unknown[], options?: { maxTimeMS: number }) => { toArray: () => Promise<Record<string, unknown>[]> };
-        countDocuments: (filter?: Record<string, unknown>, options?: { maxTimeMS: number }) => Promise<number>;
+        aggregate: (pipeline: unknown[], options?: { maxTimeMS: number; signal?: AbortSignal }) => { toArray: () => Promise<Record<string, unknown>[]> };
+        countDocuments: (filter?: Record<string, unknown>, options?: { maxTimeMS: number; signal?: AbortSignal }) => Promise<number>;
         insertOne: (doc: Record<string, unknown>) => Promise<{ insertedId: unknown; acknowledged: boolean }>;
         updateOne: (filter: Record<string, unknown>, update: Record<string, unknown>) => Promise<{ matchedCount: number; modifiedCount: number; acknowledged: boolean }>;
         deleteOne: (filter: Record<string, unknown>) => Promise<{ deletedCount: number; acknowledged: boolean }>;
@@ -244,11 +254,21 @@ function buildMongoUri(config: ConnectionConfig): string {
   return `mongodb://${credentials}${host}:${port}/${query}`;
 }
 
-function sampleToColumns(doc: Record<string, unknown>): ColumnInfo[] {
-  return Object.entries(doc).map(([key, value]) => ({
+function samplesToColumns(documents: Record<string, unknown>[]): ColumnInfo[] {
+  const fields = new Map<string, Set<string>>();
+  const appearances = new Map<string, number>();
+  for (const document of documents) {
+    for (const [key, value] of Object.entries(document)) {
+      const types = fields.get(key) ?? new Set<string>();
+      types.add(mongoValueType(value));
+      fields.set(key, types);
+      appearances.set(key, (appearances.get(key) ?? 0) + 1);
+    }
+  }
+  return [...fields.entries()].map(([key, types]) => ({
     name: key,
-    type: mongoValueType(value),
-    nullable: true,
+    type: [...types].sort().join(' | '),
+    nullable: (appearances.get(key) ?? 0) < documents.length || types.has('null'),
     primaryKey: key === '_id'
   }));
 }

@@ -8,7 +8,7 @@ import { ToolRegistry } from '../src/server/agent/ToolRegistry.js';
 import type { AgentController, AgentModelClient } from '../src/server/agent/types.js';
 
 describe('agent loop streaming', () => {
-  it('inserts a paragraph boundary between model rounds', async () => {
+  it('emits only final prose after tool activity', async () => {
     const schema: DatabaseSchema = { kind: 'sqlite', label: 'Fixture', tables: [] };
     const connector: DatabaseConnector = {
       connect: vi.fn(),
@@ -78,7 +78,7 @@ describe('agent loop streaming', () => {
       }
     );
 
-    expect(events.filter((event) => event.type === 'text-delta').map((event) => event.data.delta).join('')).toBe('I will check the data.\n\nThe result is clear.');
+    expect(events.filter((event) => event.type === 'text-delta').map((event) => event.data.delta).join('')).toBe('The result is clear.');
     expect(result.message.content).toBe('The result is clear.');
   });
 });

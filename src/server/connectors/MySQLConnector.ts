@@ -38,39 +38,80 @@ export class MySQLConnector implements DatabaseConnector {
       ssl: config.ssl ? { rejectUnauthorized: true, verifyIdentity: true } : undefined,
       connectionLimit: 1
     });
-    const connection = await pool.getConnection();
-    await connection.ping();
-    this.pool = pool;
-    this.connection = connection;
-    this.config = config;
+    try {
+      const connection = await pool.getConnection();
+      await connection.ping();
+      this.pool = pool;
+      this.connection = connection;
+      this.config = config;
+    } catch (error) {
+      await pool.end().catch(() => undefined);
+      throw error;
+    }
   }
 
   async introspect(): Promise<DatabaseSchema> {
     const conn = this.requireConnection();
     const dbName = this.config?.database ?? await currentDatabase(conn);
 
-    const [tableRows] = await conn.query(
-      `select table_name as tableName from information_schema.tables where table_schema = ? and table_type in ('BASE TABLE', 'VIEW') order by table_name`,
-      [dbName]
-    ) as [Array<{ tableName: string }>, unknown];
+    const [[columnRows], [relationshipRows]] = await Promise.all([
+      conn.query(
+        `select t.table_schema as tableSchema, t.table_name as tableName,
+                c.column_name as columnName, c.data_type as dataType,
+                c.is_nullable as isNullable, c.column_key as columnKey
+         from information_schema.tables t
+         join information_schema.columns c
+           on c.table_schema = t.table_schema and c.table_name = t.table_name
+         where t.table_schema = ? and t.table_type in ('BASE TABLE', 'VIEW')
+         order by t.table_name, c.ordinal_position`,
+        [dbName]
+      ) as Promise<[Array<{ tableSchema: string; tableName: string; columnName: string; dataType: string; isNullable: string; columnKey: string }>, unknown]>,
+      conn.query(
+        `select k.table_schema as tableSchema, k.table_name as tableName,
+                k.constraint_name as constraintName, k.column_name as columnName,
+                k.referenced_table_schema as referencedSchema,
+                k.referenced_table_name as referencedTable,
+                k.referenced_column_name as referencedColumn
+         from information_schema.key_column_usage k
+         join information_schema.referential_constraints r
+           on r.constraint_schema = k.constraint_schema
+          and r.constraint_name = k.constraint_name
+          and r.table_name = k.table_name
+         where k.table_schema = ? and k.referenced_table_name is not null
+         order by k.table_name, k.constraint_name, k.ordinal_position`,
+        [dbName]
+      ) as Promise<[Array<{ tableSchema: string; tableName: string; constraintName: string; columnName: string; referencedSchema: string; referencedTable: string; referencedColumn: string }>, unknown]>
+    ]);
 
-    const tables: TableInfo[] = [];
-    for (const row of tableRows) {
-      const [columns] = await conn.query(
-        `select column_name as columnName, data_type as dataType, is_nullable as isNullable, column_key as columnKey from information_schema.columns where table_schema = ? and table_name = ? order by ordinal_position`,
-        [dbName, row.tableName]
-      ) as [Array<{ columnName: string; dataType: string; isNullable: string; columnKey: string }>, unknown];
-
-      tables.push({
-        name: row.tableName,
-        columns: columns.map((col) => ({
-          name: col.columnName,
-          type: col.dataType || 'unknown',
-          nullable: col.isNullable === 'YES',
-          primaryKey: col.columnKey === 'PRI'
-        }))
+    const tableMap = new Map<string, TableInfo>();
+    for (const row of columnRows) {
+      const qualifiedName = `${quoteIdentifier(row.tableSchema)}.${quoteIdentifier(row.tableName)}`;
+      const table = tableMap.get(qualifiedName) ?? { schema: row.tableSchema, name: row.tableName, qualifiedName, columns: [], relationships: [] };
+      table.columns.push({
+        name: row.columnName,
+        type: row.dataType || 'unknown',
+        nullable: row.isNullable === 'YES',
+        primaryKey: row.columnKey === 'PRI'
       });
+      tableMap.set(qualifiedName, table);
     }
+    const constraints = new Map<string, NonNullable<TableInfo['relationships']>[number]>();
+    for (const row of relationshipRows) {
+      const qualifiedName = `${quoteIdentifier(row.tableSchema)}.${quoteIdentifier(row.tableName)}`;
+      const table = tableMap.get(qualifiedName);
+      if (!table) continue;
+      const key = `${row.tableSchema}\0${row.tableName}\0${row.constraintName}`;
+      const relationship = constraints.get(key) ?? {
+        columns: [], referencedSchema: row.referencedSchema,
+        referencedTable: row.referencedTable, referencedColumns: []
+      };
+      relationship.columns.push(row.columnName);
+      relationship.referencedColumns.push(row.referencedColumn);
+      if (!constraints.has(key)) { table.relationships!.push(relationship); constraints.set(key, relationship); }
+      const column = table.columns.find((candidate) => candidate.name === row.columnName);
+      if (column) column.foreignKey = { schema: row.referencedSchema, table: row.referencedTable, column: row.referencedColumn };
+    }
+    const tables = [...tableMap.values()];
 
     return {
       kind: 'mysql',
@@ -83,7 +124,7 @@ export class MySQLConnector implements DatabaseConnector {
     this.safetyLevel = level;
   }
 
-  async executeQuery(query: string): Promise<QueryResult> {
+  async executeQuery(query: string, options?: { signal?: AbortSignal }): Promise<QueryResult> {
     const conn = this.requireConnection();
 
     const validation = QueryValidator.validate(query, this.safetyLevel, this.maxRows);
@@ -92,14 +133,23 @@ export class MySQLConnector implements DatabaseConnector {
     }
     const effectiveQuery = validation.modifiedQuery ?? query;
     const isWrite = validation.isWrite || validation.isDDL;
+    if (options?.signal?.aborted) throw abortError(options.signal);
 
     const start = performance.now();
     let response: unknown;
     if (this.safetyLevel === 'safe') {
       await conn.query('START TRANSACTION READ ONLY');
-      try { response = await conn.query({ sql: effectiveQuery, timeout: 30_000 }); }
-      finally { await conn.query('ROLLBACK'); }
-    } else response = await conn.query({ sql: effectiveQuery, timeout: 30_000 });
+      let queryError: unknown;
+      try {
+        response = await this.queryWithSignal(conn, { sql: effectiveQuery, timeout: 30_000 }, options?.signal);
+      } catch (error) {
+        queryError = error;
+        throw error;
+      } finally {
+        try { await conn.query('ROLLBACK'); }
+        catch (rollbackError) { if (queryError === undefined) throw rollbackError; }
+      }
+    } else response = await this.queryWithSignal(conn, { sql: effectiveQuery, timeout: 30_000 }, options?.signal);
     const [rawResult] = response as [Array<Record<string, unknown>> | { affectedRows?: number; changedRows?: number; insertId?: number | string; warningStatus?: number }, unknown];
     const elapsedMs = Math.round(performance.now() - start);
 
@@ -140,7 +190,7 @@ export class MySQLConnector implements DatabaseConnector {
     return schema.tables
       .map((table) => {
         const columns = table.columns.map((column) => `${column.name} ${column.type}`).join(', ');
-        return `Table ${table.name}: ${columns}`;
+        return `Table ${table.qualifiedName ?? table.name}: ${columns}`;
       })
       .join('\n');
   }
@@ -157,11 +207,48 @@ export class MySQLConnector implements DatabaseConnector {
     if (!this.connection) {
       throw new Error('No database is connected.');
     }
-    return this.connection as { query: (sql: string | { sql: string; timeout: number }, values?: unknown[]) => Promise<unknown>; ping: () => Promise<void> };
+    return this.connection as MySQLConnection;
+  }
+
+  private async queryWithSignal(conn: MySQLConnection, sql: { sql: string; timeout: number }, signal?: AbortSignal): Promise<unknown> {
+    if (!signal) return conn.query(sql);
+    if (signal.aborted) throw abortError(signal);
+    return new Promise((resolve, reject) => {
+      const abort = () => {
+        conn.destroy?.();
+        if (this.connection === conn) {
+          const pool = this.pool as MySQLPool | null;
+          this.connection = null;
+          this.pool = null;
+          this.config = null;
+          pool?.end?.().catch(() => undefined);
+        }
+        reject(abortError(signal));
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      conn.query(sql).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    });
   }
 }
 
-async function currentDatabase(conn: { query: (sql: string | { sql: string; timeout: number }, values?: unknown[]) => Promise<unknown> }): Promise<string> {
+interface MySQLConnection {
+  query: (sql: string | { sql: string; timeout: number }, values?: unknown[]) => Promise<unknown>;
+  ping: () => Promise<void>;
+  destroy?: () => void;
+}
+
+interface MySQLPool { end?: () => Promise<void> }
+
+function abortError(signal: AbortSignal): DOMException {
+  const message = signal.reason instanceof Error ? signal.reason.message : 'MySQL query was cancelled.';
+  return signal.reason instanceof DOMException && signal.reason.name === 'AbortError'
+    ? signal.reason
+    : new DOMException(message, 'AbortError');
+}
+
+async function currentDatabase(conn: MySQLConnection): Promise<string> {
   const [rows] = await conn.query('select database() as db') as [Array<{ db: string }>, unknown];
   return rows[0]?.db ?? '';
 }
+
+function quoteIdentifier(value: string): string { return '`' + value.replaceAll('`', '``') + '`'; }

@@ -1,3 +1,5 @@
+import { referencedResultIds } from './conversationContext.js';
+import { defaultEffortForModel } from './config.js';
 import {
   createCipheriv,
   createDecipheriv,
@@ -11,6 +13,9 @@ import { publicConnectionUri } from '../shared/connectionSecrets.js';
 import path from 'node:path';
 import type {
   ChatMessage,
+  ChatTurnSnapshot,
+  ConnectionKnowledge,
+  SourceSnapshot,
   ConnectionConfig,
   EffortLevel,
   QueryResultArtifact,
@@ -76,6 +81,8 @@ interface AccountStoreSnapshot {
   connections: StoredConnection[];
   chats?: StoredChatSession[];
   sessions?: StoredSession[];
+  turns?: { userId: string; requestId: string; snapshot: ChatTurnSnapshot }[];
+  knowledge?: { userId: string; connectionId: string; value: ConnectionKnowledge }[];
 }
 
 function loadOrCreateSecretKey(keyPath: string): string {
@@ -214,10 +221,13 @@ export function displayChat(stored: StoredChatSession): WebChatSession {
     id: stored.id,
     title: stored.title,
     connectionId: stored.connectionId,
+    source: stored.source,
+    pinned: stored.pinned,
     messageCount: stored.messages.length,
     artifactCount: stored.artifacts.length,
     createdAt: stored.createdAt,
     updatedAt: stored.updatedAt,
+    latestTurn: stored.latestTurn ? structuredClone(stored.latestTurn) : undefined,
     messages: stored.messages.map((message) => ({ ...message })),
     artifacts: stored.artifacts.map((artifact) => ({
       ...artifact,
@@ -235,6 +245,8 @@ export function summarizeChat(stored: StoredChatSession): WebChatSummary {
     id: stored.id,
     title: stored.title,
     connectionId: stored.connectionId,
+    source: stored.source,
+    pinned: stored.pinned,
     messageCount: stored.messages.length,
     artifactCount: stored.artifacts.length,
     createdAt: stored.createdAt,
@@ -263,6 +275,8 @@ export class AccountStore {
   private readonly usersByEmail = new Map<string, string>();
   private readonly sessions = new Map<string, StoredSession>();
   private readonly connections = new Map<string, StoredConnection>();
+  private readonly turns = new Map<string, { userId: string; requestId: string; snapshot: ChatTurnSnapshot }>();
+  private readonly knowledge = new Map<string, { userId: string; connectionId: string; value: ConnectionKnowledge }>();
   private readonly chats = new Map<string, StoredChatSession>();
   private readonly vault: SecretVault;
   private readonly sessionTtlMs: number;
@@ -437,12 +451,35 @@ export class AccountStore {
       .map(summarizeChat);
   }
 
+  searchChats(userId: string, options: { q?: string; connectionId?: string; pinned?: boolean; offset: number; limit: number }): { chats: WebChatSummary[]; total: number; nextOffset?: number } {
+    const query = options.q?.toLowerCase();
+    const chats = [...this.chats.values()].filter(chat => chat.userId === userId && (!options.connectionId || chat.connectionId === options.connectionId || chat.source?.connectionId === options.connectionId) && (!options.pinned || chat.pinned) && (!query || chat.title.toLowerCase().includes(query) || chat.messages.some(message => message.content.toLowerCase().includes(query)))).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    return { chats: chats.slice(options.offset, options.offset + options.limit).map(summarizeChat), total: chats.length, nextOffset: options.offset + options.limit < chats.length ? options.offset + options.limit : undefined };
+  }
+
   getChat(userId: string, chatId: string): WebChatSession | null {
     const chat = this.chats.get(chatId);
     return chat?.userId === userId ? displayChat(chat) : null;
   }
 
-  createChat(userId: string, connectionId?: string): WebChatSession {
+  getChatPage(userId: string, chatId: string, options: { before?: string; limit: number }): WebChatSession | null {
+    const chat = this.getChat(userId, chatId);
+    if (!chat) return null;
+    const end = options.before ? chat.messages.findIndex(message => message.id === options.before) : chat.messages.length;
+    if (end < 0) throw new Error('Invalid history cursor.');
+    const start = Math.max(0, end - options.limit);
+    chat.messages = chat.messages.slice(start, end);
+    const ids = new Set(chat.messages.map(message => message.id));
+    const results = new Set(referencedResultIds(chat.messages));
+    if (chat.latestTurn?.intent?.artifactId && ids.has(chat.latestTurn.assistantMessageId ?? '')) results.add(chat.latestTurn.intent.artifactId);
+    chat.artifacts = chat.artifacts.filter(artifact => results.has(artifact.queryId) || (artifact.messageId ? ids.has(artifact.messageId) : start === 0));
+    chat.historyHasMore = start > 0;
+    chat.historyCursor = chat.historyHasMore ? chat.messages[0]?.id : undefined;
+    if (chat.latestTurn) chat.latestTurn = { ...chat.latestTurn, events: [], artifacts: undefined };
+    return chat;
+  }
+
+  createChat(userId: string, connectionId?: string, source?: SourceSnapshot): WebChatSession {
     this.assertUser(userId);
     const now = new Date().toISOString();
     const chat: StoredChatSession = {
@@ -450,6 +487,7 @@ export class AccountStore {
       userId,
       title: 'New chat',
       customTitle: false,
+      source: source ?? (connectionId && this.getConnectionSummary(userId, connectionId) ? { connectionId, label: this.getConnectionSummary(userId, connectionId)!.label, kind: this.getConnectionSummary(userId, connectionId)!.kind, capturedAt: now } : undefined),
       connectionId,
       messageCount: 0,
       artifactCount: 0,
@@ -465,6 +503,7 @@ export class AccountStore {
 
   updateChat(userId: string, chatId: string, patch: {
     title?: string;
+    pinned?: boolean;
     connectionId?: string;
     messages?: ChatMessage[];
     artifacts?: QueryResultArtifact[];
@@ -475,9 +514,8 @@ export class AccountStore {
       chat.title = customChatTitle(patch.title);
       chat.customTitle = true;
     }
-    if (patch.connectionId !== undefined) {
-      chat.connectionId = patch.connectionId;
-    }
+    if (patch.connectionId !== undefined && patch.connectionId !== chat.connectionId) throw new Error('The original source cannot be changed.');
+    if (patch.pinned !== undefined) chat.pinned = patch.pinned;
     if (patch.messages !== undefined) chat.messages = patch.messages.map((message) => ({ ...message }));
     if (patch.artifacts !== undefined) chat.artifacts = patch.artifacts.map((artifact) => ({
       ...artifact,
@@ -495,10 +533,92 @@ export class AccountStore {
     return displayChat(chat);
   }
 
+  getConnectionKnowledge(userId: string, connectionId: string): ConnectionKnowledge {
+    return structuredClone(this.knowledge.get(userId + ':' + connectionId)?.value ?? { version: 1, glossary: [], examples: [], updatedAt: new Date().toISOString() });
+  }
+
+  saveConnectionKnowledge(userId: string, connectionId: string, value: ConnectionKnowledge): ConnectionKnowledge {
+    this.assertUser(userId);
+    this.knowledge.set(userId + ':' + connectionId, { userId, connectionId, value: structuredClone(value) });
+    this.persist();
+    return structuredClone(value);
+  }
+
+  updateMessageMetadata(userId: string, chatId: string, messageId: string, patch: Pick<ChatMessage, 'pinned' | 'feedback'>): WebChatSession {
+    const chat = this.chats.get(chatId);
+    const message = chat?.userId === userId ? chat.messages.find(item => item.id === messageId) : undefined;
+    if (!message || message.role !== 'assistant') throw new Error('Answer not found.');
+    Object.assign(message, patch);
+    this.persist();
+    return displayChat(chat!);
+  }
+
+  claimTurn(userId: string, turnId: string, chatId: string, requestId: string, userMessage: ChatMessage, assistantMessageId: string): { turnId: string; created: boolean } {
+    const prior = [...this.turns.values()].find(item => item.userId === userId && item.requestId === requestId);
+    if (prior) {
+      if (prior.snapshot.chatId !== chatId) throw new Error('Request belongs to another chat.');
+      return { turnId: prior.snapshot.id, created: false };
+    }
+    const chat = this.chats.get(chatId);
+    if (!chat || chat.userId !== userId) throw new Error('Chat not found.');
+    if ([...this.turns.values()].some(item => item.userId === userId && item.snapshot.chatId === chatId && ['queued', 'running'].includes(item.snapshot.status))) throw new Error('A turn is already active in this chat.');
+    if (userMessage.id === assistantMessageId || chat.messages.some(message => message.id === userMessage.id || message.id === assistantMessageId)) throw new Error('Message identifiers must be unique within this chat.');
+    const snapshot: ChatTurnSnapshot = { id: turnId, chatId, connectionId: chat.connectionId, question: userMessage.content, assistantMessageId, createdAt: userMessage.createdAt, status: 'queued', events: [] };
+    this.turns.set(turnId, { userId, requestId, snapshot });
+    chat.latestTurn = snapshot;
+    this.updateChat(userId, chatId, { messages: [...chat.messages, userMessage] });
+    return { turnId, created: true };
+  }
+
+  saveTurn(userId: string, snapshot: ChatTurnSnapshot): void {
+    const old = this.turns.get(snapshot.id);
+    if (old && old.userId !== userId) throw new Error('Turn not found.');
+    if (old && !['queued', 'running'].includes(old.snapshot.status)) return;
+    this.turns.set(snapshot.id, { userId, requestId: old?.requestId ?? snapshot.id, snapshot: structuredClone(snapshot) });
+    const chat = snapshot.chatId ? this.chats.get(snapshot.chatId) : undefined;
+    if (chat?.userId === userId) chat.latestTurn = structuredClone(snapshot);
+    this.persist();
+  }
+
+  getTurnByRequestId(userId: string, requestId: string): ChatTurnSnapshot | null {
+    const stored = [...this.turns.values()].find(turn => turn.userId === userId && turn.requestId === requestId);
+    return stored ? structuredClone(stored.snapshot) : null;
+  }
+
+  getTurn(userId: string, turnId: string): ChatTurnSnapshot | null {
+    const stored = this.turns.get(turnId);
+    return stored?.userId === userId ? structuredClone(stored.snapshot) : null;
+  }
+
+  finalizeTurn(userId: string, snapshot: ChatTurnSnapshot, message?: ChatMessage, artifacts: QueryResultArtifact[] = snapshot.artifacts ?? []): void {
+    const previous = this.turns.get(snapshot.id);
+    if (!previous || previous.userId !== userId) throw new Error('Turn not found.');
+    if (!['queued', 'running'].includes(previous.snapshot.status)) return;
+    const chat = snapshot.chatId ? this.chats.get(snapshot.chatId) : undefined;
+    if (chat?.userId === userId) {
+      const terminalMessage = message ?? (snapshot.assistantMessageId ? {
+        id: snapshot.assistantMessageId, role: 'assistant' as const, content: snapshot.error ?? 'Answer stopped.', createdAt: new Date().toISOString(),
+        turn: { id: snapshot.id, status: snapshot.status, question: snapshot.question ?? '', attemptOf: snapshot.attemptOf, intent: snapshot.intent }
+      } : undefined);
+      snapshot.message = terminalMessage;
+      this.updateChat(userId, chat.id, { messages: terminalMessage ? [...chat.messages.filter(m => m.id !== terminalMessage.id), terminalMessage] : chat.messages, artifacts: [...chat.artifacts, ...artifacts] });
+      chat.latestTurn = structuredClone(snapshot);
+    }
+    previous.snapshot = structuredClone(snapshot);
+    this.persist();
+  }
+
+  interruptPendingTurns(): void {
+    for (const stored of this.turns.values()) {
+      if (['queued', 'running'].includes(stored.snapshot.status)) this.finalizeTurn(stored.userId, { ...stored.snapshot, status: 'error', error: 'The server restarted before this answer finished. Please retry.' });
+    }
+  }
+
   deleteChat(userId: string, chatId: string): boolean {
     const chat = this.chats.get(chatId);
     if (!chat || chat.userId !== userId) return false;
     this.chats.delete(chatId);
+    for (const [id, turn] of this.turns) if (turn.userId === userId && turn.snapshot.chatId === chatId) this.turns.delete(id);
     this.persist();
     return true;
   }
@@ -565,6 +685,7 @@ export class AccountStore {
     const connection = this.connections.get(connectionId);
     if (!connection || connection.userId !== userId) return false;
     this.connections.delete(connectionId);
+    this.knowledge.delete(userId + ':' + connectionId);
     const user = this.users.get(userId);
     if (user?.settings.activeConnectionId === connectionId) {
       const next = this.listConnections(userId)[0];
@@ -673,6 +794,8 @@ export class AccountStore {
       chat.artifactCount = chat.artifacts.length;
       this.chats.set(chat.id, chat);
     }
+    for (const turn of snapshot.turns ?? []) this.turns.set(turn.snapshot.id, turn);
+    for (const entry of snapshot.knowledge ?? []) this.knowledge.set(entry.userId + ':' + entry.connectionId, entry);
     const now = Date.now();
     for (const session of snapshot.sessions ?? []) {
       if (!session.revokedAt && session.expiresAt > now && session.absoluteExpiresAt > now) {
@@ -690,7 +813,9 @@ export class AccountStore {
       users: [...this.users.values()],
       connections: [...this.connections.values()],
       chats: [...this.chats.values()],
-      sessions: [...this.sessions.values()]
+      sessions: [...this.sessions.values()],
+      turns: [...this.turns.values()],
+      knowledge: [...this.knowledge.values()]
     };
     const temporaryPath = this.storePath + '.' + process.pid + '.tmp';
     fs.writeFileSync(temporaryPath, JSON.stringify(snapshot, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
@@ -706,7 +831,7 @@ export class AccountStore {
     return {
       provider: 'openrouter',
       model: this.defaultModel,
-      effortLevel: 'medium'
+      effortLevel: defaultEffortForModel(this.defaultModel)
     };
   }
 

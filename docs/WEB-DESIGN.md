@@ -44,8 +44,8 @@ and understandable, then make data work fast to scan and verify.
 Composed Clarity is a light-first, editorial, artifact-led workspace:
 
 - warm neutral canvas and white work surfaces;
-- cobalt-indigo for primary actions and focus;
-- teal, amber, coral, and violet for semantic/data signals;
+- rust for primary actions and focus;
+- green, amber, coral, and bookish secondary colors for semantic/data signals;
 - restrained depth for framed forms and result artifacts;
 - clear typography with tabular numerals for data;
 - short motion that explains state changes;
@@ -84,6 +84,11 @@ Utility bar
 The utility bar remains compact but is not a desktop title bar. On narrow
 screens, the connection selector and account menu remain available through
 accessible controls rather than disappearing.
+
+On wide screens, authenticated chat may include a 224px conversation
+navigation rail and an adaptive result/inspector rail that defaults to about
+400px with a 360px minimum. These rails collapse into the content flow or a
+mobile drawer when space is constrained.
 
 ## Account and onboarding screens
 
@@ -289,15 +294,15 @@ The target token set is independent from the desktop system:
 
 | Token family | Target |
 | --- | --- |
-| Canvas | Warm neutral #F6F7FB |
-| Surface | White #FFFFFF; soft region #EEF1F7 |
-| Ink | #182033 primary; #5C6578 secondary; #8992A3 quiet |
-| Action | Cobalt-indigo #4B46E5; hover #3D38C5 |
-| Data signal | Teal #0E9F92; positive #16846F; warning #C87812; danger #C9495D |
-| Typography | System UI sans; system mono for query and numeric data |
-| Radius | 10px controls, 14px artifacts, 20px opening/composer |
+| Canvas | Warm ivory #FBFAF7 |
+| Surface | #FFFEFA; soft region #F4F0EA |
+| Ink | #17232D primary; #536170 supporting and muted text (minimum 4.5:1 for normal text) |
+| Action | Rust #C8491D; hover #A83A16 |
+| Data signal | Green #1E7B72; amber for attention; coral for errors |
+| Typography | Georgia serif headings; Helvetica-like sans for UI; system mono for query and numeric data |
+| Radius | 5px controls, 7px panels, 9px composer; round only for identity and compact actions |
 | Shadow | One low-contrast surface shadow; no glass blur |
-| Spacing | 4, 8, 12, 16, 24, 32, 48px |
+| Spacing | Reusable 4-point scale: 4, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80px |
 | Motion | 120–180ms; reduced-motion removes nonessential animation |
 
 ## Responsive behavior
@@ -349,6 +354,26 @@ The target token set is independent from the desktop system:
   metadata that does not help the user act.
 
 ## Implementation locations
+
+### Conversation behavior
+
+Keep the answer as the primary reading surface. Result filters, sorting, column
+visibility and chart controls operate on the saved bounded result; they must not
+silently execute another query. Explain, compare, filter and rerun actions carry
+the selected answer/result identity. Rerun states that it refreshes the source.
+
+An interrupted answer keeps its verified evidence and exposes Retry/Edit.
+Reload reconnects to active work. A removed source leaves historical answers
+readable and identifies the original source; the composer cannot use a different
+connection under that history. Long chats load incrementally and expose Jump to
+latest rather than forcing scrolling while the reader inspects earlier work.
+
+Reports combine rich text with validated KPI, table and chart components. Export
+actions distinguish one answer from the loaded conversation and preserve source,
+capture time and limits. Connection knowledge and answer corrections are explicit
+user edits, not silently inferred preferences.
+
+### Code routing
 
 - src/web/App.tsx — authenticated workspace composition.
 - src/web/components/auth/ — sign-up, login, recovery, verification.

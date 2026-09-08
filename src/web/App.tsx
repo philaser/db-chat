@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FormEvent, KeyboardEvent, PointerEvent, ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { readableColumnLabel } from './formatting.js';
 import {
   ArrowRight,
   ArrowUpRight,
@@ -20,9 +21,16 @@ import {
   LoaderCircle,
   LogOut,
   LockKeyhole,
+  Maximize2,
   MoreHorizontal,
   Menu,
   MessageSquare,
+  Pin,
+  Search,
+  SlidersHorizontal,
+  ThumbsDown,
+  ThumbsUp,
+  Minimize2,
   Pencil,
   Plus,
   RefreshCw,
@@ -40,7 +48,10 @@ import {
 } from 'lucide-react';
 import type {
   ChatMessage,
+  ChatTurnSnapshot,
+  ConnectionKnowledge,
   DatabaseSchema,
+  FollowUpIntent,
   ModelChatMessage,
   QueryResult,
   QueryResultArtifact,
@@ -50,6 +61,7 @@ import type {
 } from '../shared/types.js';
 import { buildConnectionPayload, type ConnectionDraft } from './connectionPayload.js';
 import { StructuredContent, splitContent } from './contentBlocks.js';
+import { ConfirmDialog } from './components/ConfirmDialog.js';
 
 type ConnectionStatus = 'ready' | 'testing' | 'needs_test' | 'unavailable' | 'needs_attention';
 type SettingsView = 'profile' | 'connections' | 'inference';
@@ -152,6 +164,7 @@ interface StreamData {
   summary?: string;
   purpose?: string;
   toolName?: string;
+  elapsedMs?: number;
 }
 
 interface WorkingStatus {
@@ -161,9 +174,15 @@ interface WorkingStatus {
 
 export function streamActivityText(type: string, data: StreamData): string {
   const message = typeof data.message === 'string' ? data.message : data.message?.content;
-  if (type === 'tool-start') return data.purpose ?? data.messageText ?? message ?? data.toolName ?? 'Running a read-only operation';
+  const elapsed = typeof data.elapsedMs === 'number' ? ` · ${(data.elapsedMs / 1000).toFixed(1)}s` : '';
+  const safeTool = data.toolName === 'sample_data' ? 'Inspecting sample rows'
+    : data.toolName === 'get_schema_info' ? 'Inspecting the schema'
+      : data.toolName === 'run_database_query' ? 'Running a read-only query'
+        : data.toolName === 'visualize_data' ? 'Preparing a visualization'
+          : undefined;
+  if (type === 'tool-start') return (data.purpose ?? data.messageText ?? message ?? safeTool ?? 'Running a read-only operation') + elapsed;
   if (type === 'tool-progress') return data.messageText ?? data.summary ?? data.purpose ?? message ?? 'Working';
-  if (type === 'tool-complete') return data.summary ?? data.messageText ?? data.purpose ?? message ?? 'Operation complete';
+  if (type === 'tool-complete') return (data.summary ?? data.messageText ?? data.purpose ?? message ?? 'Operation complete') + elapsed;
   return data.messageText ?? message ?? data.summary ?? 'Working';
 }
 
@@ -210,8 +229,14 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 function formatKind(kind?: string): string {
   if (!kind) return 'Database';
-  if (kind === 'elasticsearch') return 'Elasticsearch';
-  return kind.charAt(0).toUpperCase() + kind.slice(1);
+  const names: Record<string, string> = {
+    postgres: 'PostgreSQL',
+    mysql: 'MySQL',
+    mongodb: 'MongoDB',
+    elasticsearch: 'Elasticsearch',
+    sqlite: 'SQLite'
+  };
+  return names[kind] ?? kind.charAt(0).toUpperCase() + kind.slice(1);
 }
 
 function formatDate(value?: string): string {
@@ -249,6 +274,11 @@ function serializeCsv(result: QueryResult): string {
     result.columns.map(csvCell).join(','),
     ...result.rows.map((row) => result.columns.map((column) => csvCell(row[column])).join(','))
   ].join('\r\n') + '\r\n';
+}
+
+function downloadText(contents: string, name: string, type: string) {
+  const url = URL.createObjectURL(new Blob([contents], { type }));
+  const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url);
 }
 
 function initials(name: string): string {
@@ -323,12 +353,23 @@ function extractSqlSources(query: string): string[] {
   return [...names];
 }
 
-function AssistantContent({ content }: { content: string }) {
+function preserveSoftBreaks(children: ReactNode): ReactNode {
+  if (typeof children === 'string') {
+    const parts = children.split('\n');
+    return parts.length === 1 ? children : parts.flatMap((part, index) => index === 0 ? [part] : [<br key={`soft-break-${index}`} />, part]);
+  }
+  if (Array.isArray(children)) return children.map((child) => preserveSoftBreaks(child));
+  return children;
+}
+
+export function AssistantContent({ content }: { content: string }) {
   return (
     <>
       {splitContent(content).map((segment, index) => segment.type === 'blocks' && segment.blocks
         ? <StructuredContent key={index} blocks={segment.blocks} />
-        : <ReactMarkdown key={index} remarkPlugins={[remarkGfm]}>{segment.content}</ReactMarkdown>)}
+        : segment.type === 'pending'
+          ? <div key={index} className="structured-pending" role="status"><LoaderCircle className="spin" size={14} aria-hidden="true" /> Preparing structured result…</div>
+          : <ReactMarkdown key={index} remarkPlugins={[remarkGfm]} components={{ p: ({ children }) => <p>{preserveSoftBreaks(children)}</p> }}>{segment.content}</ReactMarkdown>)}
     </>
   );
 }
@@ -477,7 +518,7 @@ export function AppBar({
         <button type="button" className="icon-button workspace-navigation-toggle" aria-label="Workspace navigation" title="Workspace navigation" aria-expanded={navigationOpen} onClick={onToggleNavigation}><Menu size={20} /></button>
         <Brand onNavigate={onNavigate} />
         <span className="app-bar-divider" aria-hidden="true" />
-        <span className="readonly-badge"><ShieldCheck size={16} aria-hidden="true" /> Read only</span>
+        <span className="readonly-badge"><ShieldCheck size={16} aria-hidden="true" /> Read-only</span>
       </div>
       <div className="app-bar-right">
         <div className="account-menu" ref={menuRef}>
@@ -528,12 +569,14 @@ export function ChatSidebarRow({
   onSelect,
   onRename,
   onDelete
+  ,onPin
 }: {
   chat: WebChatSummary;
   selected: boolean;
   onSelect: () => void;
   onRename: (title: string) => Promise<void>;
   onDelete: () => Promise<void>;
+  onPin?: () => Promise<void>;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [mode, setMode] = useState<'menu' | 'rename' | 'delete'>('menu');
@@ -553,7 +596,7 @@ export function ChatSidebarRow({
   };
 
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!menuOpen || mode === 'delete') return;
     const onPointerDown = (event: globalThis.PointerEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) closeMenu();
     };
@@ -566,7 +609,7 @@ export function ChatSidebarRow({
       document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKeyDown);
     };
-  }, [chat.title, menuOpen]);
+  }, [chat.title, menuOpen, mode]);
 
   useEffect(() => {
     if (mode === 'rename') inputRef.current?.select();
@@ -609,6 +652,7 @@ export function ChatSidebarRow({
         className="sidebar-row sidebar-chat-row"
         onClick={onSelect}
         aria-current={selected ? 'page' : undefined}
+        title={chat.title}
       >
         <MessageSquare size={20} strokeWidth={1.6} aria-hidden="true" />
         <span className="sidebar-row-label">{chat.title}</span>
@@ -631,11 +675,12 @@ export function ChatSidebarRow({
       >
         <MoreHorizontal size={16} aria-hidden="true" />
       </button>
-      {menuOpen && (
-        <div className="sidebar-chat-popover" role={mode === 'delete' ? 'dialog' : undefined} aria-label={mode === 'delete' ? `Delete ${chat.title}` : undefined}>
+      {menuOpen && mode !== 'delete' && (
+        <div className="sidebar-chat-popover">
           {mode === 'menu' && (
             <div role="menu">
               <button type="button" role="menuitem" onClick={() => setMode('rename')}><Pencil size={14} /> Rename</button>
+              {onPin && <button type="button" role="menuitem" onClick={() => void onPin()}><Pin size={14} /> {chat.pinned ? 'Unpin' : 'Pin'}</button>}
               <button type="button" role="menuitem" className="menu-destructive" onClick={() => setMode('delete')}><Trash2 size={14} /> Delete</button>
             </div>
           )}
@@ -650,19 +695,12 @@ export function ChatSidebarRow({
               </div>
             </form>
           )}
-          {mode === 'delete' && (
-            <div className="sidebar-chat-delete">
-              <p>Delete “{chat.title}”?</p>
-              <span>This cannot be undone.</span>
-              {error && <p role="alert">{error}</p>}
-              <div className="sidebar-chat-confirm-actions">
-                <button type="button" onClick={() => closeMenu()}>Cancel</button>
-                <button type="button" className="danger" disabled={busy} onClick={() => void confirmDelete()}>{busy ? 'Deleting…' : 'Delete'}</button>
-              </div>
-            </div>
-          )}
         </div>
       )}
+      <ConfirmDialog open={menuOpen && mode === 'delete'} title="Delete this chat?" confirmLabel="Delete chat" pending={busy} onCancel={() => closeMenu(true)} onConfirm={() => void confirmDelete()}>
+        <p>“{chat.title}” will be permanently deleted.</p>
+        {error && <p role="alert">{error}</p>}
+      </ConfirmDialog>
     </div>
   );
 }
@@ -678,6 +716,7 @@ function WorkspaceSidebar({
   onSelectChat,
   onRenameChat,
   onDeleteChat
+  ,onPinChat
 }: {
   bootstrap: BootstrapState;
   route: string;
@@ -689,7 +728,24 @@ function WorkspaceSidebar({
   onSelectChat: (chat: WebChatSummary) => void;
   onRenameChat: (chat: WebChatSummary, title: string) => Promise<void>;
   onDeleteChat: (chat: WebChatSummary) => Promise<void>;
+  onPinChat: (chat: WebChatSummary) => Promise<void>;
 }) {
+  const [chatSearch, setChatSearch] = useState('');
+  const [connectionFilter, setConnectionFilter] = useState('');
+  const [visibleChats, setVisibleChats] = useState(chats);
+  const [searching, setSearching] = useState(false);
+  useEffect(() => { if (!chatSearch && !connectionFilter) setVisibleChats(chats); }, [chats, chatSearch, connectionFilter]);
+  useEffect(() => {
+    if (!chatSearch.trim() && !connectionFilter) return;
+    const timeout = window.setTimeout(() => {
+      setSearching(true);
+      const params = new URLSearchParams({ limit: '50' });
+      if (chatSearch.trim()) params.set('q', chatSearch.trim());
+      if (connectionFilter) params.set('connectionId', connectionFilter);
+      void api<{ chats: WebChatSummary[] }>('/api/v1/chats?' + params).then(({ chats: matches }) => setVisibleChats(matches)).catch(() => setVisibleChats([])).finally(() => setSearching(false));
+    }, 220);
+    return () => window.clearTimeout(timeout);
+  }, [chatSearch, connectionFilter]);
   return (
     <aside className="workspace-sidebar" aria-label="Workspace navigation">
       <div className="sidebar-main">
@@ -727,11 +783,13 @@ function WorkspaceSidebar({
 
           <div className="sidebar-section">
             <p className="sidebar-section-label">Chats</p>
-            {chats.length > 0 ? chats.map((chat) => {
+            <label className="sidebar-chat-search"><Search size={14} aria-hidden="true" /><span className="sr-only">Search chats</span><input value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search chats" /></label>
+            <label className="sidebar-chat-filter"><span className="sr-only">Filter chats by connection</span><select value={connectionFilter} onChange={(event) => setConnectionFilter(event.target.value)}><option value="">All connections</option>{bootstrap.connections.map((connection) => <option value={connection.id} key={connection.id}>{connection.label}</option>)}</select></label>
+            {searching ? <p className="sidebar-empty-note" role="status">Searching…</p> : visibleChats.length > 0 ? visibleChats.map((chat) => {
               const selected = selectedChatId === chat.id || route === '/chat/' + chat.id;
-              return <ChatSidebarRow key={chat.id} chat={chat} selected={selected} onSelect={() => onSelectChat(chat)} onRename={(title) => onRenameChat(chat, title)} onDelete={() => onDeleteChat(chat)} />;
+              return <ChatSidebarRow key={chat.id} chat={chat} selected={selected} onSelect={() => onSelectChat(chat)} onRename={(title) => onRenameChat(chat, title)} onDelete={() => onDeleteChat(chat)} onPin={() => onPinChat(chat)} />;
             }) : (
-              <p className="sidebar-empty-note">No chats yet</p>
+              <p className="sidebar-empty-note">{chatSearch || connectionFilter ? 'No matching chats' : 'No chats yet'}</p>
             )}
           </div>
         </nav>
@@ -825,12 +883,13 @@ function Landing({ onNavigate }: { onNavigate: (path: string) => void }) {
       <main className="public-page public-landing">
         <section className="landing-intro">
           <p className="overline">DATABASE QUESTIONS</p>
-          <h1>Ask about<br /><span>your database.</span></h1>
+          <h1>Ask your database.</h1>
           <p className="landing-copy">
             Connect a database, ask a question, inspect the query and results.
           </p>
           <div className="landing-actions">
-            <Button variant="primary" onClick={() => onNavigate('/signup')}>Create account</Button>
+            <Button variant="primary" onClick={() => onNavigate('/signup')}>Get started</Button>
+            <Button variant="secondary" onClick={() => onNavigate('/login')}>Log in</Button>
           </div>
           <div className="landing-proof">
             <span><ShieldCheck size={15} /> Read-only queries</span>
@@ -912,16 +971,10 @@ export function AuthScreen({
       note="Read-only queries"
     >
       <main className="auth-page">
-        <section className="auth-intro">
-          <p className="overline">{signup ? 'CREATE ACCOUNT' : 'LOG IN'}</p>
-          <h1>{signup ? 'Create your account' : 'Log in'}</h1>
-          <p>{signup ? 'Add a connection after signing up.' : 'Manage connections and ask questions.'}</p>
-          <div className="auth-security"><ShieldCheck size={18} aria-hidden="true" /><span>{signup ? 'Account and connection settings' : 'Read-only queries'}</span></div>
-        </section>
         <section className="auth-form-stage">
           <div className="auth-form-heading">
-            <p className="overline">Account</p>
-            <h2>{signup ? 'Create account' : 'Log in'}</h2>
+            <p className="overline">{signup ? 'Create account' : 'Welcome back'}</p>
+            <h1>{signup ? 'Create your account' : 'Log in'}</h1>
             <p>{signup ? 'Use an email address and password.' : 'Use your account to access saved connections and chats.'}</p>
           </div>
           {error && <Alert title="Check the form">{error}</Alert>}
@@ -945,10 +998,10 @@ export function AuthScreen({
               {pending ? <><LoaderCircle className="spin" size={16} /> {signup ? 'Creating account' : 'Signing in'}</> : <>{signup ? 'Create account' : 'Log in'} <ArrowRight size={16} /></>}
             </Button>
           </form>}
-          {!signup && <p className="auth-switch"><button type="button" onClick={() => onNavigate('/forgot-password')}>Forgot password?</button></p>}
-          <p className="auth-switch">
+          {!signup && <p className="auth-switch auth-switch-recovery"><button className="quiet-action auth-text-action" type="button" onClick={() => onNavigate('/forgot-password')}>Forgot password?</button></p>}
+          <p className="auth-switch auth-switch-account">
             {signup ? 'Already have an account?' : 'New to DB Chat?'}{' '}
-            <button type="button" onClick={() => onNavigate(signup ? '/login' : '/signup')}>{signup ? 'Log in' : 'Create an account'}</button>
+            <button className="quiet-action auth-text-action" type="button" onClick={() => onNavigate(signup ? '/login' : '/signup')}>{signup ? 'Log in' : 'Create an account'}</button>
           </p>
         </section>
       </main>
@@ -1135,18 +1188,26 @@ function EntryStage({
   onPrompt: (prompt: string) => void;
 }) {
   const active = bootstrap.connections.find((connection) => connection.id === bootstrap.activeConnectionId);
-  const prompts = [
-    ['Summarize the database', 'Summarize the connected database.', 'Review tables and fields.'],
-    ['Compare customer orders', 'Which customers placed the most orders last month?', 'See the rows behind the result.'],
-    ['Review the schema', 'Explain the database schema.', 'List tables and fields.'],
-    ['Check data quality', 'Check the data for quality issues.', 'Find gaps, duplicates, and unusual values.']
-  ];
+  const fallbackPrompts = ['Summarize what this database contains.', 'Check the data for quality issues.', 'Show the largest useful categories.'];
+  const [prompts, setPrompts] = useState(fallbackPrompts);
+  const [loadingPrompts, setLoadingPrompts] = useState(Boolean(active));
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    setLoadingPrompts(true);
+    void api<{ suggestions: string[] }>('/api/v1/connections/' + encodeURIComponent(active.id) + '/suggestions')
+      .then(({ suggestions }) => { if (!cancelled && suggestions.length) setPrompts(suggestions.slice(0, 5)); })
+      .catch(() => undefined)
+      .finally(() => { if (!cancelled) setLoadingPrompts(false); });
+    return () => { cancelled = true; };
+  }, [active?.id]);
   return (
     <div className="entry-stage">
       <div className="entry-context">
         <div className="entry-context-primary">
-          <StatusLine status="healthy" label="Ready" detail={active?.label ?? 'Connection selected'} />
-          <span className="entry-context-type">{formatKind(active?.kind)} · Read-only</span>
+          <Database size={18} aria-hidden="true" />
+          <span className="entry-context-identity"><strong>{active?.label ?? 'Connection selected'}</strong><small>{formatKind(active?.kind)} · Read-only</small></span>
+          <StatusLine status="healthy" label="Ready" />
         </div>
         <span className="entry-context-limit">Up to {bootstrap.limits.maxResultRows} rows per result</span>
       </div>
@@ -1157,15 +1218,13 @@ function EntryStage({
       </div>
       <div className="suggestion-heading">
         <span className="overline">SUGGESTED QUESTIONS</span>
+        {loadingPrompts && <span className="suggestion-loading" role="status">Checking this schema…</span>}
       </div>
       <div className="suggestion-list">
-        {prompts.map(([label, prompt, detail], index) => (
+        {prompts.map((prompt) => (
           <button type="button" className="suggestion-row" key={prompt} onClick={() => onPrompt(prompt)}>
-            <span className="suggestion-number">{String(index + 1).padStart(2, '0')}</span>
             <span className="suggestion-copy">
-              <span className="suggestion-label">{label}</span>
               <strong>{prompt}</strong>
-              <span>{detail}</span>
             </span>
             <ArrowUpRight size={17} aria-hidden="true" />
           </button>
@@ -1177,42 +1236,22 @@ function EntryStage({
 
 type InspectorTab = 'results' | 'query' | 'schema';
 
-const DEFAULT_INSPECTOR_WIDTH = 260;
-const MIN_INSPECTOR_WIDTH = 260;
+const DEFAULT_INSPECTOR_WIDTH = 400;
+const MIN_INSPECTOR_WIDTH = 360;
 const MAX_INSPECTOR_WIDTH = 480;
 const INSPECTOR_RESIZE_STEP = 24;
+const canAutoOpenInspector = () => window.innerWidth > 1100;
 
 function clampInspectorWidth(width: number): number {
   return Math.min(MAX_INSPECTOR_WIDTH, Math.max(MIN_INSPECTOR_WIDTH, width));
 }
 
-function humanizeColumnName(column: string): string {
-  return column
-    .replace(/[_-]+/g, ' ')
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .trim()
-    .toLowerCase();
+export function resultLinkLabel(artifact: QueryResultArtifact): string {
+  const purpose = artifact.purpose?.trim().replace(/[.!?]+$/, '');
+  return purpose && purpose.length <= 64 ? `View results: ${purpose}` : 'View results';
 }
 
-function resultLinkLabel(artifact: QueryResultArtifact): string {
-  const columns = artifact.result.columns.map(humanizeColumnName);
-  const columnText = columns.join(' ');
-  const hasCustomer = columns.some((column) => /^(customer|customer id|customer name|first name|last name)$/.test(column));
-  const hasSpend = /total spent|total amount|revenue|spend|amount|sales|value/.test(columnText);
-  const hasOrders = /order|invoice/.test(columnText);
-  const hasDateRange = columns.some((column) => column.includes('min date')) && columns.some((column) => column.includes('max date'));
-  const hasDistribution = columns.some((column) => /(?:invoice|order) count/.test(column)) && columns.some((column) => /(?:num|number of) customers|customer count/.test(column));
-
-  if (hasDateRange) return 'View date range';
-  if (hasDistribution) return 'View invoice distribution';
-  if (hasCustomer && hasSpend) return 'View customer spend';
-  if (hasCustomer && hasOrders) return 'View customer orders';
-  if (hasCustomer && columnText.includes('country')) return 'View customer breakdown';
-  if (columnText.includes('country')) return 'View country breakdown';
-  if (columns.length === 1) return 'View ' + columns[0];
-  if (columns.length > 1) return 'View ' + columns.slice(0, 2).join(' and ');
-  return 'View result';
-}
+export { readableColumnLabel } from './formatting.js';
 
 export function DataInspector({
   artifact,
@@ -1238,6 +1277,12 @@ export function DataInspector({
   const [schemaAttempt, setSchemaAttempt] = useState(0);
   const [schemaSearch, setSchemaSearch] = useState('');
   const [resizing, setResizing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [resultSearch, setResultSearch] = useState('');
+  const [sortColumn, setSortColumn] = useState<string | null>(null);
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+  const [hiddenColumns, setHiddenColumns] = useState<string[]>([]);
+  const [columnsOpen, setColumnsOpen] = useState(false);
   const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const inspectorRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -1246,6 +1291,18 @@ export function DataInspector({
     return () => { if (origin?.isConnected) origin.focus(); };
   }, []);
   const result = artifact.result;
+  const visibleColumns = result.columns.filter((column) => !hiddenColumns.includes(column));
+  const visibleRows = useMemo(() => {
+    const needle = resultSearch.trim().toLowerCase();
+    const filtered = needle ? result.rows.filter((row) => visibleColumns.some((column) => formatValue(row[column]).toLowerCase().includes(needle))) : [...result.rows];
+    if (!sortColumn) return filtered;
+    return filtered.sort((left, right) => {
+      const a = left[sortColumn]; const b = right[sortColumn];
+      const order = typeof a === 'number' && typeof b === 'number' ? a - b : String(a ?? '').localeCompare(String(b ?? ''), undefined, { numeric: true });
+      return sortDirection === 'asc' ? order : -order;
+    });
+  }, [result.rows, resultSearch, sortColumn, sortDirection, hiddenColumns]);
+  const visibleResult: QueryResult = { ...result, columns: visibleColumns, rows: visibleRows, rowCount: visibleRows.length };
   const tabs: Array<{ id: InspectorTab; label: string }> = [
     { id: 'results', label: 'Results' },
     { id: 'query', label: 'Query' },
@@ -1268,6 +1325,11 @@ export function DataInspector({
     setSchemaAttempt(0);
     setSchemaView('overview');
     setSchemaSearch('');
+    setResultSearch('');
+    setSortColumn(null);
+    setSortDirection('asc');
+    setHiddenColumns([]);
+    setColumnsOpen(false);
   }, [artifact.queryId, artifact.schema, connectionId]);
 
   useEffect(() => {
@@ -1310,7 +1372,7 @@ export function DataInspector({
   };
 
   const download = () => {
-    const url = URL.createObjectURL(new Blob([serializeCsv(result)], { type: 'text/csv;charset=utf-8' }));
+    const url = URL.createObjectURL(new Blob([serializeCsv(visibleResult)], { type: 'text/csv;charset=utf-8' }));
     const anchor = document.createElement('a');
     anchor.href = url;
     anchor.download = artifact.queryId + '.csv';
@@ -1376,7 +1438,7 @@ export function DataInspector({
   };
 
   return (
-    <aside ref={inspectorRef} id="data-inspector-panel" className="data-inspector" aria-label="Data inspector" onKeyDown={(event) => {
+    <aside ref={inspectorRef} id="data-inspector-panel" className={'data-inspector' + (expanded ? ' inspector-expanded' : '')} aria-label="Data inspector" onKeyDown={(event) => {
       if (event.key === 'Escape') { event.stopPropagation(); onClose(); }
       if (event.key === 'Tab' && window.innerWidth <= 760) {
         const controls = Array.from(inspectorRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex="0"], input, textarea') ?? []).filter((element) => element.getClientRects().length > 0);
@@ -1406,9 +1468,12 @@ export function DataInspector({
       <div className="inspector-header">
         <div className="inspector-title-row">
           <h2>Data</h2>
-          <button type="button" className="icon-button inspector-close" onClick={onClose} aria-label="Close data inspector" title="Close data inspector"><X size={20} /></button>
+          <div className="inspector-title-actions">
+            <button type="button" className="icon-button inspector-expand" onClick={() => setExpanded((value) => !value)} aria-label={expanded ? 'Restore data inspector width' : 'Expand data inspector'} aria-pressed={expanded} title={expanded ? 'Restore width' : 'Expand results'}>{expanded ? <Minimize2 size={18} /> : <Maximize2 size={18} />}</button>
+            <button type="button" className="icon-button inspector-close" onClick={onClose} aria-label="Close data inspector" title="Close data inspector"><X size={20} /></button>
+          </div>
         </div>
-        <div className="inspector-source"><Database size={19} strokeWidth={1.7} aria-hidden="true" /><span>{connectionLabel}</span><span>·</span><span className="inspector-readonly">read only</span></div>
+        <div className="inspector-source"><Database size={19} strokeWidth={1.7} aria-hidden="true" /><span>{connectionLabel}</span><span>·</span><span className="inspector-readonly">read-only</span></div>
       </div>
       <div className="inspector-tabs" role="tablist" aria-label="Data views">
         {tabs.map((item) => (
@@ -1429,7 +1494,7 @@ export function DataInspector({
         ))}
       </div>
       <div className="inspector-meta">
-        {tab === 'results' && <span>{result.rowCount} rows · {result.columns.length} columns · {result.elapsedMs} ms</span>}
+        {tab === 'results' && <span>{result.rowCount} {result.rowCount === 1 ? 'row' : 'rows'} · {result.columns.length} {result.columns.length === 1 ? 'column' : 'columns'} · {result.elapsedMs} ms</span>}
         {tab === 'query' && <span>Read-only query</span>}
         {tab === 'schema' && <span>Connected schema</span>}
       </div>
@@ -1437,16 +1502,25 @@ export function DataInspector({
         {tab === 'results' && (
           <div id="inspector-panel-results" role="tabpanel" aria-labelledby="inspector-tab-results" className="inspector-panel">
             {result.truncated && <p className="result-limit-note" role="status">Showing the first {result.rows.length} rows. This result is limited; narrow your question for a complete subset. Copy and CSV include these rows only.</p>}
+            <div className="result-controls" aria-label="Result controls">
+              <label className="result-search"><Search size={15} aria-hidden="true" /><span className="sr-only">Filter loaded rows</span><input value={resultSearch} onChange={(event) => setResultSearch(event.target.value)} placeholder="Filter loaded rows" /></label>
+              <div className="result-column-control">
+                <button type="button" className="result-control-button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen}><SlidersHorizontal size={15} aria-hidden="true" /> Columns</button>
+                {columnsOpen && <fieldset className="result-column-menu"><legend>Visible columns</legend>{result.columns.map((column) => <label key={column}><input type="checkbox" checked={!hiddenColumns.includes(column)} onChange={() => setHiddenColumns((current) => current.includes(column) ? current.filter((item) => item !== column) : [...current, column])} /> {readableColumnLabel(column)}</label>)}</fieldset>}
+              </div>
+              <span className="result-scope">{visibleRows.length} of {result.rows.length} loaded rows</span>
+            </div>
             {result.rows.length === 0 ? (
               <p className="result-empty">No rows returned.</p>
             ) : (
               <div className="result-table-wrap" tabIndex={0} aria-label="Scrollable query result">
                 <table className="result-table">
-                  <thead><tr>{result.columns.map((column) => <th scope="col" key={column}>{column}</th>)}</tr></thead>
+                  <caption className="sr-only">Query results from {connectionLabel}</caption>
+                  <thead><tr>{visibleColumns.map((column) => <th scope="col" key={column}><button type="button" className="result-sort" onClick={() => { if (sortColumn === column) setSortDirection((value) => value === 'asc' ? 'desc' : 'asc'); else { setSortColumn(column); setSortDirection('asc'); } }} aria-label={`Sort by ${readableColumnLabel(column)}${sortColumn === column ? `, ${sortDirection}ending` : ''}`}>{readableColumnLabel(column)}{sortColumn === column ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : ''}</button></th>)}</tr></thead>
                   <tbody>
-                    {result.rows.map((row, index) => (
+                    {visibleRows.map((row, index) => (
                       <tr key={artifact.queryId + '-' + index}>
-                        {result.columns.map((column) => {
+                        {visibleColumns.map((column) => {
                           const value = row[column];
                           const numeric = typeof value === 'number';
                           const empty = value === null || value === undefined;
@@ -1527,11 +1601,11 @@ export function DataInspector({
       <div className="inspector-footer">
         {tab === 'results' && (
           <>
-            <button type="button" className="inspector-footer-action" onClick={() => void copy(serializeTsv(result), 'result')} disabled={result.rows.length === 0}>
+            <button type="button" className="inspector-footer-action" onClick={() => void copy(serializeTsv(visibleResult), 'result')} disabled={visibleRows.length === 0}>
               <Clipboard size={16} aria-hidden="true" /> {copied ? 'Copied' : 'Copy'}
             </button>
-            <button type="button" className="inspector-footer-action" onClick={download} disabled={result.rows.length === 0}>
-              <Download size={16} aria-hidden="true" /> Export CSV
+            <button type="button" className="inspector-footer-action" onClick={download} disabled={visibleRows.length === 0} aria-label="Export CSV">
+              <Download size={16} aria-hidden="true" /> Export visible rows
             </button>
           </>
         )}
@@ -1616,24 +1690,38 @@ export function ChatWorkspace({
   const [inspectorWidth, setInspectorWidth] = useState(DEFAULT_INSPECTOR_WIDTH);
   const [persistedChatId, setPersistedChatId] = useState<string | null>(chatId ?? null);
   const [loadingChat, setLoadingChat] = useState(Boolean(chatId));
+  const [resumeTurn, setResumeTurn] = useState<ChatTurnSnapshot | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyCursor, setHistoryCursor] = useState<string | undefined>();
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [showJumpLatest, setShowJumpLatest] = useState(false);
+  const [chatSource, setChatSource] = useState<WebChatSession['source']>();
+  const [sourceAvailable, setSourceAvailable] = useState(true);
+  const [feedbackCorrections, setFeedbackCorrections] = useState<Record<string, string>>({});
+  const [pendingIntent, setPendingIntent] = useState<FollowUpIntent | undefined>();
+  const [pendingAttemptOf, setPendingAttemptOf] = useState<string | undefined>();
   const persistedChatIdRef = useRef<string | null>(chatId ?? null);
   persistedChatIdRef.current = persistedChatId;
   const streamRef = useRef<EventSource | null>(null);
   const turnRef = useRef<string | null>(null);
   const assistantIdRef = useRef<string | null>(null);
-  const retryRequestRef = useRef<{ content: string; connectionId: string; clientRequestId: string; userMessage: ChatMessage; assistantMessageId: string; messages: ChatMessage[] } | null>(null);
+  const retryRequestRef = useRef<{ content: string; connectionId: string; clientRequestId: string; userMessage: ChatMessage; assistantMessageId: string; messages: ChatMessage[]; intent?: FollowUpIntent; attemptOf?: string } | null>(null);
   const startingRef = useRef(false);
   const generationRef = useRef(0);
   const workingStatusClearRef = useRef<number | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const followingRef = useRef(true);
+  const suppressAutoScrollRef = useRef(false);
   const inspectorOpenerRef = useRef<HTMLButtonElement | null>(null);
   const lastConnectionRef = useRef<string | undefined>(bootstrap.activeConnectionId);
   const active = bootstrap.connections.find((connection) => connection.id === bootstrap.activeConnectionId);
   const busy = activeTurnId !== null;
 
-  const detachTurn = (abortServer = true) => {
+  const detachTurn = (abortServer = false) => {
     generationRef.current += 1;
-    retryRequestRef.current = null;
+    if (abortServer) retryRequestRef.current = null;
     const turnId = turnRef.current;
     turnRef.current = null;
     startingRef.current = false;
@@ -1645,7 +1733,7 @@ export function ChatWorkspace({
 
   useEffect(() => {
     if (lastConnectionRef.current && lastConnectionRef.current !== bootstrap.activeConnectionId) {
-      detachTurn();
+      detachTurn(true);
       setMessages([]);
       setArtifacts([]);
       setSelectedArtifactId(null);
@@ -1659,7 +1747,7 @@ export function ChatWorkspace({
 
   useEffect(() => {
     if (newChatKey === 0) return;
-    detachTurn();
+    detachTurn(true);
     setMessages([]);
     setArtifacts([]);
     setSelectedArtifactId(null);
@@ -1678,6 +1766,7 @@ export function ChatWorkspace({
       setPersistedChatId(null);
       return;
     }
+    if (chatId === persistedChatIdRef.current && (turnRef.current || startingRef.current)) return;
     let cancelled = false;
     detachTurn();
     setLoadingChat(true);
@@ -1689,15 +1778,20 @@ export function ChatWorkspace({
     setWorkingStatus(null);
     setError('');
     setInspectorOpen(false);
-    void api<{ chat: WebChatSession }>('/api/v1/chats/' + encodeURIComponent(chatId))
+    void api<{ chat: WebChatSession }>('/api/v1/chats/' + encodeURIComponent(chatId) + '?limit=50')
       .then(({ chat }) => {
         if (cancelled) return;
         setPersistedChatId(chat.id);
+        setChatSource(chat.source);
+        setSourceAvailable(chat.sourceAvailable !== false);
         setMessages(chat.messages);
+        setHistoryHasMore(Boolean(chat.historyHasMore));
+        setHistoryCursor(chat.historyCursor);
         const lastAnswerId = [...chat.messages].reverse().find((message) => message.role === 'assistant')?.id;
         setArtifacts(chat.artifacts.map((artifact) => ({ ...artifact, messageId: artifact.messageId ?? lastAnswerId })));
         setSelectedArtifactId(chat.artifacts[chat.artifacts.length - 1]?.queryId ?? null);
-        setInspectorOpen(chat.artifacts.length > 0);
+        setInspectorOpen(chat.artifacts.length > 0 && canAutoOpenInspector());
+        if (chat.latestTurn && (chat.latestTurn.status === 'queued' || chat.latestTurn.status === 'running')) setResumeTurn(chat.latestTurn);
       })
       .catch((reason) => {
         if (!cancelled) setError(reason instanceof Error ? reason.message : 'The chat could not be loaded.');
@@ -1712,12 +1806,23 @@ export function ChatWorkspace({
 
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    if (suppressAutoScrollRef.current) {
+      suppressAutoScrollRef.current = false;
+      return;
+    }
+    if (followingRef.current) endRef.current?.scrollIntoView({ behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'end' });
+    else setShowJumpLatest(true);
   }, [messages, artifacts, status]);
 
   useEffect(() => () => {
-    detachTurn();
+    detachTurn(false);
     if (workingStatusClearRef.current !== null) window.clearTimeout(workingStatusClearRef.current);
+  }, []);
+
+  useEffect(() => {
+    const choose = (event: Event) => { const value = (event as CustomEvent<string>).detail; if (value) { setDraft(value); document.querySelector<HTMLTextAreaElement>('[aria-label="Question"]')?.focus(); } };
+    window.addEventListener('dbchat:clarification', choose);
+    return () => window.removeEventListener('dbchat:clarification', choose);
   }, []);
 
   const updateAssistant = (updater: (message: ChatMessage) => ChatMessage) => {
@@ -1732,7 +1837,7 @@ export function ChatWorkspace({
     const durableChatId = persistedChatIdRef.current;
     if (!durableChatId) return;
     const generation = generationRef.current;
-    void api<{ chat: WebChatSession }>('/api/v1/chats/' + encodeURIComponent(durableChatId)).then(({ chat }) => {
+    void api<{ chat: WebChatSession }>('/api/v1/chats/' + encodeURIComponent(durableChatId) + '?limit=50').then(({ chat }) => {
       onChatChanged(chat);
       if (generation !== generationRef.current || turnRef.current || startingRef.current) return;
       setMessages(chat.messages);
@@ -1750,6 +1855,7 @@ export function ChatWorkspace({
       return;
     }
     if (type === 'status' || type === 'tool-start' || type === 'tool-progress' || type === 'tool-complete') {
+      setReconnecting(false);
       const activity = streamActivityText(type, data);
       setStatus(activity);
       setWorkingStatus({ text: activity, complete: type === 'tool-complete' });
@@ -1760,7 +1866,7 @@ export function ChatWorkspace({
       setSelectedArtifactId(data.artifact.queryId);
       setStatus('Result ready');
       setWorkingStatus({ text: 'Result ready', complete: true });
-      setInspectorOpen(true);
+      setInspectorOpen(canAutoOpenInspector());
     } else if (type === 'complete') {
       refreshDurableChat();
       if (data.message && typeof data.message !== 'string') updateAssistant((current) => ({ ...(data.message as ChatMessage), id: current.id }));
@@ -1771,7 +1877,7 @@ export function ChatWorkspace({
         });
         if (data.artifacts.length) {
           setSelectedArtifactId(data.artifacts[data.artifacts.length - 1].queryId);
-          setInspectorOpen(true);
+          setInspectorOpen(canAutoOpenInspector());
         }
       }
       setStatus('');
@@ -1783,6 +1889,7 @@ export function ChatWorkspace({
       }, 650);
       turnRef.current = null;
       setActiveTurnId(null);
+      setReconnecting(false);
       streamRef.current?.close();
       streamRef.current = null;
     } else if (type === 'error') {
@@ -1793,6 +1900,7 @@ export function ChatWorkspace({
       setWorkingStatus(null);
       turnRef.current = null;
       setActiveTurnId(null);
+      setReconnecting(false);
       streamRef.current?.close();
     } else if (type === 'aborted') {
       refreshDurableChat();
@@ -1800,12 +1908,53 @@ export function ChatWorkspace({
       setWorkingStatus(null);
       turnRef.current = null;
       setActiveTurnId(null);
+      setReconnecting(false);
       streamRef.current?.close();
     }
   };
 
-  const submit = async () => {
-    const content = draft.trim();
+  const connectTurnStream = (turnId: string, resuming = false) => {
+    streamRef.current?.close();
+    turnRef.current = turnId;
+    setActiveTurnId(turnId);
+    const stream = new EventSource('/api/v1/chat/turns/' + encodeURIComponent(turnId) + '/events');
+    streamRef.current = stream;
+    let interrupted = false;
+    stream.onopen = () => { setReconnecting(false); if (resuming || interrupted) setStatus(resuming ? 'Active answer restored.' : 'Connected. Resuming this answer…'); };
+    for (const type of streamEventTypes) stream.addEventListener(type, (event) => { if (streamRef.current === stream) handleStreamEvent(type, event); });
+    stream.onerror = () => {
+      if (turnRef.current !== turnId) return;
+      interrupted = true;
+      setReconnecting(true);
+      setStatus('Connection interrupted. Reconnecting…');
+      setWorkingStatus({ text: 'Connection interrupted. Reconnecting…', complete: false });
+      if (stream.readyState === EventSource.CLOSED) {
+        void api<ChatTurnSnapshot>('/api/v1/chat/turns/' + encodeURIComponent(turnId)).then((snapshot) => {
+          if (snapshot.status === 'complete' || snapshot.status === 'error' || snapshot.status === 'aborted') refreshDurableChat();
+          if (snapshot.status === 'error') setError(snapshot.error ?? 'The answer was interrupted.');
+          if (snapshot.status !== 'queued' && snapshot.status !== 'running') {
+            turnRef.current = null; setActiveTurnId(null); setReconnecting(false); setWorkingStatus(null);
+          }
+        }).catch(() => setError('The event stream disconnected. Reopen this chat to recover the saved answer.'));
+      }
+    };
+  };
+
+  useEffect(() => {
+    if (!resumeTurn || turnRef.current) return;
+    assistantIdRef.current = resumeTurn.assistantMessageId ?? null;
+    if (assistantIdRef.current && !messages.some((message) => message.id === assistantIdRef.current)) {
+      setMessages((current) => [...current, { id: assistantIdRef.current!, role: 'assistant', content: '', createdAt: resumeTurn.createdAt ?? new Date().toISOString() }]);
+    }
+    setWorkingStatus({ text: 'Recovering active work…', complete: false });
+    connectTurnStream(resumeTurn.id, true);
+    setResumeTurn(null);
+  }, [resumeTurn]);
+
+  const submit = async (options?: { question?: string; intent?: FollowUpIntent; attemptOf?: string }) => {
+    const content = (options?.question ?? draft).trim();
+    const intent = options?.intent ?? pendingIntent;
+    const attemptOf = options?.attemptOf ?? pendingAttemptOf;
     if (!content || busy || startingRef.current || !active || active.status !== 'ready') return;
     if (content.length > bootstrap.limits.maxMessageChars) {
       setError('Shorten your question to ' + bootstrap.limits.maxMessageChars + ' characters or fewer.');
@@ -1822,13 +1971,18 @@ export function ChatWorkspace({
     setStatus('Starting');
     setWorkingStatus({ text: 'Starting', complete: false });
     const previousAttempt = retryRequestRef.current;
-    const retry = previousAttempt?.content === content && previousAttempt.connectionId === active.id ? previousAttempt : null;
+    const retry = previousAttempt?.content === content
+      && previousAttempt.connectionId === active.id
+      && previousAttempt.attemptOf === attemptOf
+      && JSON.stringify(previousAttempt.intent) === JSON.stringify(intent)
+      ? previousAttempt
+      : null;
     const userMessage: ChatMessage = retry?.userMessage ?? {
       id: 'user-' + crypto.randomUUID(), role: 'user', content, createdAt: new Date().toISOString()
     };
     const nextMessages = retry?.messages ?? [...messages, userMessage];
     assistantIdRef.current = retry?.assistantMessageId ?? 'assistant-' + crypto.randomUUID();
-    const attempt = retry ?? { content, connectionId: active.id, clientRequestId: crypto.randomUUID(), userMessage, assistantMessageId: assistantIdRef.current, messages: nextMessages };
+    const attempt = retry ?? { content, connectionId: active.id, clientRequestId: crypto.randomUUID(), userMessage, assistantMessageId: assistantIdRef.current, messages: nextMessages, intent, attemptOf };
     retryRequestRef.current = attempt;
     setMessages([...nextMessages, {
       id: assistantIdRef.current,
@@ -1846,29 +2000,20 @@ export function ChatWorkspace({
         setPersistedChatId(chat.id);
         persistedChatIdRef.current = chat.id;
         onChatChanged(chat);
+        onNavigate('/chat/' + encodeURIComponent(chat.id));
       }
       const response = await api<{ turnId: string }>('/api/v1/chat/turns', {
         method: 'POST',
-        body: JSON.stringify({ chatId: chatIdForTurn, assistantMessageId: attempt.assistantMessageId, userMessageId: userMessage.id, clientRequestId: attempt.clientRequestId, connectionId: active.id, messages: modelMessages(nextMessages, bootstrap.limits.maxHistoryMessages, bootstrap.limits.maxMessageChars) })
+        body: JSON.stringify({ chatId: chatIdForTurn, assistantMessageId: attempt.assistantMessageId, userMessageId: userMessage.id, clientRequestId: attempt.clientRequestId, connectionId: active.id, question: content, intent, attemptOf, messages: modelMessages(nextMessages, bootstrap.limits.maxHistoryMessages, bootstrap.limits.maxMessageChars) })
       });
       if (generation !== generationRef.current) {
-        void api('/api/v1/chat/turns/' + encodeURIComponent(response.turnId) + '/abort', { method: 'POST' }).catch(() => undefined);
         return;
       }
       retryRequestRef.current = null;
-      turnRef.current = response.turnId;
+      setPendingIntent(undefined);
+      setPendingAttemptOf(undefined);
       startingRef.current = false;
-      setActiveTurnId(response.turnId);
-      const stream = new EventSource('/api/v1/chat/turns/' + encodeURIComponent(response.turnId) + '/events');
-      streamRef.current = stream;
-      for (const type of streamEventTypes) stream.addEventListener(type, (event) => { if (streamRef.current === stream) handleStreamEvent(type, event); });
-      stream.onerror = () => {
-        if (stream.readyState === EventSource.CLOSED && turnRef.current === response.turnId) {
-          setError('The event stream disconnected. The partial answer and earlier results are preserved. Retry the question when connected.');
-          turnRef.current = null;
-          setActiveTurnId(null);
-        }
-      };
+      connectTurnStream(response.turnId);
     } catch (reason) {
       if (generation !== generationRef.current) return;
       startingRef.current = false;
@@ -1879,6 +2024,64 @@ export function ChatWorkspace({
       setWorkingStatus(null);
       setError(reason instanceof Error ? reason.message : 'The question could not be started.');
     }
+  };
+
+  const followUp = (message: ChatMessage, artifact: QueryResultArtifact | undefined, action: FollowUpIntent['action'], label: string) => {
+    const question = action === 'explain' ? 'Explain this result in simpler terms.'
+      : action === 'compare' ? 'Compare the most important values in this result.'
+        : action === 'filter' ? 'Help me narrow this result.'
+          : action === 'inspect-exceptions' ? 'Inspect the exceptions in this result.'
+            : 'Change how this result is displayed.';
+    const intent = artifact ? { action, artifactId: artifact.queryId, messageId: message.id, text: question } satisfies FollowUpIntent : undefined;
+    if (action === 'filter') {
+      setDraft('Filter this result to '); setPendingIntent(intent); setPendingAttemptOf(undefined); setStatus('Describe the filter to apply to this saved result.');
+      window.setTimeout(() => document.querySelector<HTMLTextAreaElement>('[aria-label="Question"]')?.focus(), 0);
+      return;
+    }
+    setStatus(`Starting ${label.toLowerCase()} for this saved result.`);
+    if (artifact && intent) void submit({ question, intent });
+  };
+
+  const updateFeedback = async (message: ChatMessage, rating: 'helpful' | 'unhelpful', correction?: string) => {
+    const chat = persistedChatIdRef.current;
+    if (!chat) return;
+    try {
+      const payload = await api<{ chat: WebChatSession }>(`/api/v1/chats/${encodeURIComponent(chat)}/messages/${encodeURIComponent(message.id)}/feedback`, { method: 'POST', body: JSON.stringify({ rating, correction: correction?.trim() || undefined }) });
+      const updated = payload.chat.messages.find((item) => item.id === message.id);
+      if (updated) setMessages((current) => current.map((item) => item.id === updated.id ? updated : item));
+      onChatChanged(payload.chat); setStatus('Feedback saved.');
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Feedback could not be saved.'); }
+  };
+
+  const pinMessage = async (message: ChatMessage) => {
+    const chat = persistedChatIdRef.current; if (!chat) return;
+    try { const payload = await api<{ chat: WebChatSession }>(`/api/v1/chats/${encodeURIComponent(chat)}/messages/${encodeURIComponent(message.id)}`, { method: 'PATCH', body: JSON.stringify({ pinned: !message.pinned }) }); const updated = payload.chat.messages.find((item) => item.id === message.id); if (updated) setMessages((current) => current.map((item) => item.id === updated.id ? updated : item)); onChatChanged(payload.chat); setStatus(message.pinned ? 'Answer removed from saved items.' : 'Answer saved for reuse.'); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'The answer could not be saved.'); }
+  };
+
+  const exportReport = async (format: 'html' | 'markdown', onlyMessage?: ChatMessage) => {
+    const report = await import('./reportExport.js');
+    const selectedMessages = onlyMessage ? messages.filter((message) => message.id === onlyMessage.id || (message.role === 'user' && messages.indexOf(message) === messages.indexOf(onlyMessage) - 1)) : messages;
+    const selectedArtifacts = onlyMessage ? artifacts.filter((artifact) => artifact.messageId === onlyMessage.id) : artifacts;
+    const title = (chatSource?.label ?? active?.label ?? 'DB Chat analysis') + (historyHasMore && !onlyMessage ? ' (loaded messages)' : '');
+    const chartRoot = onlyMessage ? document.querySelector(`[data-message-id="${CSS.escape(onlyMessage.id)}"]`) : document.querySelector('.conversation-list');
+    const contents = report.buildAnswerReport({ title, messages: selectedMessages, artifacts: selectedArtifacts, format, charts: format === 'html' && chartRoot ? report.collectReportCharts(chartRoot) : undefined });
+    downloadText(contents, `db-chat-${onlyMessage ? onlyMessage.id : persistedChatIdRef.current ?? 'analysis'}.${format === 'html' ? 'html' : 'md'}`, format === 'html' ? 'text/html;charset=utf-8' : 'text/markdown;charset=utf-8');
+    setStatus(`${format === 'html' ? 'Printable HTML' : 'Markdown'} report downloaded.`);
+  };
+
+  const loadOlder = async () => {
+    const chat = persistedChatIdRef.current;
+    if (!chat || !historyHasMore || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const payload = await api<{ chat: WebChatSession }>(`/api/v1/chats/${encodeURIComponent(chat)}?before=${encodeURIComponent(historyCursor ?? '')}&limit=40`);
+      suppressAutoScrollRef.current = true;
+      setMessages((current) => [...payload.chat.messages, ...current.filter((message) => !payload.chat.messages.some((older) => older.id === message.id))]);
+      setArtifacts((current) => [...payload.chat.artifacts, ...current.filter((artifact) => !payload.chat.artifacts.some((older) => older.queryId === artifact.queryId))]);
+      setHistoryHasMore(Boolean(payload.chat.historyHasMore)); setHistoryCursor(payload.chat.historyCursor);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Older messages could not be loaded.'); }
+    finally { setLoadingOlder(false); }
   };
 
   const cancel = () => {
@@ -1907,33 +2110,51 @@ export function ChatWorkspace({
       style={inspectorOpen && currentArtifact ? ({ '--web-inspector-width': `${inspectorWidth}px` } as CSSProperties) : undefined}
     >
       <section className="workspace-conversation" aria-label="Chat workspace">
-        <div className="workspace-scroll">
-          {!bootstrap.connections.length ? (
-            <NoConnectionState onNavigate={onNavigate} />
-          ) : !active ? (
-            <NoConnectionState onNavigate={onNavigate} />
-          ) : loadingChat ? (
+        <div ref={scrollRef} className="workspace-scroll" onScroll={(event) => {
+          const node = event.currentTarget;
+          followingRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 96;
+          if (followingRef.current) setShowJumpLatest(false);
+        }}>
+          {loadingChat ? (
             <div className="chat-loading" role="status"><LoaderCircle className="spin" size={17} /> Loading chat…</div>
-          ) : active.status !== 'ready' ? (
-            <ConnectionAttention connection={active} onNavigate={onNavigate} />
+          ) : messages.length === 0 && !bootstrap.connections.length ? (
+            <NoConnectionState onNavigate={onNavigate} />
+          ) : messages.length === 0 && !active ? (
+            <NoConnectionState onNavigate={onNavigate} />
+          ) : messages.length === 0 && active?.status !== 'ready' ? (
+            <ConnectionAttention connection={active!} onNavigate={onNavigate} />
           ) : messages.length === 0 ? (
             <EntryStage bootstrap={bootstrap} onPrompt={setDraft} />
-          ) : (
+          ) : null}
+          {messages.length > 0 && (
             <div className="conversation-stage">
+              {!sourceAvailable && <div className="source-unavailable" role="status"><WifiOff size={16} aria-hidden="true" /><span><strong>{chatSource?.label ?? 'Original source'} is no longer available.</strong> Saved answers and bounded results remain readable; new queries are disabled.</span></div>}
+              {historyHasMore && <button type="button" className="load-older" onClick={() => void loadOlder()} disabled={loadingOlder}>{loadingOlder ? 'Loading earlier messages…' : 'Load earlier messages'}</button>}
               <div className="conversation-header">
                 <div>
                   <p className="overline">Research note</p>
-                  <h1>{active.label}</h1>
+                  <h1>{chatSource?.label ?? active?.label ?? 'Saved analysis'}</h1>
                 </div>
-                <span className="conversation-count">{messages.filter((message) => message.role === 'user').length} questions</span>
+                <span className="conversation-count">{messages.filter((message) => message.role === 'user').length} {messages.filter((message) => message.role === 'user').length === 1 ? 'question' : 'questions'}</span>
+                <div className="conversation-export"><button type="button" onClick={() => void exportReport('html')}><Download size={14} /> Printable report</button><button type="button" onClick={() => void exportReport('markdown')}>Markdown</button></div>
               </div>
               <div className="conversation-list">
-                {messages.map((message, index) => (
-                  <article className={'message-row message-' + message.role} key={message.id}>
+                {messages.map((message, index) => {
+                  const messageArtifacts = artifacts.filter((artifact) => artifact.messageId === message.id || (!artifact.messageId && index === lastAssistant));
+                  const recoverableTurn = message.turn && (message.turn.status === 'aborted' || message.turn.status === 'error') ? message.turn : undefined;
+                  const turnQuestion = recoverableTurn?.question || [...messages.slice(0, index)].reverse().find((candidate) => candidate.role === 'user')?.content || message.content;
+                  const recoveryIntent: FollowUpIntent | undefined = recoverableTurn
+                    ? recoverableTurn.intent ?? { action: 'rerun', artifactId: messageArtifacts.at(-1)?.queryId, messageId: message.id }
+                    : undefined;
+                  const failedWithoutResults = Boolean(recoverableTurn && messageArtifacts.length === 0);
+                  return (
+                  <article className={'message-row message-' + message.role} key={message.id} data-message-id={message.id}>
                     <div className="message-label">{message.role === 'user' ? 'You' : 'DB Chat'}</div>
                     <div className="message-main">
                       {message.role === 'user' ? (
-                        <div className="question-strip">{message.content}</div>
+                        <div>
+                          <div className="question-strip">{message.content}</div>
+                        </div>
                       ) : (
                         <div className="assistant-response">
                           {message.content ? <AssistantContent content={message.content} /> : <span className="stream-placeholder">Preparing an answer…</span>}
@@ -1943,48 +2164,70 @@ export function ChatWorkspace({
                               <span>{workingStatus.text}</span>
                             </div>
                           )}
-                          {artifacts.some((artifact) => artifact.messageId === message.id || (!artifact.messageId && index === lastAssistant)) && (
+                          {messageArtifacts.length > 0 && (
                             <div className="result-links" aria-label="Answer results">
-                              {artifacts.filter((artifact) => artifact.messageId === message.id || (!artifact.messageId && index === lastAssistant)).map((artifact) => (
-                                <button type="button" className="result-link" key={artifact.queryId} onClick={(event) => { inspectorOpenerRef.current = event.currentTarget; setSelectedArtifactId(artifact.queryId); setInspectorOpen(true); }} aria-expanded={inspectorOpen && currentArtifact?.queryId === artifact.queryId}>
+                              {messageArtifacts.map((artifact) => (
+                                <button type="button" className="result-link" key={artifact.queryId} onClick={(event) => { inspectorOpenerRef.current = event.currentTarget; setSelectedArtifactId(artifact.queryId); setInspectorOpen(true); }} aria-expanded={inspectorOpen && currentArtifact?.queryId === artifact.queryId} aria-controls="data-inspector-panel">
                                   {resultLinkLabel(artifact)} <span className="result-link-count">· {artifact.result.rowCount} {artifact.result.rowCount === 1 ? 'row' : 'rows'}</span>
                                 </button>
                               ))}
                             </div>
                           )}
-                          {index === lastAssistant && !busy && message.content && (
-                            <div className="follow-up-actions">
-                              <button type="button" onClick={() => setDraft('Explain that result in simpler terms.')}>Explain this result <ArrowRight size={14} /></button>
-                              <button type="button" onClick={() => setDraft('What should I investigate next?')}>What next? <ArrowRight size={14} /></button>
-                            </div>
+                          {!busy && message.content && !failedWithoutResults && (
+                            <>
+                              <div className="follow-up-actions">
+                                <button type="button" onClick={() => followUp(message, messageArtifacts.at(-1), 'explain', 'Explain')} disabled={!messageArtifacts.length}>Explain <ArrowRight size={14} /></button>
+                                {(messageArtifacts.at(-1)?.result.rows.length ?? 0) > 1 && <button type="button" onClick={() => followUp(message, messageArtifacts.at(-1), 'filter', 'Filter')}>Filter <ArrowRight size={14} /></button>}
+                                <details className="answer-more" onKeyDown={(event) => { if (event.key === 'Escape') { event.currentTarget.removeAttribute('open'); event.currentTarget.querySelector('summary')?.focus(); } }}><summary>More actions</summary><div role="menu">
+                                  {(messageArtifacts.at(-1)?.result.rows.length ?? 0) > 1 && <button role="menuitem" type="button" onClick={() => followUp(message, messageArtifacts.at(-1), 'compare', 'Compare')}>Compare values</button>}
+                                  {(messageArtifacts.at(-1)?.result.rows.length ?? 0) > 1 && <button role="menuitem" type="button" onClick={() => followUp(message, messageArtifacts.at(-1), 'inspect-exceptions', 'Inspect exceptions')}>Inspect exceptions</button>}
+                                  <button role="menuitem" type="button" onClick={() => void submit({ question: 'Rerun this analysis with fresh data.', attemptOf: message.turn?.id, intent: { action: 'rerun', artifactId: messageArtifacts.at(-1)?.queryId, messageId: message.id } })} disabled={!messageArtifacts.length} title="Runs a new read-only query against the current source"><RefreshCw size={14} /> Rerun with fresh data</button>
+                                </div></details>
+                              </div>
+                              <div className="answer-secondary-actions">
+                                <button type="button" onClick={() => void pinMessage(message)} aria-pressed={Boolean(message.pinned)}><Pin size={13} /> {message.pinned ? 'Saved' : 'Save'}</button>
+                                <details className="answer-export"><summary><Download size={13} /> Export</summary><div><button type="button" onClick={() => void exportReport('html', message)}>Printable HTML</button><button type="button" onClick={() => void exportReport('markdown', message)}>Markdown</button></div></details>
+                                {message.metrics && <details className="answer-metrics"><summary>Run details</summary><dl><div><dt>Model</dt><dd>{message.metrics.model}</dd></div><div><dt>Duration</dt><dd>{message.metrics.totalMs !== undefined ? `${(message.metrics.totalMs / 1000).toFixed(1)}s` : '—'}</dd></div><div><dt>Queries</dt><dd>{message.metrics.queryCount}</dd></div><div><dt>Tool calls</dt><dd>{message.metrics.toolCallCount}</dd></div><div><dt>Tokens</dt><dd>{message.metrics.totalTokens?.toLocaleString() ?? '—'}</dd></div>{message.metrics.costUsd !== undefined && <div><dt>Estimated cost</dt><dd>${message.metrics.costUsd.toFixed(4)}</dd></div>}<div><dt>Outcome</dt><dd>{message.metrics.terminalReason}</dd></div></dl></details>}
+                                <span className="answer-feedback" aria-label="Rate this answer"><button type="button" className={message.feedback?.rating === 'helpful' ? 'selected' : ''} onClick={() => void updateFeedback(message, 'helpful')} aria-label="Helpful answer" aria-pressed={message.feedback?.rating === 'helpful'}><ThumbsUp size={14} /></button><button type="button" className={message.feedback?.rating === 'unhelpful' ? 'selected' : ''} onClick={() => setFeedbackCorrections((current) => ({ ...current, [message.id]: current[message.id] ?? message.feedback?.correction ?? '' }))} aria-label="Unhelpful answer" aria-pressed={message.feedback?.rating === 'unhelpful'}><ThumbsDown size={14} /></button></span>
+                              </div>
+                            </>
                           )}
+                          {Object.prototype.hasOwnProperty.call(feedbackCorrections, message.id) && <div className="feedback-correction"><label htmlFor={`feedback-${message.id}`}>What should this answer have said? <span>Optional</span></label><textarea id={`feedback-${message.id}`} value={feedbackCorrections[message.id]} onChange={(event) => setFeedbackCorrections((current) => ({ ...current, [message.id]: event.target.value }))} /><div><button type="button" onClick={() => setFeedbackCorrections((current) => { const next = { ...current }; delete next[message.id]; return next; })}>Cancel</button><button type="button" onClick={() => { void updateFeedback(message, 'unhelpful', feedbackCorrections[message.id]); setFeedbackCorrections((current) => { const next = { ...current }; delete next[message.id]; return next; }); }}>Save feedback</button></div></div>}
+                        </div>
+                      )}
+                      {recoverableTurn && (
+                        <div className="turn-recovery" role="group" aria-label={`${recoverableTurn.status === 'aborted' ? 'Cancelled' : 'Failed'} question recovery`}>
+                          <span>{recoverableTurn.status === 'aborted' ? 'Cancelled' : 'Could not complete'}</span>
+                          <button type="button" onClick={() => void submit({ question: turnQuestion, attemptOf: recoverableTurn.id, intent: recoveryIntent })}><RefreshCw size={14} aria-hidden="true" /> Retry</button>
+                          <button type="button" onClick={() => { setDraft(turnQuestion); setPendingAttemptOf(recoverableTurn.id); setPendingIntent(recoveryIntent); window.setTimeout(() => document.querySelector<HTMLTextAreaElement>('[aria-label="Question"]')?.focus(), 0); }}><Pencil size={14} aria-hidden="true" /> Edit question</button>
                         </div>
                       )}
                     </div>
-                    <time>{new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+                    <time dateTime={message.createdAt} title={new Date(message.createdAt).toLocaleString()}>{new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
                   </article>
-                ))}
+                );})}
                 <div ref={endRef} />
               </div>
             </div>
           )}
           {error && <div className="workspace-error"><Alert title="We could not complete that question" onDismiss={() => setError('')}>{error}</Alert></div>}
+          {showJumpLatest && <button type="button" className="jump-latest" onClick={() => { followingRef.current = true; setShowJumpLatest(false); endRef.current?.scrollIntoView({ behavior: 'smooth' }); }}>Jump to latest <ArrowRight size={14} /></button>}
         </div>
-        {active?.status === 'ready' && (
+        {active?.status === 'ready' && sourceAvailable && (
           <Composer value={draft} onChange={setDraft} onSubmit={() => void submit()} onCancel={() => void cancel()} disabled={false} busy={busy} canSend={Boolean(draft.trim())} />
         )}
       </section>
       {inspectorOpen && currentArtifact && (
         <DataInspector
           artifact={currentArtifact}
-          connectionLabel={active?.label ?? 'Active connection'}
-          connectionId={active?.id ?? ''}
+          connectionLabel={currentArtifact.source?.label ?? chatSource?.label ?? active?.label ?? 'Original source'}
+          connectionId={currentArtifact.source?.connectionId ?? chatSource?.connectionId ?? active?.id ?? ''}
           onClose={() => { setInspectorOpen(false); window.setTimeout(() => inspectorOpenerRef.current?.focus(), 0); }}
           inspectorWidth={inspectorWidth}
           onInspectorWidthChange={setInspectorWidth}
         />
       )}
-      <div className="live-region" aria-live="polite" aria-atomic="true">{status}</div>
+      <div className="live-region" aria-live="polite" aria-atomic="true">{reconnecting ? 'Connection interrupted. Reconnecting to the active answer.' : status}</div>
     </div>
   );
 }
@@ -2000,11 +2243,25 @@ function SettingsLayout({
   children: React.ReactNode;
   formLayout?: boolean;
 }) {
+  const contentRef = useRef<HTMLElement>(null);
+  const previousViewRef = useRef(view);
   const items: Array<{ id: SettingsView; label: string; detail: string; path: string }> = [
     { id: 'profile', label: 'Profile and security', detail: 'Identity and access', path: '/settings' },
     { id: 'connections', label: 'Database connections', detail: 'Connections', path: '/settings/connections' },
     { id: 'inference', label: 'Inference', detail: 'Provider and model', path: '/settings/inference' }
   ];
+  useEffect(() => {
+    const content = contentRef.current;
+    content?.scrollTo({ top: 0 });
+    if (previousViewRef.current !== view) {
+      window.setTimeout(() => {
+        const heading = content?.querySelector<HTMLElement>('h2');
+        heading?.setAttribute('tabindex', '-1');
+        heading?.focus();
+      }, 0);
+      previousViewRef.current = view;
+    }
+  }, [view]);
   return (
     <div className={'settings-page' + (formLayout ? ' settings-page-form' : '')}>
       <div className="settings-heading">
@@ -2018,8 +2275,7 @@ function SettingsLayout({
         <nav className="settings-nav" aria-label="Settings">
           {items.map((item) => (
             <button type="button" className={view === item.id ? 'settings-nav-item current' : 'settings-nav-item'} key={item.id} onClick={() => onNavigate(item.path)} aria-current={view === item.id ? 'page' : undefined}>
-              <span>{item.label}</span>
-              <small>{item.detail}</small>
+              <span className="settings-nav-copy"><span>{item.label}</span><small>{item.detail}</small></span>
               {view === item.id && <ChevronRight size={15} aria-hidden="true" />}
             </button>
           ))}
@@ -2031,7 +2287,7 @@ function SettingsLayout({
           </select>
           <ChevronDown size={14} aria-hidden="true" />
         </label>
-        <section className="settings-content">{children}</section>
+        <section className="settings-content" ref={contentRef} key={view}>{children}</section>
       </div>
     </div>
   );
@@ -2056,6 +2312,7 @@ export function ProfileSecurity({
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
+  const [confirmationAction, setConfirmationAction] = useState<'sessions' | 'account' | null>(null);
 
   useEffect(() => {
     setDisplayName(bootstrap.user.displayName);
@@ -2103,7 +2360,6 @@ export function ProfileSecurity({
   };
 
   const revokeSessions = async () => {
-    if (!window.confirm('Log out of all active sessions?')) return;
     setPending(true);
     setError('');
     try {
@@ -2116,7 +2372,6 @@ export function ProfileSecurity({
   };
 
   const deleteAccount = async () => {
-    if (!window.confirm('Permanently delete your DB Chat account, saved chats, results, and connection details? This cannot be undone. Your source databases will not be deleted.')) return;
     setPending(true); setError('');
     try { await api('/api/v1/account', { method: 'DELETE', body: JSON.stringify({ password: deletePassword }) }); await onLogout(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Your account could not be deleted.'); setPending(false); }
@@ -2149,7 +2404,7 @@ export function ProfileSecurity({
           <div>
             <p className="overline">Security</p>
             <h2>Change your password</h2>
-            <p>Passwords are checked server-side and never appear in the browser after submission.</p>
+            <p>Choose a new password to keep your account secure.</p>
           </div>
           <LockKeyhole size={20} className="section-icon" aria-hidden="true" />
         </div>
@@ -2165,17 +2420,25 @@ export function ProfileSecurity({
           <div>
             <p className="overline">Active session</p>
             <h2>This browser</h2>
-            <p>Your current authenticated session is protected by an HttpOnly cookie.</p>
+            <p>You are currently signed in on this browser.</p>
           </div>
           <StatusLine status="healthy" label="Active" />
         </div>
-        <Button variant="quiet" onClick={() => void revokeSessions()} disabled={pending}>Log out all sessions</Button>
+        <Button variant="quiet" onClick={() => { setError(''); setConfirmationAction('sessions'); }} disabled={pending}>Log out all sessions</Button>
       </section>
       <section className="settings-section">
         <div className="section-heading"><div><h2>Delete account</h2><p>Permanently remove your account, saved chats, results, and connection details. Your source databases remain intact.</p></div></div>
         <Field label="Confirm account password" name="delete-account-password" type="password" value={deletePassword} onChange={setDeletePassword} autoComplete="current-password" />
-        <Button variant="destructive" onClick={() => void deleteAccount()} disabled={pending || !deletePassword}>Delete account</Button>
+        <Button variant="destructive" onClick={() => { setError(''); setConfirmationAction('account'); }} disabled={pending || !deletePassword}>Delete account</Button>
       </section>
+      <ConfirmDialog open={confirmationAction === 'sessions'} title="Log out all sessions?" confirmLabel="Log out all sessions" pending={pending} onCancel={() => setConfirmationAction(null)} onConfirm={() => void revokeSessions()}>
+        You will be signed out here and anywhere else your DB Chat account is active.
+        {error && <p role="alert" className="confirm-dialog-error">{error}</p>}
+      </ConfirmDialog>
+      <ConfirmDialog open={confirmationAction === 'account'} title="Delete your account?" confirmLabel="Delete account" pending={pending} onCancel={() => setConfirmationAction(null)} onConfirm={() => void deleteAccount()}>
+        Your account, saved chats, results, and connection details will be permanently removed. Your source databases will remain intact.
+        {error && <p role="alert" className="confirm-dialog-error">{error}</p>}
+      </ConfirmDialog>
     </div>
   );
 }
@@ -2192,14 +2455,16 @@ function ConnectionRow({
   return (
     <div className={'connection-row' + (active ? ' connection-active' : '')}>
       <div className="connection-row-mark" aria-hidden="true"><Database size={18} /></div>
-      <div className="connection-row-main">
-        <div className="connection-row-title"><strong>{connection.label}</strong>{active && <span className="active-label">Active</span>}</div>
-        <span className="connection-row-meta">{formatKind(connection.kind)}{connection.safeHost ? ' · ' + connection.safeHost : ''}</span>
-        <span className="connection-row-meta">Last tested: {formatDate(connection.lastTestedAt)}</span>
-      </div>
-      <div className="connection-row-health">
-        <StatusLine status={connection.status} label={connectionStatusLabel(connection.status)} />
-        <span className="readonly-mini"><ShieldCheck size={12} /> Read-only</span>
+      <div className="connection-row-summary">
+        <div className="connection-row-main">
+          <div className="connection-row-title"><strong>{connection.label}</strong>{active && <span className="active-label">Active</span>}</div>
+          <span className="connection-row-meta">{connection.kind === 'sqlite' ? 'Uploaded SQLite file' : formatKind(connection.kind) + (connection.safeHost ? ' · ' + connection.safeHost : '')}</span>
+        </div>
+        <div className="connection-row-health">
+          <StatusLine status={connection.status} label={connectionStatusLabel(connection.status)} />
+          <span className="connection-row-meta">{connection.lastTestedAt ? 'Tested ' + formatDate(connection.lastTestedAt) : 'Not tested yet'}</span>
+          <span className="readonly-mini"><ShieldCheck size={12} /> Read-only</span>
+        </div>
       </div>
       <div className="connection-row-actions">
         <button type="button" className="quiet-action" onClick={() => onNavigate('/settings/connections/' + connection.id)}>Manage <ChevronRight size={14} /></button>
@@ -2241,12 +2506,41 @@ function ConnectionsPage({
           </div>
         )}
       </section>
+      {bootstrap.connections.length > 0 && <KnowledgeEditor connections={bootstrap.connections} initialConnectionId={bootstrap.activeConnectionId} />}
       <section className="settings-section settings-note-section">
         <div className="section-note-icon"><ShieldCheck size={17} /></div>
         <div><strong>Read-only policy</strong><p>Connections use read-only queries. Use a database role with only the permissions DB Chat needs.</p></div>
       </section>
     </div>
   );
+}
+
+function KnowledgeEditor({ connections, initialConnectionId }: { connections: WebConnection[]; initialConnectionId?: string }) {
+  const [connectionId, setConnectionId] = useState(initialConnectionId ?? connections[0].id);
+  const [knowledge, setKnowledge] = useState<ConnectionKnowledge | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState('');
+  useEffect(() => {
+    let cancelled = false; setLoading(true); setStatus('');
+    void api<{ knowledge: ConnectionKnowledge }>(`/api/v1/connections/${encodeURIComponent(connectionId)}/knowledge`).then(({ knowledge }) => { if (!cancelled) setKnowledge(knowledge); }).catch((reason) => { if (!cancelled) setStatus(reason instanceof Error ? reason.message : 'Knowledge could not be loaded.'); }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [connectionId]);
+  const save = async () => {
+    if (!knowledge) return; setSaving(true); setStatus('');
+    try { const payload = await api<{ knowledge: ConnectionKnowledge }>(`/api/v1/connections/${encodeURIComponent(connectionId)}/knowledge`, { method: 'PUT', body: JSON.stringify({ knowledge }) }); setKnowledge(payload.knowledge); setStatus('Definitions and verified examples saved.'); }
+    catch (reason) { setStatus(reason instanceof Error ? reason.message : 'Knowledge could not be saved.'); }
+    finally { setSaving(false); }
+  };
+  return <section className="settings-section knowledge-editor">
+    <div className="section-heading"><p className="overline">Shared context</p><h2>Definitions and verified examples</h2><p>Private knowledge for one connection. DB Chat uses only definitions you save here.</p></div>
+    <label>Connection<select value={connectionId} onChange={(event) => setConnectionId(event.target.value)}>{connections.map((connection) => <option key={connection.id} value={connection.id}>{connection.label}</option>)}</select></label>
+    {loading ? <p role="status">Loading saved knowledge…</p> : knowledge && <>
+      <div className="knowledge-list"><h3>Glossary</h3>{knowledge.glossary.map((item, index) => <div className="knowledge-row" key={item.id}><input aria-label={`Term ${index + 1}`} value={item.term} onChange={(event) => setKnowledge({ ...knowledge, glossary: knowledge.glossary.map((entry) => entry.id === item.id ? { ...entry, term: event.target.value } : entry) })} /><textarea aria-label={`Definition for ${item.term || `term ${index + 1}`}`} value={item.definition} onChange={(event) => setKnowledge({ ...knowledge, glossary: knowledge.glossary.map((entry) => entry.id === item.id ? { ...entry, definition: event.target.value } : entry) })} /><button type="button" className="button button-quiet" onClick={() => setKnowledge({ ...knowledge, glossary: knowledge.glossary.filter((entry) => entry.id !== item.id) })}>Remove</button></div>)}<button type="button" className="button button-secondary" onClick={() => setKnowledge({ ...knowledge, glossary: [...knowledge.glossary, { id: crypto.randomUUID(), term: '', definition: '', provenance: 'user', updatedAt: new Date().toISOString() }] })}><Plus size={14} /> Add definition</button></div>
+      <div className="knowledge-list"><h3>Verified question and query examples</h3>{knowledge.examples.map((item, index) => <div className="knowledge-example" key={item.id}><input aria-label={`Verified question ${index + 1}`} value={item.question} onChange={(event) => setKnowledge({ ...knowledge, examples: knowledge.examples.map((entry) => entry.id === item.id ? { ...entry, question: event.target.value } : entry) })} /><textarea aria-label={`Verified query ${index + 1}`} value={item.query} onChange={(event) => setKnowledge({ ...knowledge, examples: knowledge.examples.map((entry) => entry.id === item.id ? { ...entry, query: event.target.value } : entry) })} />{item.invalidatedAt && <><span className="knowledge-stale">Schema changed — verify this query again.</span><button type="button" className="button button-secondary" onClick={async () => { setSaving(true); try { const body = { ...knowledge, examples: knowledge.examples.map((entry) => entry.id === item.id ? { ...entry, reverify: true } : entry) }; const payload = await api<{ knowledge: ConnectionKnowledge }>(`/api/v1/connections/${encodeURIComponent(connectionId)}/knowledge`, { method: 'PUT', body: JSON.stringify({ knowledge: body }) }); setKnowledge(payload.knowledge); setStatus('Verified against the current schema.'); } finally { setSaving(false); } }}>Verify again</button></>}<button type="button" className="button button-quiet" onClick={() => setKnowledge({ ...knowledge, examples: knowledge.examples.filter((entry) => entry.id !== item.id) })}>Remove</button></div>)}<button type="button" className="button button-secondary" onClick={() => setKnowledge({ ...knowledge, examples: [...knowledge.examples, { id: crypto.randomUUID(), question: '', query: '', provenance: 'user', verifiedAt: new Date().toISOString() }] })}><Plus size={14} /> Add verified example</button></div>
+      <div className="form-actions"><Button variant="primary" disabled={saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save connection knowledge'}</Button><span role="status">{status}</span></div>
+    </>}
+  </section>;
 }
 
 export function draftForConnection(connection?: WebConnection): ConnectionDraft {
@@ -2268,7 +2562,7 @@ export function draftForConnection(connection?: WebConnection): ConnectionDraft 
   };
 }
 
-function ConnectionForm({
+export function ConnectionForm({
   bootstrap,
   connection,
   onNavigate,
@@ -2286,6 +2580,7 @@ function ConnectionForm({
   const [showConnectionPassword, setShowConnectionPassword] = useState(false);
   const [uploadingFile, setUploadingFile] = useState(false);
   const [fileDragging, setFileDragging] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [savedId, setSavedId] = useState(connection?.id);
   const currentId = savedId ?? connection?.id;
@@ -2354,7 +2649,8 @@ function ConnectionForm({
     if (file) void uploadFile(file);
   };
 
-  const save = async () => {
+  const save = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
     if (draft.kind === 'sqlite' && !draft.sqliteUploadId && !draft.sqliteFileName) {
       setError('Choose a SQLite database file before saving the connection.');
       return;
@@ -2382,7 +2678,7 @@ function ConnectionForm({
   };
 
   const remove = async () => {
-    if (!currentId || !window.confirm('Remove this connection? Saved credentials will be deleted.')) return;
+    if (!currentId) return;
     setPending('delete');
     setError('');
     try {
@@ -2405,31 +2701,35 @@ function ConnectionForm({
           <div>
             <p className="overline">{connection ? 'Manage connection' : 'New connection'}</p>
             <h2>{connection ? connection.label : 'Add a database connection'}</h2>
-            <p>The hosted service must be able to reach this source. Use a read-only database role and TLS wherever possible.</p>
+            <p>{draft.kind === 'sqlite'
+              ? 'Review the uploaded SQLite file DB Chat uses for read-only questions.'
+              : 'Add the database details DB Chat needs to connect with read-only access.'}</p>
           </div>
         </div>
         {error && <Alert>{error}</Alert>}
         {notice && <Alert tone="success">{notice}</Alert>}
-        <div className="connection-form">
+        <form className="connection-form" onSubmit={(event) => void save(event)}>
           <div className="form-subsection">
             <p className="form-subsection-title">Identity</p>
-            <Field label="Connection name" name="connection-label" value={draft.label} onChange={(value) => update('label', value)} placeholder="Analytics warehouse" required />
-            <label className="field">
-              <span className="field-label">Database type</span>
-              <span className="select-wrap">
-                <select value={draft.kind} onChange={(event) => update('kind', event.target.value)}>
-                  <option value="postgres">Postgres</option>
-                  <option value="mysql">MySQL</option>
-                  <option value="mongodb">MongoDB</option>
-                  <option value="elasticsearch">Elasticsearch</option>
-                  <option value="sqlite">SQLite file</option>
-                </select>
-                <ChevronDown size={14} aria-hidden="true" />
-              </span>
-            </label>
+            <div className="form-grid-two">
+              <Field label="Connection name" name="connection-label" value={draft.label} onChange={(value) => update('label', value)} placeholder="Analytics warehouse" required />
+              <label className="field">
+                <span className="field-label">Database type</span>
+                <span className="select-wrap">
+                  <select value={draft.kind} onChange={(event) => update('kind', event.target.value)}>
+                    <option value="postgres">PostgreSQL</option>
+                    <option value="mysql">MySQL</option>
+                    <option value="mongodb">MongoDB</option>
+                    <option value="elasticsearch">Elasticsearch</option>
+                    <option value="sqlite">SQLite file</option>
+                  </select>
+                  <ChevronDown size={14} aria-hidden="true" />
+                </span>
+              </label>
+            </div>
           </div>
           <div className="form-subsection">
-            <p className="form-subsection-title">Location and credentials</p>
+            <p className="form-subsection-title">{draft.kind === 'sqlite' ? 'Uploaded file' : 'Location and credentials'}</p>
             {draft.kind === 'sqlite' ? (
               <div className="field">
                 <span className="field-label">SQLite database file</span>
@@ -2480,22 +2780,30 @@ function ConnectionForm({
               </>
             )}
           </div>
-          <div className="form-subsection">
-            <p className="form-subsection-title">Transport and safety</p>
-            {draft.kind !== 'sqlite' && <label className="checkbox-row checkbox-row-block">
+          {draft.kind !== 'sqlite' && <div className="form-subsection">
+            <p className="form-subsection-title">Connection safety</p>
+            <label className="checkbox-row checkbox-row-block">
               <input type="checkbox" checked={draft.ssl} onChange={(event) => update('ssl', event.target.checked)} />
               <span><strong>Use TLS / SSL</strong><small>Recommended for hosted connections and protects credentials in transit.</small></span>
-            </label>}
+            </label>
             {draft.kind === 'elasticsearch' && elasticsearchEndpoint && <div className="endpoint-preview" aria-live="polite"><span>Connection URL</span><code>{elasticsearchEndpoint}</code></div>}
             {draft.kind === 'elasticsearch' && <label className="checkbox-row checkbox-row-block"><input type="checkbox" checked={draft.elasticsearchVerifyCerts} onChange={(event) => update('elasticsearchVerifyCerts', event.target.checked)} disabled={!draft.ssl} /><span><strong>Verify the server certificate</strong><small>Turn this off only for a controlled test environment.</small></span></label>}
-            <div className="safety-callout"><ShieldCheck size={17} /><div><strong>Query permissions</strong><p>DB Chat runs schema inspection, sampling, and bounded read queries. Use a database account with read-only permissions for an additional enforcement boundary.</p></div></div>
+            <p className="form-note"><ShieldCheck size={16} aria-hidden="true" /> Use a database account with read-only permissions. DB Chat runs only schema inspection, sampling, and bounded read queries.</p>
+          </div>}
+          {draft.kind === 'sqlite' && <div className="form-subsection sqlite-file-details">
+            <p className="form-subsection-title">How this file is used</p>
+            <div className="safety-callout"><ShieldCheck size={17} /><div><strong>Read-only access</strong><p>DB Chat stores this uploaded copy in your workspace and uses it for schema inspection and bounded read-only queries. Replacing it updates this connection after you save and test.</p></div></div>
+          </div>}
+          <div className="form-actions">
+            <Button variant="primary" type="submit" disabled={formPending}>{pending === 'test' ? <><LoaderCircle className="spin" size={16} /> Saving and testing</> : 'Save and test'}</Button>
+            <Button variant="quiet" type="button" onClick={() => onNavigate('/settings/connections')}>Cancel</Button>
+            {connection && <Button variant="destructive" type="button" className="form-delete" onClick={() => { setError(''); setConfirmRemove(true); }} disabled={formPending}><Trash2 size={15} /> Remove</Button>}
           </div>
-        </div>
-        <div className="form-actions">
-          <Button variant="primary" onClick={() => void save()} disabled={formPending}>{pending === 'test' ? <><LoaderCircle className="spin" size={16} /> Saving and testing</> : 'Save connection'}</Button>
-          <Button variant="quiet" onClick={() => onNavigate('/settings/connections')}>Cancel</Button>
-          {connection && <Button variant="destructive" className="form-delete" onClick={() => void remove()} disabled={formPending}><Trash2 size={15} /> Remove</Button>}
-        </div>
+        </form>
+        <ConfirmDialog open={confirmRemove} title={`Remove ${connection?.label ?? 'this connection'}?`} confirmLabel="Remove connection" pending={pending === 'delete'} onCancel={() => setConfirmRemove(false)} onConfirm={() => void remove()}>
+          {connection?.kind === 'sqlite' ? 'DB Chat will delete this connection and its uploaded copy. The original file on your device will remain unchanged.' : 'DB Chat will delete the saved connection details and credentials. Your source database will remain unchanged.'}
+          {error && <p role="alert" className="confirm-dialog-error">{error}</p>}
+        </ConfirmDialog>
       </section>
     </div>
   );
@@ -2503,42 +2811,31 @@ function ConnectionForm({
 
 function InferencePage({
   bootstrap,
-  onRefresh
+  onRefresh: _onRefresh
 }: {
   bootstrap: BootstrapState;
   onRefresh: () => Promise<void>;
 }) {
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
-  const source = bootstrap.inference.credentialSource === 'user' ? 'Your provider key' : bootstrap.inference.credentialSource === 'internal' ? 'Managed by DB Chat' : 'Not configured';
   const callout = getInferenceCallout(bootstrap.inference);
-  const CalloutIcon = callout.available ? LockKeyhole : CircleAlert;
 
   return (
     <div className="settings-sections">
       <section className="settings-section">
         <div className="section-heading section-heading-row">
           <div>
-            <p className="overline">Provider context</p>
+            <p className="overline">AI settings</p>
             <h2>Inference</h2>
-            <p>See how DB Chat will process prompts, schema context, and bounded results.</p>
+            <p>Manage how DB Chat uses AI to understand your data.</p>
           </div>
-          <div className="provider-symbol"><KeyRound size={19} /></div>
+          <StatusLine status={callout.available ? 'healthy' : 'unavailable'} label={callout.available ? 'Ready' : 'Unavailable'} />
         </div>
-        {error && <Alert>{error}</Alert>}
-        {notice && <Alert tone="success">{notice}</Alert>}
         <div className="inference-summary">
           <div className="inference-summary-row"><span>Provider</span><strong>OpenRouter</strong></div>
-          <div className="inference-summary-row"><span>Credential source</span><strong>{source}</strong></div>
           <div className="inference-summary-row"><span>Model</span><code>{bootstrap.inference.model}</code></div>
-          <div className="inference-summary-row"><span>Request status</span><StatusLine status={bootstrap.inference.status === 'ready' ? 'healthy' : 'error'} label={bootstrap.inference.status === 'ready' ? 'Ready' : 'Unavailable'} /></div>
         </div>
-        <div className="privacy-callout"><ShieldCheck size={17} /><div><strong>What leaves this workspace</strong><p>Prompts, relevant schema context, and bounded results may be sent to the selected inference provider. Raw database credentials never leave the hosted server.</p></div></div>
+        <details className="inference-disclosure"><summary>How your data is used</summary><p>Relevant schema context and query results are sent to the AI provider to answer your questions. DB Chat never sends your database credentials.</p></details>
       </section>
-      <section className="settings-section hidden-feature-note" aria-live="polite">
-        <CalloutIcon size={18} />
-        <div><strong>{callout.title}</strong><span>{callout.description}</span></div>
-      </section>
+      <p className="inference-availability" role="status">{callout.available ? 'AI is ready for your questions.' : callout.description}</p>
     </div>
   );
 }
@@ -2620,7 +2917,7 @@ export function App() {
 
 
   const onChatChanged = useCallback((chat: WebChatSummary) => {
-    setChats((current) => [chat, ...current.filter((item) => item.id !== chat.id)].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
+    setChats((current) => [chat, ...current.filter((item) => item.id !== chat.id)].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
   }, []);
 
   useEffect(() => {
@@ -2717,6 +3014,11 @@ export function App() {
     if (selectedChatId === chat.id || route === '/chat/' + encodeURIComponent(chat.id)) startNewChat();
   };
 
+  const pinChat = async (chat: WebChatSummary) => {
+    const response = await api<{ chat: WebChatSession }>('/api/v1/chats/' + encodeURIComponent(chat.id), { method: 'PATCH', body: JSON.stringify({ pinned: !chat.pinned }) });
+    onChatChanged(response.chat);
+  };
+
   const selectChat = async (chat: WebChatSummary) => {
     try {
       if (chat.connectionId && chat.connectionId !== bootstrap?.activeConnectionId) {
@@ -2748,7 +3050,7 @@ export function App() {
     <div className={'app-shell' + (navigationOpen ? ' navigation-open' : '')} onKeyDown={(event) => { if (event.key === 'Escape') { setNavigationOpen(false); document.querySelector<HTMLButtonElement>('.workspace-navigation-toggle')?.focus(); } }}>
       <AppBar bootstrap={bootstrap} onNavigate={navigate} onRefresh={refreshBootstrap} onLogout={logout} navigationOpen={navigationOpen} onToggleNavigation={() => setNavigationOpen((open) => !open)} />
       <div className="app-body">
-        <WorkspaceSidebar bootstrap={bootstrap} route={route} onNavigate={navigate} onSelectConnection={(id) => { setNavigationOpen(false); return selectConnection(id); }} onNewChat={startNewChat} chats={chats} selectedChatId={selectedChatId} onSelectChat={(chat) => void selectChat(chat)} onRenameChat={renameChat} onDeleteChat={deleteChat} />
+        <WorkspaceSidebar bootstrap={bootstrap} route={route} onNavigate={navigate} onSelectConnection={(id) => { setNavigationOpen(false); return selectConnection(id); }} onNewChat={startNewChat} chats={chats} selectedChatId={selectedChatId} onSelectChat={(chat) => void selectChat(chat)} onRenameChat={renameChat} onDeleteChat={deleteChat} onPinChat={pinChat} />
         <main className="app-main">
           {settingsPath ? (
             <SettingsPage bootstrap={bootstrap} view={view} editingConnection={editingConnection} onNavigate={navigate} onRefresh={refreshBootstrap} onLogout={logout} />

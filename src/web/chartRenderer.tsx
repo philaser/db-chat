@@ -45,7 +45,7 @@ const CHART_COLORS = [
   'var(--chart-5)',
   'var(--chart-6)'
 ];
-const CHART_HEIGHT = 260;
+const CHART_HEIGHT = 220;
 
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(() => typeof window !== 'undefined'
@@ -97,7 +97,7 @@ function renderAnnotations(annotations: ChartAnnotation[]): ReactNode[] {
   return annotations.flatMap((annotation, index) => {
     const color = annotation.color ?? 'var(--rust)';
     const label = annotation.text
-      ? { value: annotation.text, fill: color, fontFamily: 'var(--font-sans)', fontSize: 11, position: annotation.position ?? 'top' }
+      ? { value: annotation.text, fill: color, fontFamily: 'var(--font-sans)', fontSize: 12, position: annotation.position ?? 'top' }
       : undefined;
 
     if ((annotation.kind === 'point' || annotation.kind === 'label') && annotation.x !== undefined && annotation.y !== undefined) {
@@ -303,10 +303,10 @@ function ChartView({ block }: { block: ContentBlock }) {
     return <p className="assistant-chart-error">This visualization could not be rendered.</p>;
   }
 
-  const axisTick = { fill: 'var(--ink-muted)', fontFamily: 'var(--font-sans)', fontSize: 11 };
+  const axisTick = { fill: 'var(--ink-muted)', fontFamily: 'var(--font-sans)', fontSize: 12 };
   const gridStroke = 'var(--border)';
   const tooltip = <RechartsTooltip content={<ChartTooltip />} cursor={{ stroke: 'var(--border-strong)', strokeDasharray: '3 3' }} />;
-  const legend = showLegend ? <Legend wrapperStyle={{ color: 'var(--ink-secondary)', fontFamily: 'var(--font-sans)', fontSize: '11px' }} /> : null;
+  const legend = showLegend ? <Legend wrapperStyle={{ color: 'var(--ink-secondary)', fontFamily: 'var(--font-sans)', fontSize: '12px' }} /> : null;
 
   function renderCartesianChart(ChartComponent: any, seriesRenderer: (key: string, index: number) => ReactNode, extraProps?: Record<string, unknown>) {
     const horizontal = layout === 'horizontal';
@@ -382,11 +382,11 @@ function ChartView({ block }: { block: ContentBlock }) {
       case 'radialBar':
         return (
           <RadialBarChart data={rows} innerRadius={donut ? 30 : 0} outerRadius={112} startAngle={180} endAngle={0}>
-            <RadialBar {...animationProps} dataKey={valueKeys[0]} name={valueKeys[0]} label={{ fill: 'var(--ink-secondary)', fontSize: 11, position: 'insideStart' }} background={{ fill: 'var(--surface-soft)' }}>
+            <RadialBar {...animationProps} dataKey={valueKeys[0]} name={valueKeys[0]} label={{ fill: 'var(--ink-secondary)', fontSize: 12, position: 'insideStart' }} background={{ fill: 'var(--surface-soft)' }}>
               {rows.map((_, index) => <Cell key={index} fill={CHART_COLORS[index % CHART_COLORS.length]} />)}
             </RadialBar>
             <RechartsTooltip content={<ChartTooltip />} />
-            {showLegend && <Legend wrapperStyle={{ color: 'var(--ink-secondary)', fontFamily: 'var(--font-sans)', fontSize: '11px' }} iconSize={10} />}
+            {showLegend && <Legend wrapperStyle={{ color: 'var(--ink-secondary)', fontFamily: 'var(--font-sans)', fontSize: '12px' }} iconSize={10} />}
           </RadialBarChart>
         );
       case 'radar':

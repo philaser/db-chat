@@ -152,8 +152,30 @@ describe('web app interactions', () => {
 
     fireEvent.click(actions);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
-    expect(screen.getByRole('dialog', { name: 'Delete Customer analysis' })).toHaveTextContent('This cannot be undone.');
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    expect(screen.getByRole('dialog', { name: 'Delete this chat?' })).toHaveTextContent('“Customer analysis” will be permanently deleted.');
+    fireEvent.click(screen.getByRole('button', { name: 'Delete chat' }));
     await waitFor(() => expect(onDelete).toHaveBeenCalledOnce());
+  });
+
+  it('keeps a pending chat deletion open during document-level dismissal events', async () => {
+    let finishDelete: (() => void) | undefined;
+    const onDelete = vi.fn(() => new Promise<void>((resolve) => { finishDelete = resolve; }));
+    render(<ChatSidebarRow
+      chat={{ id: 'chat-pending', title: 'Pending deletion', messageCount: 1, artifactCount: 0, createdAt: '2026-08-09T18:00:00.000Z', updatedAt: '2026-08-09T19:00:00.000Z' }}
+      selected={false}
+      onSelect={vi.fn()}
+      onRename={vi.fn()}
+      onDelete={onDelete}
+    />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Pending deletion' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete chat' }));
+    await waitFor(() => expect(onDelete).toHaveBeenCalledOnce());
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.pointerDown(document.body);
+    expect(screen.getByRole('dialog', { name: 'Delete this chat?' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Working…' })).toBeDisabled();
+    finishDelete?.();
   });
 });

@@ -38,7 +38,8 @@ export class ToolRegistry {
       return {
         ok: false,
         summary: `Tool "${name}" failed`,
-        error: (error as Error).message
+        error: (error as Error).message,
+        data: { errorCode: 'TOOL_EXECUTION_FAILED', retryable: true }
       };
     }
   }

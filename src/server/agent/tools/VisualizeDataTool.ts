@@ -14,7 +14,9 @@ const DEFAULT_COLORS = [
   '#5e5ce6', '#ff375f'
 ];
 
-function validateSpec(spec: ChartSpec): string | null {
+type ValidatedChartSpec = ChartSpec & { resultId?: string; unit?: string; series?: Array<ChartSeries & { unit?: string }> };
+
+function validateSpec(spec: ValidatedChartSpec): string | null {
   if (!spec.columns || !Array.isArray(spec.columns) || spec.columns.length === 0) {
     return 'columns must be a non-empty array';
   }
@@ -40,6 +42,15 @@ function validateSpec(spec: ChartSpec): string | null {
       return `valueKey "${vk}" not found in columns`;
     }
   }
+  if (new Set(valueKeys).size !== valueKeys.length) return 'valueKeys must not contain duplicates';
+  if (spec.series) {
+    const configuredSeries = spec.series as Array<ChartSeries & { unit?: string }>;
+    const unknownSeries = configuredSeries.find((entry) => !valueKeys.includes(entry.key));
+    if (unknownSeries) return `series key "${unknownSeries.key}" is not a selected valueKey`;
+    const units = new Set([spec.unit, ...configuredSeries.map((entry) => entry.unit)].filter((unit): unit is string => Boolean(unit)));
+    if (units.size > 1) return 'Mixed-unit series are not supported in one chart. Use separate charts or one common unit.';
+  }
+  if (spec.unit && (spec.unit.trim().length === 0 || spec.unit.length > 40)) return 'unit must be between 1 and 40 characters';
 
   // Chart-specific validation
   switch (spec.chartType) {
@@ -81,21 +92,42 @@ function validateSpec(spec: ChartSpec): string | null {
       if (!(vk in row)) {
         return `Row ${i} missing valueKey "${vk}"`;
       }
+      const value = row[vk];
+      if (value !== null && value !== undefined && value !== '' && !(typeof value === 'number' ? Number.isFinite(value) : typeof value === 'string' && Number.isFinite(Number(value)))) {
+        return `valueKey "${vk}" contains a non-numeric value at row ${i}`;
+      }
+      if (typeof value === 'string' && /^[-+]?\d+$/.test(value.trim()) && !Number.isSafeInteger(Number(value))) {
+        return `valueKey "${vk}" contains an integer outside the safe chart range at row ${i}`;
+      }
+      if (typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value)) {
+        return `valueKey "${vk}" contains an integer outside the safe chart range at row ${i}`;
+      }
     }
+  }
+
+  for (const vk of valueKeys) {
+    if (!spec.rows.some((row) => {
+      const value = row[vk];
+      return typeof value === 'number' ? Number.isFinite(value) : typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value));
+    })) return `valueKey "${vk}" has no finite numeric values`;
   }
 
   return null;
 }
 
-export const visualizeDataTool: Tool = {
+export function createVisualizeDataTool(options: { requireResultReference?: boolean } = {}): Tool {
+  return {
   definition: {
     type: 'function',
     function: {
       name: 'visualize_data',
-      description: 'Generate a chart visualization from data. Supports: bar, line, area, pie, scatter, radar, radialBar, composed, funnel, treemap, sunburst, slope. Pass data in the same column/rows format as query results. The tool validates and returns a chart spec that you present in a ```chart code block.',
+      description: options.requireResultReference
+        ? 'Generate a validated chart from a server-owned resultId. Rows are resolved server-side and cannot be supplied by the model.'
+        : 'Generate a validated chart. Prefer a server-owned resultId; direct rows remain available for trusted local fixtures.',
       parameters: {
         type: 'object',
         properties: {
+          resultId: { type: 'string', description: 'Owned result ID returned by run_database_query or get_result.' },
           chartType: {
             type: 'string',
             description: 'Chart type. bar=vertical bars, line=connected points, area=filled line, pie=circular segments, scatter=xy points, radar=spider web, radialBar=circular bars, composed=bar+line mix, funnel=progressive stages, treemap=nested rectangles, sunburst=ring hierarchy, slope=two-endpoint comparison.',
@@ -115,6 +147,7 @@ export const visualizeDataTool: Tool = {
             items: { type: 'object' },
             description: 'Data rows from your query results, each as a {column: value} object.'
           },
+          unit: { type: 'string', description: 'Optional common unit for all value series. Do not infer a unit.' },
           nameKey: {
             type: 'string',
             description: 'Column to use for labels/categories. Defaults to the first column.'
@@ -131,7 +164,8 @@ export const visualizeDataTool: Tool = {
               properties: {
                 key: { type: 'string' },
                 type: { type: 'string', enum: ['bar', 'line', 'area'] },
-                name: { type: 'string' }
+                name: { type: 'string' },
+                unit: { type: 'string' }
               },
               required: ['key']
             },
@@ -176,31 +210,43 @@ export const visualizeDataTool: Tool = {
             description: 'Optional editorial labels, reference points, lines, and ranges. Use data coordinates for x/y values; use rowKey/valueKey/side for slope labels.'
           }
         },
-        required: ['chartType', 'columns', 'rows'],
+        required: options.requireResultReference ? ['chartType', 'resultId'] : ['chartType'],
         additionalProperties: false
       }
     }
   },
 
-  async execute(input, _context) {
-    const { chartType, title, columns, rows, nameKey, valueKeys, series, options, annotations } = input as Record<string, unknown>;
+  async execute(input, context) {
+    const { resultId, chartType, title, nameKey, valueKeys, series, options: chartOptions, annotations, unit } = input as Record<string, unknown>;
+    const artifact = typeof resultId === 'string' ? context.resolveArtifact?.(resultId) : undefined;
+    if (typeof resultId === 'string' && !artifact) {
+      return { ok: false, summary: 'Result not found in this chat.', error: 'Unknown or unauthorized resultId', data: { errorCode: 'RESULT_NOT_FOUND', retryable: false } };
+    }
+    if (options.requireResultReference && !artifact) {
+      return { ok: false, summary: 'A valid owned resultId is required.', error: 'Missing resultId', data: { errorCode: 'RESULT_REFERENCE_REQUIRED', retryable: true } };
+    }
+    const columns = artifact?.result.columns ?? input.columns;
+    const rows = artifact?.result.rows ?? input.rows;
 
-    const spec: ChartSpec = {
+    const spec: ValidatedChartSpec = {
+      resultId: artifact?.queryId,
       chartType: chartType as AllChartType,
       title: title as string | undefined,
       columns: columns as string[],
       rows: rows as Record<string, unknown>[],
       nameKey: nameKey as string | undefined,
       valueKeys: valueKeys as string[] | undefined,
-      options: options as ChartOptions | undefined,
-      annotations: annotations as ChartAnnotation[] | undefined
+      options: chartOptions as ChartOptions | undefined,
+      annotations: annotations as ChartAnnotation[] | undefined,
+      unit: typeof unit === 'string' ? unit : undefined
     };
 
     if (series) {
-      spec.series = (series as ChartSeries[]).map((s) => ({
+      spec.series = (series as Array<ChartSeries & { unit?: string }>).map((s) => ({
         key: s.key,
         type: s.type,
-        name: s.name
+        name: s.name,
+        unit: s.unit
       }));
     }
 
@@ -212,22 +258,42 @@ export const visualizeDataTool: Tool = {
     // Fill defaults
     const resolvedNameKey = spec.nameKey ?? spec.columns[0];
     const resolvedValueKeys = spec.valueKeys ?? spec.columns.filter((c) => c !== resolvedNameKey);
+    const normalizedRows = spec.rows.map((row) => ({
+      ...row,
+      ...Object.fromEntries(resolvedValueKeys.map((key) => {
+        const value = row[key];
+        return [key, typeof value === 'string' && value.trim() !== '' ? Number(value) : value];
+      }))
+    }));
 
     return {
       ok: true,
-      summary: `Generated ${chartType} chart: "${title ?? 'untitled'}" (${(rows as unknown[]).length} rows, ${resolvedValueKeys.length} series)`,
+      summary: `Generated ${chartType} chart: "${title ?? 'untitled'}" (${normalizedRows.length} rows, ${resolvedValueKeys.length} series)`,
       data: {
+        resultId: artifact?.queryId,
+        source: artifact?.source,
+        capturedAt: artifact?.capturedAt,
         chartType: spec.chartType,
         title: spec.title,
         columns: spec.columns,
-        rows: spec.rows,
+        rows: normalizedRows,
         nameKey: resolvedNameKey,
         valueKeys: resolvedValueKeys,
         series: spec.series,
         options: spec.options,
         annotations: spec.annotations,
+        unit: spec.unit,
+        coverage: artifact ? {
+          returnedRowCount: artifact.result.rows.length,
+          totalRowCount: artifact.result.truncated ? null : artifact.result.rowCount,
+          truncated: artifact.result.truncated ?? false,
+          rowLimit: artifact.result.rowLimit
+        } : undefined,
         colors: DEFAULT_COLORS.slice(0, Math.max(resolvedValueKeys.length, 1))
       }
     };
   }
-};
+  };
+}
+
+export const visualizeDataTool: Tool = createVisualizeDataTool();

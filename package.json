@@ -22,7 +22,9 @@
     "rebuild:sqlite:node": "npm rebuild better-sqlite3",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.web-server.json --noEmit && tsc -p tsconfig.desktop.json --noEmit"
+    "test:databases": "npm run web:server:build && node scripts/integration/run.mjs",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.web-server.json --noEmit && tsc -p tsconfig.desktop.json --noEmit",
+    "eval:chat": "npm run web:server:build && node --env-file-if-exists=.env scripts/evaluate-chat.mjs"
   },
   "dependencies": {
     "@openrouter/sdk": "^1.1.2",
@@ -52,6 +54,7 @@
     "jsdom": "^27.3.0",
     "typescript": "^5.9.3",
     "vite": "^7.2.7",
-    "vitest": "^4.0.15"
+    "vitest": "^4.0.15",
+    "esbuild": "0.27.7"
   }
 }

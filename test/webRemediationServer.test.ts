@@ -6,27 +6,44 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { WebServer } from '../src/server/server';
 import { loadWebServerConfig } from '../src/server/config';
 import { WebSessionStore } from '../src/server/sessionStore';
+import type { AgentModelClient } from '../src/server/agent/types';
+import type { DatabaseConnector } from '../src/shared/types';
 let server: WebServer | undefined;
 afterEach(async () => { await server?.close(); server = undefined; });
 async function setup() {
   const dir = mkdtempSync(path.join(tmpdir(), 'dbchat-remediation-'));
-  server = new WebServer({ ...loadWebServerConfig({ DBCHAT_WEB_DATA_DIR: dir, DBCHAT_WEB_AUTH_MODE: 'dev' }), port: 0 });
+  const connector: DatabaseConnector = {
+    async connect() {}, async introspect() { return { kind: 'sqlite', label: 'Synthetic fixture', tables: [{ name: 'numbers', columns: [{ name: 'n', type: 'integer', primaryKey: false, nullable: false }] }] }; },
+    async executeQuery() { return { columns: ['n'], rows: [{ n: 1 }], rowCount: 1, elapsedMs: 1, truncated: true, rowLimit: 1 }; },
+    async getContextForPrompt() { return 'numbers(n integer)'; }, setSafetyLevel() {}, close() {}
+  };
+  const modelClient: AgentModelClient = { async *streamChat(options) {
+    if (options.messages.some(message => message.role === 'tool')) yield { content: 'The saved fixture result is 1.' };
+    else yield { toolCalls: [{ index: 0, id: 'query', type: 'function', function: { name: 'run_database_query', arguments: JSON.stringify({ query: 'SELECT n FROM numbers', purpose: 'Read the synthetic fixture' }) } }] };
+  } };
+  server = new WebServer({ ...loadWebServerConfig({ DBCHAT_WEB_DATA_DIR: dir, DBCHAT_WEB_AUTH_MODE: 'dev' }), port: 0, database: { id: 'fixture', kind: 'sqlite', label: 'Synthetic fixture', databasePath: '/tmp/synthetic-fixture.db', createdAt: '' } }, { connector, modelClient });
   const handle = await server.listen();
   return 'http://127.0.0.1:' + (handle.address() as AddressInfo).port + '/api/v1';
 }
 describe('server remediation contracts', () => {
   it('persists full history and result ownership independently of model context', async () => {
     const url = await setup();
-    const create = await fetch(url + '/chats', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const create = await fetch(url + '/chats', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId: 'fixture' }) });
     const { chat } = await create.json();
-    const messages = Array.from({ length: 42 }, (_, id) => ({ id: String(id), role: id % 2 ? 'assistant' : 'user', content: 'Fixture', createdAt: new Date().toISOString() }));
-    const artifacts = [{ kind: 'query-result', queryId: 'q', messageId: '1', query: 'SELECT 1', result: { columns: ['n'], rows: [{ n: 1 }], rowCount: 1, elapsedMs: 1, truncated: true, rowLimit: 1 } }];
-    const saved = await fetch(url + '/chats/' + chat.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages, artifacts }) });
-    expect(saved.status).toBe(200);
-    const body = await saved.json();
+    for (let index = 0; index < 21; index++) {
+      const response = await fetch(url + '/chat/turns', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chatId: chat.id, connectionId: 'fixture', clientRequestId: 'request-' + index, userMessageId: 'user-' + index, assistantMessageId: 'assistant-' + index, question: 'Read fixture ' + index }) });
+      expect(response.status).toBe(202);
+      const { turnId } = await response.json();
+      await (await fetch(url + '/chat/turns/' + turnId + '/events')).text();
+    }
+    const body = await (await fetch(url + '/chats/' + chat.id)).json();
     expect(body.chat.messages).toHaveLength(42);
-    expect(body.chat.artifacts[0].messageId).toBe('1');
+    expect(body.chat.artifacts[0].messageId).toBe('assistant-0');
     expect(body.chat.artifacts[0].result.truncated).toBe(true);
+    const saved = await fetch(url + '/chats/' + chat.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [], artifacts: [] }) });
+    expect(saved.status).toBe(400);
+    expect((await (await fetch(url + '/chats/' + chat.id)).json()).chat.messages).toHaveLength(42);
+    const messages = body.chat.messages;
     const request = await fetch(url + '/chat/turns', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages }) });
     expect(request.status).toBe(400);
   });

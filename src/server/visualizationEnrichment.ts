@@ -71,10 +71,9 @@ export function selectVisualizationArtifact(
 
   if (candidates.length === 0) return null;
 
-  candidates.sort((a, b) => {
-    const rowDifference = b.artifact.result.rows.length - a.artifact.result.rows.length;
-    return rowDifference || b.index - a.index;
-  });
+  // The last compatible result is the one produced closest to the final answer.
+  // Row count is coverage metadata, not a relevance score.
+  candidates.sort((a, b) => b.index - a.index);
 
   const selected = candidates[0];
   return {
@@ -109,9 +108,8 @@ export function buildVisualizationInput(
       : valueKeys;
 
   return {
+    resultId: artifact.queryId,
     chartType,
-    columns: artifact.result.columns,
-    rows: artifact.result.rows,
     nameKey,
     valueKeys: values,
     ...(chartType === 'composed'

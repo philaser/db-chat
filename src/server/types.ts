@@ -57,12 +57,4 @@ export interface WebTurnEvent {
 
 export type WebTurnStatus = 'queued' | 'running' | 'complete' | 'error' | 'aborted';
 
-export interface WebTurnSnapshot {
-  id: string;
-  connectionId?: string;
-  status: WebTurnStatus;
-  events: WebTurnEvent[];
-  message?: ChatMessage;
-  artifacts?: QueryResultArtifact[];
-  error?: string;
-}
+export type WebTurnSnapshot = import('../shared/types.js').ChatTurnSnapshot;
