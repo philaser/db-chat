@@ -1,6 +1,6 @@
 import { connect as connectSocket } from 'node:net';
 import { boundResult, resultLimit } from './resultLimits.js';
-import { QueryValidator, type SafetyLevel } from './QueryValidator.js';
+import { classifyQuery, QueryValidator, type SafetyLevel } from './QueryValidator.js';
 import type {
   ConnectionConfig,
   DatabaseConnector,
@@ -181,6 +181,58 @@ export class MySQLConnector implements DatabaseConnector {
     }, this.maxRows);
   }
 
+  async *exportQuery(query: string, options?: { signal?: AbortSignal; batchSize?: number }): AsyncIterable<QueryResult> {
+    if (classifyQuery(query) !== 'read') throw new Error('Exports require one explicit read-only query.');
+    const conn = this.requireConnection();
+    const signal = options?.signal;
+    const batchSize = exportBatchSize(options?.batchSize);
+    signal?.throwIfAborted();
+    await this.queryWithSignal(conn, { sql: 'START TRANSACTION READ ONLY', timeout: 30_000 }, signal);
+    const stream = conn.connection?.query({ sql: query, timeout: 30_000 }).stream({ highWaterMark: batchSize });
+    if (!stream) {
+      await conn.query('ROLLBACK').catch(() => undefined);
+      throw new Error('This MySQL connection does not support streaming exports.');
+    }
+    const started = performance.now();
+    let columns: string[] = [];
+    const fields = (items: Array<{ name: string }>) => { columns = items.map(item => item.name); };
+    const abort = () => {
+      stream.destroy(abortError(signal!));
+      invalidateConnection();
+    };
+    const invalidateConnection = () => {
+      conn.destroy?.();
+      if (this.connection !== conn) return;
+      const pool = this.pool as MySQLPool | null;
+      this.connection = null; this.pool = null; this.config = null;
+      pool?.end?.().catch(() => undefined);
+    };
+    stream.on('fields', fields);
+    signal?.addEventListener('abort', abort, { once: true });
+    let rows: Record<string, unknown>[] = [];
+    let completed = false;
+    try {
+      for await (const row of stream) {
+        if (signal?.aborted) throw abortError(signal);
+        const record = row as Record<string, unknown>;
+        if (!columns.length) columns = Object.keys(record);
+        rows.push(record);
+        if (rows.length === batchSize) {
+          yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
+          rows = [];
+        }
+      }
+      completed = true;
+      if (rows.length || columns.length) yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      stream.off('fields', fields);
+      if (!stream.destroyed) stream.destroy();
+      if (completed && this.connection === conn) await conn.query('ROLLBACK').catch(() => undefined);
+      else if (!completed) invalidateConnection();
+    }
+  }
+
   async getContextForPrompt(): Promise<string> {
     const schema = await this.introspect();
     if (schema.tables.length === 0) {
@@ -235,6 +287,14 @@ interface MySQLConnection {
   query: (sql: string | { sql: string; timeout: number }, values?: unknown[]) => Promise<unknown>;
   ping: () => Promise<void>;
   destroy?: () => void;
+  connection?: { query: (options: { sql: string; timeout: number }) => { stream: (options: { highWaterMark: number }) => MySQLRowStream } };
+}
+
+interface MySQLRowStream extends AsyncIterable<unknown> {
+  destroyed?: boolean;
+  destroy: (error?: Error) => void;
+  on: (event: 'fields', listener: (fields: Array<{ name: string }>) => void) => void;
+  off: (event: 'fields', listener: (fields: Array<{ name: string }>) => void) => void;
 }
 
 interface MySQLPool { end?: () => Promise<void> }
@@ -252,3 +312,7 @@ async function currentDatabase(conn: MySQLConnection): Promise<string> {
 }
 
 function quoteIdentifier(value: string): string { return '`' + value.replaceAll('`', '``') + '`'; }
+function exportBatchSize(value = 500): number {
+  if (!Number.isFinite(value) || value < 1) throw new Error('Export batch size must be a positive finite number.');
+  return Math.min(10_000, Math.floor(value));
+}

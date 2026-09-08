@@ -8,7 +8,7 @@ import type {
   QueryResult,
   TableInfo
 } from '../../shared/types.js';
-import { QueryValidator, type SafetyLevel } from './QueryValidator.js';
+import { classifyQuery, QueryValidator, type SafetyLevel } from './QueryValidator.js';
 
 export class SQLiteConnector implements DatabaseConnector {
   private db: Database.Database | null = null;
@@ -85,6 +85,13 @@ export class SQLiteConnector implements DatabaseConnector {
     return boundResult(result, this.maxRows);
   }
 
+  async *exportQuery(query: string, options?: { signal?: AbortSignal; batchSize?: number }): AsyncIterable<QueryResult> {
+    if (classifyQuery(query) !== 'read') throw new Error('Exports require one explicit read-only query.');
+    const batchSize = exportBatchSize(options?.batchSize);
+    this.requireDb();
+    yield* this.execution.export(this.config!.databasePath!, query, batchSize, this.queryTimeoutMs, options?.signal);
+  }
+
   async getContextForPrompt(): Promise<string> {
     const schema = await this.introspect();
     if (schema.tables.length === 0) {
@@ -113,4 +120,9 @@ export class SQLiteConnector implements DatabaseConnector {
     return this.db;
   }
 
+}
+
+function exportBatchSize(value = 500): number {
+  if (!Number.isFinite(value) || value < 1) throw new Error('Export batch size must be a positive finite number.');
+  return Math.min(10_000, Math.floor(value));
 }

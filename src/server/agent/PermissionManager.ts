@@ -24,6 +24,7 @@ export class PermissionManager {
       { toolName: 'get_result', action: 'allow' },
       { toolName: 'ask_clarification', action: 'allow' },
       { toolName: 'create_report', action: 'allow' },
+      { toolName: 'export_data', action: 'allow' },
       { toolName: 'export_report', action: 'allow' },
       { toolName: 'search_memory', action: 'allow' },
     ];

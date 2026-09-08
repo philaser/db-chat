@@ -904,6 +904,12 @@ message. Pending structured output shows a short preparing state, never raw JSON
 Failed or stopped attempts retain a plainly labeled state with Retry/Edit and
 their available evidence. Feedback/correction controls must have accessible names
 and a saved/error state. Avoid turning every answer into a toolbar-heavy card.
+Data export controls use the same quiet inspector actions and compact labeled
+selects. Keep scope and format together, announce queued and running states,
+retain cancellation and errors in place, and show recent chat downloads as a
+compact list with Download, View or Remove actions. Typed download blocks contain only
+an export ID, title and approved format; the client derives authenticated
+relative status and download routes from that ID.
 
 ## 11. Quality bar
 

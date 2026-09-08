@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { createInterface } from 'node:readline';
 import type { QueryResult } from '../../shared/types.js';
 
 const databaseModule = createRequire(import.meta.url).resolve('better-sqlite3');
@@ -35,6 +36,35 @@ try {
   process.stdout.write(JSON.stringify({ ok: false, error: error.message }));
   process.exitCode = 1;
 } finally { if (db) db.close(); }
+`;
+
+const exportChildProgram = String.raw`
+const { once } = require('node:events');
+const { readFileSync } = require('node:fs');
+const input = JSON.parse(readFileSync(0, 'utf8'));
+const Database = require(input.databaseModule);
+async function write(value) {
+  if (!process.stdout.write(JSON.stringify(value) + '\n')) await once(process.stdout, 'drain');
+}
+(async () => {
+  let db;
+  try {
+    db = new Database(input.databasePath, { fileMustExist: true, readonly: true });
+    const statement = db.prepare(input.query);
+    if (!statement.readonly || !statement.reader) throw new Error('Exports require one explicit read-only query.');
+    const columns = statement.columns().map(column => column.name);
+    await write({ type: 'header', columns });
+    let rows = [];
+    for (const row of statement.iterate()) {
+      rows.push(row);
+      if (rows.length === input.batchSize) { await write({ type: 'batch', rows }); rows = []; }
+    }
+    if (rows.length) await write({ type: 'batch', rows });
+  } catch (error) {
+    await write({ type: 'error', error: error instanceof Error ? error.message : String(error) });
+    process.exitCode = 1;
+  } finally { if (db) db.close(); }
+})().catch(error => { process.stderr.write(String(error)); process.exitCode = 1; });
 `;
 
 export class SQLiteExecution {
@@ -87,6 +117,59 @@ export class SQLiteExecution {
       });
       child.stdin.end(JSON.stringify({ databaseModule, databasePath, query, readonly, maxRows, maxBytes: MAX_OUTPUT_BYTES }));
     });
+  }
+
+  async *export(databasePath: string, query: string, batchSize: number, timeoutMs: number, signal?: AbortSignal): AsyncIterable<QueryResult> {
+    signal?.throwIfAborted();
+    const started = performance.now();
+    const child = spawn(process.execPath, ['-e', exportChildProgram], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true
+    });
+    this.active.add(child);
+    let columns: string[] = [];
+    let stderr = '';
+    let yielded = false;
+    let stopped: Error | undefined;
+    let exited = false;
+    const stop = (error: Error) => {
+      if (exited || stopped) return;
+      stopped = error;
+      child.kill('SIGKILL');
+    };
+    const abort = () => stop(new DOMException('SQLite export was cancelled.', 'AbortError'));
+    const timer = setTimeout(() => stop(new Error(`SQLite export exceeded its ${timeoutMs} ms deadline and was stopped.`)), timeoutMs);
+    signal?.addEventListener('abort', abort, { once: true });
+    child.stderr.on('data', (chunk: Buffer) => { if (stderr.length < 4096) stderr += chunk.toString('utf8'); });
+    child.stdin.on('error', error => stop(error));
+    child.on('error', error => { stopped = error; });
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
+      child.on('close', (code, exitSignal) => { exited = true; this.active.delete(child); resolve({ code, signal: exitSignal }); });
+    });
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    child.stdin.end(JSON.stringify({ databaseModule, databasePath, query, batchSize }));
+    try {
+      for await (const line of lines) {
+        const message = JSON.parse(line) as { type: 'header' | 'batch' | 'error'; columns?: string[]; rows?: Record<string, unknown>[]; error?: string };
+        if (message.type === 'header') { columns = message.columns ?? []; continue; }
+        if (message.type === 'error') throw new Error(message.error ?? 'SQLite export failed.');
+        const rows = message.rows ?? [];
+        yielded = true;
+        yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
+      }
+      const status = await closed;
+      if (stopped) throw stopped;
+      if (status.signal) throw new Error('SQLite export was stopped.');
+      if (status.code !== 0) throw new Error(`SQLite export process failed${stderr ? `: ${stderr.trim()}` : '.'}`);
+      if (!yielded) yield { columns, rows: [], rowCount: 0, elapsedMs: Math.round(performance.now() - started) };
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      lines.close();
+      if (!exited) child.kill('SIGKILL');
+      await closed;
+    }
   }
 
   close(): void {

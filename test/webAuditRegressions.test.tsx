@@ -79,7 +79,7 @@ describe('web audit regressions', () => {
     document.body.append(origin); origin.focus();
     const view = render(<DataInspector artifact={{ ...artifact, result: { ...artifact.result, rows: [], rowCount: 0 } }} connectionId="db" connectionLabel="Analytics" inspectorWidth={384} onInspectorWidthChange={vi.fn()} onClose={close} />);
     expect(screen.getByRole('button', { name: 'Copy' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Export CSV' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Export' })).toBeDisabled();
     const expand = screen.getByRole('button', { name: 'Expand data inspector' });
     fireEvent.click(expand);
     expect(screen.getByRole('button', { name: 'Restore data inspector width' })).toHaveAttribute('aria-pressed', 'true');
@@ -88,6 +88,54 @@ describe('web audit regressions', () => {
     expect(close).toHaveBeenCalledOnce();
     view.unmount();
     expect(origin).toHaveFocus(); origin.remove();
+  });
+
+  it('exports filtered and sorted visible rows by their saved indices, or all matching rows', async () => {
+    const fetcher = vi.fn(async (url: string, options?: RequestInit) => url.endsWith('/exports') && !options?.method ? response({ exports: [] }) : response({ export: { id: 'export-1', title: 'Result export', format: 'csv', status: 'ready', rowCount: 2, byteCount: 30 } }));
+    vi.stubGlobal('fetch', fetcher);
+    const rows = [{ name: 'Ada', amount: 2 }, { name: 'Ben', amount: 1 }, { name: 'Cara', amount: 3 }];
+    render(<DataInspector chatId="chat1" artifact={{ ...artifact, result: { ...artifact.result, columns: ['name', 'amount'], rows, rowCount: 3 } }} connectionId="db" connectionLabel="Analytics" inspectorWidth={384} onInspectorWidthChange={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByPlaceholderText('Filter loaded rows'), { target: { value: 'a' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Amount' }));
+    fireEvent.change(screen.getByLabelText('Export format'), { target: { value: 'json' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/chats/chat1/exports', expect.objectContaining({ body: JSON.stringify({ resultId: 'q1', format: 'json', scope: 'visible', columns: ['name', 'amount'], rowIndices: [0, 2] }) })));
+    expect(await screen.findByRole('link', { name: 'Download CSV' })).toHaveAttribute('href', '/api/v1/exports/export-1/download');
+
+    fireEvent.change(screen.getByLabelText('Export rows'), { target: { value: 'all' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+    await waitFor(() => expect(fetcher).toHaveBeenLastCalledWith('/api/v1/chats/chat1/exports', expect.objectContaining({ body: JSON.stringify({ resultId: 'q1', format: 'json', scope: 'all' }) })));
+  });
+
+  it('keeps export progress, cancellation, and recoverable errors keyboard accessible', async () => {
+    let creates = 0;
+    const fetcher = vi.fn(async (url: string, options?: RequestInit) => {
+      if (url.endsWith('/exports') && !options?.method) return response({ exports: [] });
+      if (url.endsWith('/cancel')) return response({ export: { id: 'export-2', title: 'Export', format: 'csv', status: 'cancelled' } });
+      creates += 1;
+      return creates === 1 ? response({ export: { id: 'export-2', title: 'Export', format: 'csv', status: 'running' } }) : new Response(JSON.stringify({ error: 'Export limit exceeded. Narrow the result and try again.' }), { status: 413, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetcher);
+    render(<DataInspector chatId="chat1" artifact={artifact} connectionId="db" connectionLabel="Analytics" inspectorWidth={384} onInspectorWidthChange={vi.fn()} onClose={vi.fn()} />);
+    const start = screen.getByRole('button', { name: 'Export' });
+    start.focus();
+    fireEvent.keyDown(start, { key: 'Enter' });
+    fireEvent.click(start);
+    const cancel = await screen.findByRole('button', { name: 'Cancel' });
+    expect(cancel).not.toHaveAttribute('tabindex', '-1');
+    fireEvent.click(cancel);
+    expect(await screen.findByText('Export cancelled.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Export limit exceeded. Narrow the result and try again.');
+    expect(screen.getByRole('button', { name: 'Export' })).toBeEnabled();
+  });
+
+  it('routes aggregate drill-through into a row-level follow-up and explains byte-limited previews', () => {
+    const ask = vi.fn();
+    render(<DataInspector chatId="chat1" artifact={{ ...artifact, query: 'SELECT country, COUNT(*) FROM customers GROUP BY country', result: { ...artifact.result, truncated: true, truncationReason: 'byte-limit', byteLimit: 1000 } }} connectionId="db" connectionLabel="Analytics" inspectorWidth={384} onInspectorWidthChange={vi.fn()} onClose={vi.fn()} onAskUnderlyingRecords={ask} />);
+    expect(screen.getByRole('status')).toHaveTextContent('large cell values reached the preview size limit');
+    fireEvent.click(screen.getByRole('button', { name: 'Ask for underlying records' }));
+    expect(ask).toHaveBeenCalledWith('Show the underlying row-level records for this result, using the same definitions and filters.');
   });
 
   it('retains earlier result ownership through success, failure, save and reload without idle autosave loops', async () => {

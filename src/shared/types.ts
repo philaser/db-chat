@@ -66,6 +66,8 @@ export interface DatabaseSchema {
 export interface QueryResult {
   truncated?: boolean;
   rowLimit?: number;
+  byteLimit?: number;
+  truncationReason?: 'row-limit' | 'byte-limit';
   columns: string[];
   rows: Record<string, unknown>[];
   rowCount: number;
@@ -252,6 +254,7 @@ export interface DatabaseConnector {
   connect(config: ConnectionConfig): Promise<void>;
   introspect(): Promise<DatabaseSchema>;
   executeQuery(query: string, options?: { signal?: AbortSignal }): Promise<QueryResult>;
+  exportQuery?(query: string, options?: { signal?: AbortSignal; batchSize?: number }): AsyncIterable<QueryResult>;
   getContextForPrompt(): Promise<string>;
   setSafetyLevel(level: SafetyLevel): void;
   close(): void;

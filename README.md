@@ -130,3 +130,42 @@ version label: `major`, `minor` or `patch`.
 
 Start with [DESIGN.md](DESIGN.md). The web design and style guide govern the single
 customer experience. The previous Scape desktop specifications are historical.
+
+## Data downloads and analytical reports
+
+The chat preview remains limited to 100 rows and 1 MiB by default. Oversized
+previews retain whole rows with an explicit truncation reason. These are display
+limits, not limits on the source rows used by a database aggregate.
+
+The result inspector can export its filtered, sorted, visible-column view, or
+rerun the original read-only query to download all matching results. Both paths
+support CSV, Excel (`.xlsx`), and JSON. Full exports preserve explicit query
+`LIMIT` clauses and do not apply local table filters. An aggregate remains an
+aggregate: ask for the underlying matching records to generate a separate
+row-level query. The `export_data` tool handles natural-language download
+requests without sending the full dataset through the language model.
+Elasticsearch full exports require a document search; aggregation previews can
+be exported as visible data, or followed by a search for the underlying documents.
+
+The `create_report` tool combines validated result-backed KPIs, tables, charts,
+findings and limitations, and creates a downloadable HTML or Markdown report.
+Reports include saved data and query/source evidence. A report is a snapshot;
+limited evidence tables are labelled, and full raw data is a separate export.
+
+Download jobs are account-scoped and run on separate read-only connections.
+They expose progress, cancellation, and removal. Files are staged privately and
+become downloadable only after successful completion. Defaults are one million
+rows, 100 MiB of data/worksheet/file size, and five minutes; configure
+`DBCHAT_EXPORT_MAX_ROWS`, `DBCHAT_EXPORT_MAX_BYTES`, and
+`DBCHAT_EXPORT_TIMEOUT_MS` to change those limits. At most two jobs execute at
+once, with one per account; additional jobs queue. Up to five downloads per
+account and ten per instance may be retained. Remove completed downloads to free
+capacity. CSV escapes formula-like text for spreadsheet safety; JSON preserves
+nested data. Excel exports reject cells that exceed Excel's text limit instead
+of silently cutting off their contents.
+
+Downloads are temporary: they expire after one hour and are unavailable after a
+service restart. Regenerate them from the saved chat when needed. The files use
+private temporary storage and need no paid persistent disk. This queue, like
+active chat turns, assumes one Node instance. A distributed job store is required
+before running multiple instances.

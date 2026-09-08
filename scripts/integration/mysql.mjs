@@ -91,8 +91,9 @@ try {
     (4, 1, 30, 90.00, NULL, '2026-03-05', '2026-03-05 06:07:08.901')`);
   await root.query(`INSERT INTO order_tags VALUES (1, 'new'), (1, 'priority'), (2, 'new'), (3, 'new')`);
   await root.query(`CREATE TABLE sequence_rows (id INT PRIMARY KEY)`);
+  await root.query(`SET SESSION cte_max_recursion_depth = 2000`);
   await root.query(`INSERT INTO sequence_rows (id)
-    WITH RECURSIVE seq AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM seq WHERE n < 105)
+    WITH RECURSIVE seq AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM seq WHERE n < 1205)
     SELECT n FROM seq`);
   await root.query(`CREATE USER 'dbchat_reader'@'%' IDENTIFIED BY ?`, [readerPassword]);
   await root.query(`GRANT SELECT ON \`${database}\`.* TO 'dbchat_reader'@'%'`);
@@ -139,6 +140,16 @@ try {
     assert.equal(result.truncated, true);
     assert.equal(result.rowLimit, 100);
     assert.equal(result.rows.at(-1).id, 100);
+  });
+  await check('streaming export returns every row and preserves explicit LIMIT', async () => {
+    const exported = [];
+    for await (const batch of connector.exportQuery('SELECT id FROM sequence_rows ORDER BY id')) exported.push(...batch.rows);
+    assert.equal(exported.length, 1205);
+    assert.equal(exported.at(-1).id, 1205);
+    const limited = [];
+    for await (const batch of connector.exportQuery('SELECT id FROM sequence_rows ORDER BY id LIMIT 1005')) limited.push(...batch.rows);
+    assert.equal(limited.length, 1005);
+    await assert.rejects(async () => { for await (const _batch of connector.exportQuery('DELETE FROM sequence_rows')) {} }, /read-only/);
   });
   await check('safe mode and database grants both enforce read-only access', async () => {
     connector.setSafetyLevel('safe');

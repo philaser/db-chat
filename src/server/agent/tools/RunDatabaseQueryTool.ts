@@ -77,7 +77,7 @@ export const runDatabaseQueryTool: Tool = {
       const preview = result.rows.slice(0, 10);
       return {
         ok: true,
-        summary: `Query returned ${result.rowCount} row(s) in ${elapsedMs}ms${result.truncated ? ` (truncated at ${result.rowLimit} rows)` : ''}`,
+        summary: `Query returned ${result.rowCount} loaded row(s) in ${elapsedMs}ms${result.truncated ? result.truncationReason === 'byte-limit' ? ` (preview stopped at the ${result.byteLimit}-byte limit)` : ` (preview stopped at the ${result.rowLimit}-row limit)` : ''}`,
         data: {
           queryType: 'read',
           resultId,
@@ -91,7 +91,9 @@ export const runDatabaseQueryTool: Tool = {
           previewRowCount: preview.length,
           hasMore: result.rows.length > 10 || result.truncated === true,
           truncated: result.truncated ?? false,
-          rowLimit: result.rowLimit
+          rowLimit: result.rowLimit,
+          byteLimit: result.byteLimit,
+          truncationReason: result.truncationReason
         },
         artifact: result
       };

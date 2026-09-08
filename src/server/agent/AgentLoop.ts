@@ -25,6 +25,8 @@ export interface AgentLoopConfig {
   referencedArtifacts?: QueryResultArtifact[];
   knowledge?: ConnectionKnowledge;
   runtime?: { currentTimeUtc?: string; timezone?: string; maxResultRows?: number; maxResultBytes?: number };
+  requestExport?: ToolContext['requestExport'];
+  requestReport?: ToolContext['requestReport'];
 }
 
 export interface TurnResult {
@@ -66,6 +68,8 @@ export async function runAgentLoop(
     controller: config.controller,
     connector,
     schema,
+    requestExport: config.requestExport,
+    requestReport: config.requestReport,
     emitEvent: (event) => activity.emit(event.type, event.data)
   };
 
@@ -628,7 +632,15 @@ function hydrateValidatedStructuredOutput(content: string, toolCalls: Array<{ re
   removed ||= raw.removed;
   const sanitized = raw.content.trim();
   if (allowed.size === 0) return `${sanitized}${sanitized ? '\n\n' : ''}${removed ? 'Structured output was omitted because it was not backed by a verified result.' : ''}`.trim();
-  const payloads = included.length > 0 ? included : [...allowed.keys()];
+  // Downloads must survive even when the model fences only a companion chart.
+  // Other omitted charts remain omitted so a chart repeated inside a report is
+  // not also appended as a standalone duplicate.
+  const requiredDownloads = [...allowed.keys()].filter(payload => {
+    if (included.includes(payload) || allowed.get(payload) !== 'blocks') return false;
+    try { return (JSON.parse(payload) as unknown[]).some(block => block && typeof block === 'object' && (block as Record<string, unknown>).type === 'download'); }
+    catch { return false; }
+  });
+  const payloads = included.length > 0 ? [...included, ...requiredDownloads] : [...allowed.keys()];
   const hydrated = payloads.map((payload) => `\`\`\`${allowed.get(payload)!}\n${payload}\n\`\`\``).join('\n\n');
   return `${sanitized}${sanitized ? '\n\n' : ''}${hydrated}`;
 }
@@ -666,7 +678,7 @@ function stripRawStructuredJson(content: string): { content: string; removed: bo
 function containsStructuredDataBlock(value: unknown): boolean {
   const values = Array.isArray(value) ? value : [value];
   return values.some((item) => item && typeof item === 'object' && (
-    ['table', 'chart', 'kpi'].includes(String((item as Record<string, unknown>).type))
+    ['table', 'chart', 'kpi', 'download'].includes(String((item as Record<string, unknown>).type))
     || typeof (item as Record<string, unknown>).chartType === 'string'
   ));
 }

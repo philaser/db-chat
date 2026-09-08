@@ -114,6 +114,18 @@ describe('database safety policy', () => {
     } finally { connector.close(); }
   });
 
+  it('returns the largest whole-row prefix that fits the web byte budget', async () => {
+    const inner: DatabaseConnector = {
+      connect: async () => {}, introspect: async () => ({ kind: 'sqlite', label: '', tables: [] }),
+      executeQuery: async () => ({ columns: ['value'], rows: [{ value: 'a'.repeat(30) }, { value: 'b'.repeat(30) }], rowCount: 2, elapsedMs: 1 }),
+      getContextForPrompt: async () => '', setSafetyLevel() {}, close() {}
+    };
+    const result = await new WebPolicyConnector(inner, 100, 130).executeQuery('select 1');
+    expect(result).toMatchObject({ truncated: true, byteLimit: 130, truncationReason: 'byte-limit' });
+    expect(result.rows.length).toBeLessThan(2);
+    expect(Buffer.byteLength(JSON.stringify(result), 'utf8')).toBeLessThanOrEqual(130);
+  });
+
   it.each([
     { collection: 'items', method: 'deleteOne', filter: { id: 1 } },
     { collection: 'items', method: 'insertOne', document: { id: 1 } },

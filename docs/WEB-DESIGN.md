@@ -261,12 +261,23 @@ An answer packet contains:
 - row/column count and latency;
 - returned-data artifact;
 - collapsible query/provenance disclosure;
-- Copy and CSV actions;
+- Copy and data-export actions;
 - future typed refinements.
 
 The table remains bounded and horizontally scrollable inside the packet. Nulls
 use an em dash; numbers use tabular alignment; headers remain sticky within
 the artifact.
+
+The first 100 rows form the immediate preview. Export offers Visible rows and
+All matching rows with CSV, Excel and JSON formats. Visible rows preserve the
+current filter, sort and visible columns. All matching rows rerun the original
+read-only query and identify the export as refreshed data. Progress,
+cancellation, recoverable failure and the final authenticated download remain
+inside the inspector. The inspector restores a compact list of recent downloads
+for the chat so users can resume, download or remove jobs before they expire.
+Printable HTML and Markdown remain the report formats.
+Requests for records beneath an aggregate return to chat as an explicit
+row-level data question.
 
 ## Core components and states
 
@@ -282,6 +293,7 @@ the artifact.
 | Secret setting | hidden, configured, missing, replacing, deleting, error |
 | Composer | empty, focused, draft, submitting, generating, cancelled, disabled |
 | Answer packet | streaming, complete, capped, empty, error, disconnected |
+| Data export | configured, queued, running, ready, cancelled, error, expired |
 | Alert/toast | info, success, warning, error, dismissible |
 | Confirm dialog | open, cancel, destructive action pending |
 

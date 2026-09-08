@@ -37,6 +37,9 @@ export interface WebServerConfig {
   maxMessageChars: number;
   maxResultRows: number;
   maxResultBytes: number;
+  exportMaxRows?: number;
+  exportMaxBytes?: number;
+  exportTimeoutMs?: number;
   maxSqliteUploadBytes?: number;
   sqliteUploadDir?: string;
   userKeyUiEnabled?: boolean;
@@ -179,6 +182,9 @@ export function loadWebServerConfig(env: NodeJS.ProcessEnv = process.env): WebSe
     maxMessageChars: numberFromEnv(env.DBCHAT_WEB_MAX_MESSAGE_CHARS, 8_000),
     maxResultRows: numberFromEnv(env.DBCHAT_WEB_MAX_RESULT_ROWS, 100),
     maxResultBytes: numberFromEnv(env.DBCHAT_WEB_MAX_RESULT_BYTES, 1024 * 1024),
+    exportMaxRows: Math.floor(numberFromEnv(env.DBCHAT_EXPORT_MAX_ROWS, 1_000_000)),
+    exportMaxBytes: Math.floor(numberFromEnv(env.DBCHAT_EXPORT_MAX_BYTES, 100 * 1024 * 1024)),
+    exportTimeoutMs: numberFromEnv(env.DBCHAT_EXPORT_TIMEOUT_MS, 300_000),
     maxSqliteUploadBytes: numberFromEnv(env.DBCHAT_WEB_MAX_SQLITE_UPLOAD_BYTES, 50 * 1024 * 1024),
     sqliteUploadDir: path.resolve(env.DBCHAT_WEB_SQLITE_UPLOAD_DIR ?? path.join(dataDirectory, 'sqlite')),
     userKeyUiEnabled: env.DBCHAT_WEB_USER_KEY_UI_ENABLED === 'true',

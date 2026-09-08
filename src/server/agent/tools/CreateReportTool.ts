@@ -16,6 +16,7 @@ export function createReportTool(): Tool {
           type: 'object',
           properties: {
             title: { type: 'string' },
+            downloadFormat: { type: 'string', enum: ['html', 'markdown'], description: 'Download format for the complete validated report. Defaults to html.' },
             finalize: { type: 'boolean', description: 'Set true only when this report fully answers the request. Include the takeaway, metric definitions, and material limitations in text/takeaway blocks. A successful final report ends the turn without another model response; omit or use false for an intermediate report.' },
             blocks: {
               description: 'Report blocks. Each kpi requires resultId and normally column. A scalar KPI may omit column only for a one-column result; rowIndex may be omitted only for a one-row result. To total every row of a complete saved breakdown, provide aggregation "sum" and an explicit column, without rowIndex. Each table requires resultId. Each chart requires resultId and chartType.',
@@ -130,7 +131,19 @@ export function createReportTool(): Tool {
       }
       if (dataBlocks === 0) return invalid('A report must include at least one KPI, table, or chart backed by a resultId.');
       const resultIds = [...new Set(requested.map((block) => block.resultId).filter((id): id is string => typeof id === 'string'))];
-      return { ok: true, summary: `Created report "${title}" with ${blocks.length} validated block(s).`, data: { title, blocks, resultIds, finalize: input.finalize === true, sources: resultIds.map((id) => context.resolveArtifact?.(id)?.source).filter(Boolean) } };
+      const downloadFormat = input.downloadFormat === 'markdown' ? 'markdown' : 'html';
+      if (input.downloadFormat !== undefined && input.downloadFormat !== 'html' && input.downloadFormat !== 'markdown') return invalid('Report download format must be html or markdown.');
+      let reportStatus: string | undefined;
+      if (context.requestReport) {
+        try {
+          const job = await context.requestReport({ title, blocks: blocks.slice(), resultIds, format: downloadFormat });
+          blocks.push({ type: 'download', exportId: job.id, title: job.title, format: job.format });
+          reportStatus = job.status;
+        } catch (error) {
+          return { ok: false, summary: 'The report download could not be created.', error: error instanceof Error ? error.message : 'Report generation failed', data: { errorCode: 'REPORT_EXPORT_FAILED', retryable: true } };
+        }
+      }
+      return { ok: true, summary: `Created report "${title}" with ${blocks.length} validated block(s).`, data: { title, blocks, resultIds, finalize: input.finalize === true, reportStatus, sources: resultIds.map((id) => context.resolveArtifact?.(id)?.source).filter(Boolean) } };
     }
   };
 }

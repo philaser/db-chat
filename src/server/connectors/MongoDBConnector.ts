@@ -102,6 +102,55 @@ export class MongoDBConnector implements DatabaseConnector {
     return this.executeRead(parsed as MongoDBReadRequest, options?.signal);
   }
 
+  async *exportQuery(query: string, options?: { signal?: AbortSignal; batchSize?: number }): AsyncIterable<QueryResult> {
+    const parsed = parseMongoDBQuery(query) as MongoDBParsedRequest;
+    const blockedKey = findBlockedKey(parsed);
+    if (blockedKey) throw new Error(`MongoDB blocked key "${blockedKey}".`);
+    if (parsed.method === 'insertOne' || parsed.method === 'updateOne' || parsed.method === 'deleteOne') {
+      throw new Error('Exports require one explicit read-only query.');
+    }
+    const read = parsed as MongoDBReadRequest;
+    const signal = options?.signal;
+    const batchSize = exportBatchSize(options?.batchSize);
+    signal?.throwIfAborted();
+    const collection = this.requireDb().collection(read.collection);
+    const started = performance.now();
+    if (read.method === 'count') {
+      const count = await collection.countDocuments((read.body.filter ?? {}) as Record<string, unknown>, { maxTimeMS: 30_000, signal });
+      yield { columns: ['count'], rows: [{ count }], rowCount: 1, elapsedMs: Math.round(performance.now() - started) };
+      return;
+    }
+    let cursor: MongoCursor;
+    if (read.method === 'aggregate') {
+      const pipeline = (read.body.pipeline ?? []) as unknown[];
+      const blockedStage = findBlockedAggregationStage(pipeline);
+      if (blockedStage) throw new Error(`MongoDB aggregation stage "${blockedStage}" is blocked.`);
+      cursor = collection.aggregate(pipeline, { maxTimeMS: 30_000, signal, batchSize }) as MongoCursor;
+    } else {
+      cursor = collection.find((read.body.filter ?? {}) as Record<string, unknown>, {
+        ...(read.body.options as Record<string, unknown> | undefined), maxTimeMS: 30_000, signal, batchSize
+      }) as unknown as MongoCursor;
+      if (typeof read.body.limit === 'number' && read.body.limit > 0) cursor.limit(Math.floor(read.body.limit));
+    }
+    let rows: Record<string, unknown>[] = [];
+    let columns: string[] = [];
+    try {
+      for await (const doc of cursor) {
+        signal?.throwIfAborted();
+        const row = normalizeDocument(doc);
+        columns = Array.from(new Set([...columns, ...Object.keys(row)]));
+        rows.push(row);
+        if (rows.length === batchSize) {
+          yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
+          rows = [];
+        }
+      }
+      if (rows.length) yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
+    } finally {
+      await cursor.close?.().catch(() => undefined);
+    }
+  }
+
   private async executeRead(parsed: MongoDBReadRequest, signal?: AbortSignal): Promise<QueryResult> {
     const db = this.requireDb();
     const collection = db.collection(parsed.collection);
@@ -224,7 +273,7 @@ export class MongoDBConnector implements DatabaseConnector {
       collection: (name: string) => {
         findOne: (filter: Record<string, unknown>, options: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
         find: (filter: Record<string, unknown>, options?: Record<string, unknown>) => { limit: (n: number) => { toArray: () => Promise<Record<string, unknown>[]> } & Record<string, unknown> } & { toArray: () => Promise<Record<string, unknown>[]> };
-        aggregate: (pipeline: unknown[], options?: { maxTimeMS: number; signal?: AbortSignal }) => { toArray: () => Promise<Record<string, unknown>[]> };
+        aggregate: (pipeline: unknown[], options?: { maxTimeMS: number; signal?: AbortSignal; batchSize?: number }) => { toArray: () => Promise<Record<string, unknown>[]> } | MongoCursor;
         countDocuments: (filter?: Record<string, unknown>, options?: { maxTimeMS: number; signal?: AbortSignal }) => Promise<number>;
         insertOne: (doc: Record<string, unknown>) => Promise<{ insertedId: unknown; acknowledged: boolean }>;
         updateOne: (filter: Record<string, unknown>, update: Record<string, unknown>) => Promise<{ matchedCount: number; modifiedCount: number; acknowledged: boolean }>;
@@ -232,6 +281,17 @@ export class MongoDBConnector implements DatabaseConnector {
       };
     };
   }
+}
+
+interface MongoCursor extends AsyncIterable<Record<string, unknown>> {
+  limit: (value: number) => MongoCursor;
+  toArray: () => Promise<Record<string, unknown>[]>;
+  close?: () => Promise<void>;
+}
+
+function exportBatchSize(value = 500): number {
+  if (!Number.isFinite(value) || value < 1) throw new Error('Export batch size must be a positive finite number.');
+  return Math.min(10_000, Math.floor(value));
 }
 
 function buildMongoUri(config: ConnectionConfig): string {

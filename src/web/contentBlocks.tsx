@@ -1,9 +1,9 @@
-import { useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ChartViewMemo } from './chartRenderer.js';
 import { readableColumnLabel } from './formatting.js';
 
 export interface ContentBlock {
-  type: 'text' | 'heading' | 'table' | 'chart' | 'code' | 'list' | 'divider' | 'kpi' | 'clarification';
+  type: 'text' | 'heading' | 'table' | 'chart' | 'code' | 'list' | 'divider' | 'kpi' | 'clarification' | 'download';
   [key: string]: unknown;
 }
 
@@ -23,6 +23,7 @@ const BLOCK_TYPES = new Set<ContentBlock['type']>([
   'divider'
   ,'kpi'
   ,'clarification'
+  ,'download'
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -50,6 +51,7 @@ function isContentBlock(value: unknown): value is ContentBlock {
   if (value.type === 'text' || value.type === 'heading') return typeof value.type === 'string' && typeof (value.type === 'text' ? value.content : value.text) === 'string';
   if (value.type === 'kpi') return typeof value.label === 'string' && (value.value === null || typeof value.value === 'string' || typeof value.value === 'number' || typeof value.value === 'boolean') && typeof value.resultId === 'string';
   if (value.type === 'clarification') return typeof value.question === 'string' && (value.choices === undefined || (Array.isArray(value.choices) && value.choices.every((choice) => typeof choice === 'string')));
+  if (value.type === 'download') return typeof value.exportId === 'string' && typeof value.title === 'string' && ['csv', 'xlsx', 'json', 'html', 'markdown'].includes(String(value.format));
   if (value.type === 'code') return typeof value.content === 'string';
   if (value.type === 'list') return Array.isArray(value.items) && value.items.every((item) => typeof item === 'string');
   return true;
@@ -248,6 +250,64 @@ function InteractiveChartBlock({ block }: { block: ContentBlock }) {
   </div>;
 }
 
+type DownloadState = 'queued' | 'running' | 'ready' | 'error' | 'cancelled';
+
+function DownloadBlock({ block }: { block: ContentBlock }) {
+  const exportId = String(block.exportId);
+  const [status, setStatus] = useState<DownloadState>('queued');
+  const [error, setError] = useState('');
+  const [rowCount, setRowCount] = useState<number | undefined>();
+  const [expiresAt, setExpiresAt] = useState<string | undefined>();
+  const [dismissed, setDismissed] = useState(false);
+  useEffect(() => {
+    let disposed = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/v1/exports/${encodeURIComponent(exportId)}`, { credentials: 'same-origin' });
+        const payload = await response.json() as { export?: { status?: DownloadState; error?: string; rowCount?: number; expiresAt?: string }; error?: string };
+        if (!response.ok) throw new Error(payload.error ?? 'The download status could not be loaded.');
+        if (!disposed && payload.export?.status) {
+          setStatus(payload.export.status);
+          setError(payload.export.error ?? '');
+          setRowCount(payload.export.rowCount);
+          setExpiresAt(payload.export.expiresAt);
+          if (payload.export.status === 'queued' || payload.export.status === 'running') timer = window.setTimeout(() => void poll(), 1500);
+        }
+      } catch (reason) {
+        if (!disposed) { setStatus('error'); setError(reason instanceof Error && /expired/i.test(reason.message) ? 'This download expired. Ask DB Chat to generate it again.' : reason instanceof Error ? reason.message : 'The download status could not be loaded.'); }
+      }
+    };
+    void poll();
+    return () => { disposed = true; if (timer !== undefined) window.clearTimeout(timer); };
+  }, [exportId]);
+  const href = `/api/v1/exports/${encodeURIComponent(exportId)}/download`;
+  const remove = async () => {
+    try {
+      const response = await fetch(`/api/v1/exports/${encodeURIComponent(exportId)}`, { method: 'DELETE', credentials: 'same-origin' });
+      if (!response.ok) throw new Error('The download could not be removed.');
+      setDismissed(true);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'The download could not be removed.'); }
+  };
+  const cancel = async () => {
+    try {
+      const response = await fetch(`/api/v1/exports/${encodeURIComponent(exportId)}/cancel`, { method: 'POST', credentials: 'same-origin' });
+      const payload = await response.json() as { export?: { status?: DownloadState; error?: string }; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? 'The download could not be cancelled.');
+      setStatus(payload.export?.status ?? 'cancelled');
+    } catch (reason) { setStatus('error'); setError(reason instanceof Error ? reason.message : 'The download could not be cancelled.'); }
+  };
+  if (dismissed) return null;
+  return <section className="assistant-download" aria-label={`Download ${String(block.title)}`}>
+    <div><strong>{String(block.title)}</strong><span>{String(block.format).toUpperCase()} · {status === 'queued' ? 'Preparing' : status === 'running' ? `Generating${typeof rowCount === 'number' ? ` · ${rowCount.toLocaleString()} rows prepared` : ''}` : status === 'ready' ? `${typeof rowCount === 'number' ? `${rowCount.toLocaleString()} rows` : 'Ready'}${expiresAt ? ` · Expires ${new Date(expiresAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}` : ''}` : status === 'cancelled' ? 'Cancelled' : 'Could not generate'}</span></div>
+    {status === 'ready' && <a href={href} download>Download</a>}
+    {(status === 'ready' || status === 'error' || status === 'cancelled') && <button type="button" onClick={() => void remove()} aria-label={`Remove ${String(block.title)} download`}>Remove</button>}
+    {(status === 'queued' || status === 'running') && <button type="button" onClick={() => void cancel()}>Cancel</button>}
+    {(status === 'queued' || status === 'running') && <span className="assistant-download-progress" role="status">Preparing download…</span>}
+    {status === 'error' && <p role="alert">{error || 'The download could not be generated.'}</p>}
+  </section>;
+}
+
 function renderBlock(block: ContentBlock, index: number): ReactNode {
   switch (block.type) {
     case 'table':
@@ -273,6 +333,8 @@ function renderBlock(block: ContentBlock, index: number): ReactNode {
       return <div key={index} className="assistant-kpi" aria-label={`${String(block.label)}: ${formatBlockValue(block.value)}`}><span>{String(block.label)}</span><strong>{formatBlockValue(block.value)}{block.value !== null && block.value !== undefined && block.unit ? <small> {String(block.unit)}</small> : null}</strong></div>;
     case 'clarification':
       return <div key={index} className="assistant-clarification"><strong>{String(block.question)}</strong>{Array.isArray(block.choices) && <div>{block.choices.map((choice) => <button type="button" key={String(choice)} onClick={() => window.dispatchEvent(new CustomEvent('dbchat:clarification', { detail: String(choice) }))}>{String(choice)}</button>)}</div>}</div>;
+    case 'download':
+      return <DownloadBlock key={index} block={block} />;
     default:
       return null;
   }

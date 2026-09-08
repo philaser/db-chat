@@ -6,6 +6,7 @@ import { createVisualizeDataTool } from './agent/tools/VisualizeDataTool.js';
 import { getResultTool } from './agent/tools/GetResultTool.js';
 import { clarifyTool } from './agent/tools/ClarifyTool.js';
 import { createReportTool } from './agent/tools/CreateReportTool.js';
+import { exportDataTool } from './agent/tools/ExportDataTool.js';
 
 export function createToolRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
@@ -16,5 +17,6 @@ export function createToolRegistry(): ToolRegistry {
   registry.register(createVisualizeDataTool({ requireResultReference: true }));
   registry.register(clarifyTool);
   registry.register(createReportTool());
+  registry.register(exportDataTool);
   return registry;
 }
