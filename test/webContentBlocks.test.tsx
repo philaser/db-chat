@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StructuredContent, parseContentBlocks, splitContent } from '../src/web/contentBlocks.js';
 
@@ -97,5 +97,49 @@ describe('web content blocks', () => {
     expect(addEventListener).toHaveBeenCalledWith('change', expect.any(Function));
     unmount();
     expect(removeEventListener).toHaveBeenCalledWith('change', expect.any(Function));
+  });
+
+  it('hides incomplete structured JSON until the block is complete', () => {
+    const segments = splitContent('Working\n\n{"type":"chart","columns":["month"],"rows":[');
+    expect(segments.map((segment) => segment.type)).toEqual(['markdown', 'pending']);
+    expect(segments.at(-1)?.content).not.toBe('');
+  });
+
+  it('renders evidence-bound KPI and clarification blocks without arbitrary markup', () => {
+    const selected: string[] = [];
+    const listener = (event: Event) => selected.push((event as CustomEvent<string>).detail);
+    window.addEventListener('dbchat:clarification', listener);
+    render(<StructuredContent blocks={[
+      { type: 'kpi', label: 'Revenue', value: 1200, unit: 'USD', resultId: 'result-1' },
+      { type: 'clarification', question: 'Which definition?', choices: ['Gross', 'Net'] }
+    ]} />);
+    expect(screen.getByLabelText('Revenue: 1200')).toHaveTextContent('1200 USD');
+    fireEvent.click(screen.getByRole('button', { name: 'Net' }));
+    expect(selected).toEqual(['Net']);
+    window.removeEventListener('dbchat:clarification', listener);
+  });
+
+  it('renders boolean and unavailable KPI values without rejecting the block payload', () => {
+    const blocks = parseContentBlocks(JSON.stringify([
+      { type: 'kpi', label: 'Active', value: true, resultId: 'result-1' },
+      { type: 'kpi', label: 'Margin', value: null, unit: '%', resultId: 'result-1' }
+    ]));
+    expect(blocks).not.toBeNull();
+    render(<StructuredContent blocks={blocks!} />);
+    expect(screen.getByLabelText('Active: true')).toHaveTextContent('true');
+    expect(screen.getByLabelText('Margin: —')).toHaveTextContent('—');
+    expect(screen.getByLabelText('Margin: —')).not.toHaveTextContent('%');
+  });
+
+  it('labels bounded table and chart evidence with its visible coverage', () => {
+    render(<StructuredContent blocks={[
+      { type: 'table', columns: ['customer_name'], rows: [{ customer_name: 'Ada' }], coverage: { returnedRowCount: 1, loadedRowCount: 100, totalRowCount: 100, truncated: false } },
+      { type: 'chart', chartType: 'bar', columns: ['customer_name', 'order_count'], rows: [{ customer_name: 'Ada', order_count: 1 }], coverage: { returnedRowCount: 1, loadedRowCount: 1, totalRowCount: null, truncated: true } }
+    ]} />);
+    expect(screen.getByRole('columnheader', { name: 'Customer Name' })).toHaveAttribute('title', 'customer_name');
+    expect(screen.getByRole('option', { name: 'Customer Name' })).toHaveValue('customer_name');
+    expect(screen.getAllByRole('option', { name: 'Order Count' }).every((option) => (option as HTMLOptionElement).value === 'order_count')).toBe(true);
+    expect(screen.getByText('Showing 1 of 100 rows')).toBeInTheDocument();
+    expect(screen.getByText('Showing 1 loaded row; source result was limited')).toBeInTheDocument();
   });
 });

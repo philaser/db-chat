@@ -4,7 +4,10 @@ import type {
   ConnectionConfig,
   DatabaseConnector,
   DatabaseSchema,
-  ModelChatMessage
+  ModelChatMessage,
+  QueryResultArtifact,
+  ConnectionKnowledge,
+  SourceSnapshot
 } from '../shared/types.js';
 import { runAgentLoop, type TurnResult } from './agent/AgentLoop.js';
 import { ApprovalManager } from './agent/ApprovalManager.js';
@@ -14,6 +17,7 @@ import { createToolRegistry } from './webToolRegistry.js';
 import { OpenRouterClient } from './model/OpenRouterClient.js';
 import type { AgentModelClient, AgentController } from './agent/types.js';
 import type { WebServerConfig } from './config.js';
+import { schemaFingerprint } from './conversationContext.js';
 import { createConfiguredConnector, WebPolicyConnector } from './connectorFactory.js';
 import {
   buildVisualizationInput,
@@ -37,6 +41,13 @@ export interface WebBootstrap {
   model: string;
 }
 
+export interface WebAgentRunContext {
+  referencedArtifacts: QueryResultArtifact[];
+  knowledge?: ConnectionKnowledge;
+  source?: SourceSnapshot;
+  onSchema?: (schema: DatabaseSchema) => Promise<void>;
+}
+
 export class WebAgentService {
   private connector: DatabaseConnector | null = null;
   private schema: DatabaseSchema | null = null;
@@ -55,7 +66,7 @@ export class WebAgentService {
     this.modelClient = options.modelClient;
     this.injectedConnector = options.connector;
     this.permissionManager.setSafetyLevel('safe');
-    this.permissionManager.setAllowedTools(['run_database_query', 'get_schema_info', 'sample_data', 'visualize_data']);
+    this.permissionManager.setAllowedTools(['run_database_query', 'get_schema_info', 'sample_data', 'get_result', 'visualize_data', 'ask_clarification', 'create_report']);
   }
 
   async initialize(): Promise<void> {
@@ -141,7 +152,8 @@ export class WebAgentService {
     connectionConfig?: ConnectionConfig,
     providerApiKey?: string,
     model?: string,
-    effortLevel?: EffortLevel
+    effortLevel?: EffortLevel,
+    runContext: WebAgentRunContext = { referencedArtifacts: [] }
   ): Promise<TurnResult> {
     let connector = this.connector;
     let schema = this.schema;
@@ -162,6 +174,7 @@ export class WebAgentService {
         scopedConnector.setSafetyLevel('safe');
         signal?.throwIfAborted();
         schema = await scopedConnector.introspect();
+        await runContext.onSchema?.(schema);
       }
 
       if (!connector || !schema) {
@@ -217,6 +230,12 @@ export class WebAgentService {
         }
       };
 
+      const currentFingerprint = schemaFingerprint(schema);
+      const knowledge = runContext.knowledge ? {
+        ...runContext.knowledge,
+        examples: runContext.knowledge.examples.filter((example) => !example.invalidatedAt && example.schemaFingerprint === currentFingerprint)
+      } : undefined;
+
       const result = await runAgentLoop(messages, turnId, listener, {
         model: model || this.config.model,
         effortLevel,
@@ -226,13 +245,21 @@ export class WebAgentService {
         toolRegistry: this.toolRegistry,
         permissionManager: this.permissionManager,
         approvalManager: this.approvalManager,
+        referencedArtifacts: runContext.referencedArtifacts,
+        knowledge,
+        runtime: {
+          currentTimeUtc: new Date().toISOString(),
+          timezone: 'unknown; the user or database must establish it when material',
+          maxResultRows: this.config.maxResultRows,
+          maxResultBytes: this.config.maxResultBytes
+        },
         signal,
         maxTurnRounds: 6,
         maxTotalToolCalls: 8,
         permissionDeniedMessage: 'Blocked: this web chat is permanently read-only. Only read queries are allowed.'
       });
       signal?.throwIfAborted();
-      const enriched = await this.enrichVisualizationIfNeeded(messages, result, turnId, listener, connector, schema, controller);
+      const enriched = await this.enrichVisualizationIfNeeded(messages, result, turnId, listener, connector, schema, controller, runContext.referencedArtifacts);
       return {
         ...enriched,
         artifacts: enriched.artifacts.map((artifact) => ({ ...artifact, schema: schema ?? undefined }))
@@ -249,7 +276,8 @@ export class WebAgentService {
     listener: (event: AgentEvent) => void,
     connector: DatabaseConnector,
     schema: DatabaseSchema,
-    controller: AgentController
+    controller: AgentController,
+    referencedArtifacts: QueryResultArtifact[]
   ): Promise<TurnResult> {
     if (!hasVisualizationRequest(messages) || hasChartMarkup(result.message.content)) return result;
 
@@ -270,6 +298,7 @@ export class WebAgentService {
       controller,
       connector,
       schema,
+      resolveArtifact: (resultId) => [...result.artifacts, ...referencedArtifacts].find((artifact) => artifact.queryId === resultId),
       emitEvent: () => undefined
     });
     controller.audit({
@@ -282,6 +311,11 @@ export class WebAgentService {
     });
 
     if (!chartResult.ok || !chartResult.data) return result;
+
+    if (result.metrics) {
+      result.metrics.toolCallCount += 1;
+      result.metrics.phaseDurationsMs.tools = (result.metrics.phaseDurationsMs.tools ?? 0) + Math.round(performance.now() - startedAt);
+    }
 
     const existingContent = result.message.content.trim();
     const prefix = existingContent === 'Analysis complete.' || existingContent === 'I analyzed the data but could not produce a result.'

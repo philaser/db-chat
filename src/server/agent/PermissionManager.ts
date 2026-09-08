@@ -21,6 +21,9 @@ export class PermissionManager {
       { toolName: 'save_memory', action: 'ask' },
       { toolName: 'run_database_query', action: 'allow' },
       { toolName: 'visualize_data', action: 'allow' },
+      { toolName: 'get_result', action: 'allow' },
+      { toolName: 'ask_clarification', action: 'allow' },
+      { toolName: 'create_report', action: 'allow' },
       { toolName: 'export_report', action: 'allow' },
       { toolName: 'search_memory', action: 'allow' },
     ];

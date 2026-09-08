@@ -8,6 +8,51 @@
 > **Design references:** [WEB-DESIGN.md](WEB-DESIGN.md) and
 > [WEB-STYLE-GUIDE.md](WEB-STYLE-GUIDE.md)
 
+## Current product contract — 8 September 2026
+
+This section supersedes the earlier draft's pilot, persistence, chart and
+desktop migration assumptions. The hosted web app and Node backend are the
+primary product. Electron is an optional wrapper and is not required for
+hosting. Supabase Postgres and Auth provide the hosted account boundary;
+customers connect their own supported database types. There is no separate
+bounded-beta product mode, and database writes remain outside this product.
+
+The conversation contract now includes:
+
+- Server-owned history, query evidence and source identity. Browser updates
+  may change titles, pins and answer feedback, never replace stored answers,
+  results or a chat's original connection.
+- Saved active-turn identity, ordered SSE replay, terminal reconciliation,
+  durable interrupted attempts, Retry/Edit, and retained partial query results.
+  Leaving a route disconnects the viewer without cancelling server work.
+  Restart recovery marks interrupted work honestly; it does not rerun it.
+- Bounded conversation context with retained definitions/corrections, explicit
+  result/message follow-up targets, and private connection glossaries and
+  user-verified examples. Schema changes invalidate examples until reverified.
+- Read-only analytical prompting, material-ambiguity clarification, checks for
+  join grain and denominators, sampled-profile labels, and honest incomplete
+  answers when tool, model or time limits prevent completion.
+- Owned result references for retrieving evidence, validated charts and
+  structured reports. KPI values, tables and chart rows come from saved query
+  results. The model cannot supply executable presentation code.
+- Searchable/pinned chats, incremental history, answer feedback and saved
+  answers, local table controls, and chart display controls that do not query
+  the source. Explicit reruns are new read-only queries, with new capture times.
+- Markdown/rich-text answers and a closed report component set. Printable HTML
+  and Markdown exports contain saved evidence, SQL, provenance and limits;
+  exports are snapshots and clearly identify partially loaded history.
+- Prompt/model version and phase timing, first useful evidence, query/tool
+  counts, retries, and provider-reported token/cost usage. Missing provider usage
+  is unavailable rather than an invented zero. Synthetic evaluation distinguishes
+  deterministic contracts from live model correctness and narrative review.
+
+The runtime remains a single Node instance for active-turn ownership. Additional
+instances require coordinated leases/recovery before horizontal scaling. New
+control-plane migrations must be applied before deploying a build that needs
+them. A local implementation or test run does not imply production deployment.
+
+Portable evaluation instructions live in [evals/chat/README.md](../evals/chat/README.md).
+
 ## 1. Executive decision
 
 DB Chat should have a real internet product, not a browser-shaped copy of the
@@ -246,9 +291,11 @@ Web workspace
     └── privacy/read-only helper
 ~~~
 
-There is no permanent desktop sidebar, inspector rail, native title bar, or
-three-pane recreation. Account and connection management are responsive web
-flows, not desktop panels.
+The web app does not recreate the desktop title bar or three-pane inspector.
+On wide screens it may use a 224px conversation navigation rail and an
+adaptive result/inspector rail; both collapse into the content flow or a
+drawer on smaller screens. Account and connection management remain responsive
+web flows, not desktop panels.
 
 ### 5.3 Visual system
 
@@ -257,16 +304,16 @@ the desktop token set and should live in a web-owned theme file.
 
 | Token family | Target |
 | --- | --- |
-| Canvas | Warm neutral #F6F7FB; content panels #FFFFFF; soft region #EEF1F7 |
-| Ink | Deep blue-black #182033; secondary #5C6578; quiet #8992A3 |
-| Primary action | Cobalt-indigo #4B46E5; hover #3D38C5; focus ring with visible contrast |
-| Data signal | Teal #0E9F92; positive #16846F; warning amber #C87812; danger coral #C9495D |
-| Chart sequence | Indigo, teal, amber, coral, violet, leaf; all tested for contrast and color-blind differentiation |
-| Typography | System UI sans for interface; tabular system mono for SQL and numeric cells |
-| Radius | 10px control, 14px artifact, 20px opening/composer |
+| Canvas | Warm ivory #FBFAF7; content surface #FFFEFA; soft region #F4F0EA |
+| Ink | Dark blue-black #17232D; supporting text #536170; muted text must meet 4.5:1 contrast |
+| Primary action | Rust #C8491D; hover #A83A16; focus ring with visible contrast |
+| Data signal | Green #1E7B72 for healthy/ready; amber for attention; coral for errors |
+| Chart sequence | Rust, olive, ochre, plum, umber, and slate; pair every signal with text or shape |
+| Typography | Georgia for editorial headings; Helvetica-like sans for interface; system mono for SQL and numeric cells |
+| Radius | 5px controls, 7px panels, 9px composer; round only for identity and compact actions |
 | Elevation | One low-contrast surface shadow; no glass blur; no stacked floating cards |
 | Dividers | Neutral hairlines used only to separate information groups |
-| Spacing | 4, 8, 12, 16, 24, 32, 48px scale |
+| Spacing | Reusable 4-point scale: 4, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80px |
 | Motion | 120–180ms interaction transitions; reduced-motion removes nonessential motion |
 
 The exact values are subject to contrast testing. Tokens, not one-off values,
@@ -276,9 +323,9 @@ must drive the implementation.
 
 | Width | Composition |
 | --- | --- |
-| 1100px and above | Utility bar plus centered analysis stage; answer packets may use a wider table lane. |
-| 720–1099px | Same information architecture with reduced outer gutters; no hidden critical actions. |
-| Below 720px | Single column; utility context compresses; tables scroll within the packet; composer remains reachable. |
+| 1100px and above | Utility bar, a 224px conversation navigation rail, and centered analysis stage; the inspector/result rail defaults to about 400px and may resize to a 360px minimum. |
+| 720–1099px | Same information architecture with reduced outer gutters; settings switches to compact navigation early when the form would be constrained; no hidden critical actions. |
+| Below 720px | Single column; navigation becomes a drawer; inspector/results collapse below the content; tables scroll within the packet; composer remains reachable. |
 | Below 420px | 16px page gutter; suggestion labels may wrap; metadata collapses before content is truncated. |
 
 The browser must never require horizontal page scrolling. Only bounded

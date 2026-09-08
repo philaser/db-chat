@@ -1,0 +1,326 @@
+[
+  {
+    "id": "customer-count",
+    "question": "How many customers are there? Return the count.",
+    "sql": "SELECT COUNT(*) AS value FROM customers",
+    "expected": [
+      [
+        4
+      ]
+    ]
+  },
+  {
+    "id": "order-count",
+    "question": "How many orders are there, including canceled ones?",
+    "sql": "SELECT COUNT(*) AS value FROM orders",
+    "expected": [
+      [
+        5
+      ]
+    ]
+  },
+  {
+    "id": "gross-all",
+    "question": "What is the sum of amount across every order, including canceled orders?",
+    "sql": "SELECT SUM(amount) AS value FROM orders",
+    "expected": [
+      [
+        710
+      ]
+    ]
+  },
+  {
+    "id": "gross-completed",
+    "question": "What is gross revenue from completed orders only? Define it as sum(amount), with no refund deduction.",
+    "sql": "SELECT SUM(amount) AS value FROM orders WHERE status='completed'",
+    "expected": [
+      [
+        635
+      ]
+    ]
+  },
+  {
+    "id": "net-completed",
+    "question": "What is net revenue from completed orders? Define it as sum(amount-refund) for completed orders only.",
+    "sql": "SELECT SUM(amount-refund) AS value FROM orders WHERE status='completed'",
+    "expected": [
+      [
+        610
+      ]
+    ],
+    "projection": {
+      "columns": [
+        "^(value|net|net_revenue|total_net_revenue)$"
+      ],
+      "where": {
+        "status": "completed"
+      }
+    },
+    "forbiddenStatement": "\\$",
+    "maxNarrativeWords": 180
+  },
+  {
+    "id": "august-net",
+    "question": "What was net revenue for completed orders in August 2026? Use ordered_at >= 2026-08-01 and < 2026-09-01, sum(amount-refund).",
+    "sql": "SELECT SUM(amount-refund) AS value FROM orders WHERE status='completed' AND ordered_at>='2026-08-01' AND ordered_at<'2026-09-01'",
+    "expected": [
+      [
+        520
+      ]
+    ]
+  },
+  {
+    "id": "september-net",
+    "question": "What was net revenue for completed September 2026 orders?",
+    "sql": "SELECT SUM(amount-refund) AS value FROM orders WHERE status='completed' AND ordered_at>='2026-09-01' AND ordered_at<'2026-10-01'",
+    "expected": [
+      [
+        90
+      ]
+    ]
+  },
+  {
+    "id": "refund-total",
+    "question": "What is the total refund amount over all orders?",
+    "sql": "SELECT SUM(refund) AS value FROM orders",
+    "expected": [
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "id": "canceled-count",
+    "question": "How many orders are canceled?",
+    "sql": "SELECT COUNT(*) AS value FROM orders WHERE status='canceled'",
+    "expected": [
+      [
+        1
+      ]
+    ]
+  },
+  {
+    "id": "completed-count",
+    "question": "How many orders are completed?",
+    "sql": "SELECT COUNT(*) AS value FROM orders WHERE status='completed'",
+    "expected": [
+      [
+        4
+      ]
+    ]
+  },
+  {
+    "id": "average-completed",
+    "question": "What is the average gross amount of completed orders?",
+    "sql": "SELECT AVG(amount) AS value FROM orders WHERE status='completed'",
+    "expected": [
+      [
+        158.75
+      ]
+    ]
+  },
+  {
+    "id": "repeat-customers",
+    "question": "How many customers have more than one order, including canceled orders?",
+    "sql": "SELECT COUNT(*) AS value FROM (SELECT customer_id FROM orders GROUP BY customer_id HAVING COUNT(*)>1)",
+    "expected": [
+      [
+        2
+      ]
+    ]
+  },
+  {
+    "id": "customers-no-orders",
+    "question": "How many customers have never placed an order?",
+    "sql": "SELECT COUNT(*) AS value FROM customers c WHERE NOT EXISTS(SELECT 1 FROM orders o WHERE o.customer_id=c.id)",
+    "expected": [
+      [
+        1
+      ]
+    ]
+  },
+  {
+    "id": "missing-country",
+    "question": "How many customers have a missing country (NULL)?",
+    "sql": "SELECT COUNT(*) AS value FROM customers WHERE country IS NULL",
+    "expected": [
+      [
+        1
+      ]
+    ]
+  },
+  {
+    "id": "unique-country",
+    "question": "How many distinct non-null countries are represented by customers?",
+    "sql": "SELECT COUNT(DISTINCT country) AS value FROM customers",
+    "expected": [
+      [
+        2
+      ]
+    ]
+  },
+  {
+    "id": "ghana-customers",
+    "question": "How many customers are in Ghana?",
+    "sql": "SELECT COUNT(*) AS value FROM customers WHERE country='Ghana'",
+    "expected": [
+      [
+        2
+      ]
+    ]
+  },
+  {
+    "id": "orphan-orders",
+    "question": "How many orders refer to a missing customer?",
+    "sql": "SELECT COUNT(*) AS value FROM orders o LEFT JOIN customers c ON c.id=o.customer_id WHERE c.id IS NULL",
+    "expected": [
+      [
+        0
+      ]
+    ]
+  },
+  {
+    "id": "duplicate-name",
+    "question": "How many duplicate customer-name groups exist?",
+    "sql": "SELECT COUNT(*) AS value FROM (SELECT name FROM customers GROUP BY name HAVING COUNT(*)>1)",
+    "expected": [
+      [
+        0
+      ]
+    ]
+  },
+  {
+    "id": "top-spender",
+    "question": "Which customer has the highest total gross amount across all orders? Show name and total amount.",
+    "sql": "SELECT c.name,SUM(o.amount) AS value FROM customers c JOIN orders o ON o.customer_id=c.id GROUP BY c.id,c.name ORDER BY value DESC LIMIT 1",
+    "expected": [
+      [
+        "Ada",
+        300
+      ]
+    ]
+  },
+  {
+    "id": "join-fanout",
+    "question": "What is the total order amount for orders that have order items? Count each order once even when it has several items.",
+    "sql": "SELECT SUM(amount) AS value FROM orders WHERE EXISTS(SELECT 1 FROM order_items i WHERE i.order_id=orders.id)",
+    "expected": [
+      [
+        300
+      ]
+    ],
+    "projection": {
+      "columns": [
+        "^(value|total_amount|total_order_amount|total)$"
+      ]
+    }
+  },
+  {
+    "id": "item-quantity",
+    "question": "What is the total quantity across order items?",
+    "sql": "SELECT SUM(quantity) AS value FROM order_items",
+    "expected": [
+      [
+        6
+      ]
+    ]
+  },
+  {
+    "id": "zero-rows",
+    "question": "List customers from Antarctica.",
+    "sql": "SELECT name FROM customers WHERE country='Antarctica'",
+    "expected": []
+  },
+  {
+    "id": "empty-count",
+    "question": "How many rows are in empty_events?",
+    "sql": "SELECT COUNT(*) AS value FROM empty_events",
+    "expected": [
+      [
+        0
+      ]
+    ]
+  },
+  {
+    "id": "empty-sum",
+    "question": "What is SUM(value) in empty_events? Preserve NULL instead of inventing zero.",
+    "sql": "SELECT SUM(value) AS value FROM empty_events",
+    "expected": [
+      [
+        null
+      ]
+    ]
+  },
+  {
+    "id": "minimum-amount",
+    "question": "What is the smallest order amount including canceled orders?",
+    "sql": "SELECT MIN(amount) AS value FROM orders",
+    "expected": [
+      [
+        75
+      ]
+    ]
+  },
+  {
+    "id": "maximum-amount",
+    "question": "What is the largest order amount?",
+    "sql": "SELECT MAX(amount) AS value FROM orders",
+    "expected": [
+      [
+        240
+      ]
+    ]
+  },
+  {
+    "id": "spend-share",
+    "question": "What percentage of all order amounts belongs to Ada? Include canceled orders in the overall denominator and round to two decimals.",
+    "sql": "SELECT ROUND(100.0*SUM(CASE WHEN customer_id=1 THEN amount ELSE 0 END)/SUM(amount),2) AS value FROM orders",
+    "expected": [
+      [
+        42.25
+      ]
+    ]
+  },
+  {
+    "id": "zero-denominator",
+    "question": "Calculate 5 divided by the number of rows in empty_events, returning NULL when the denominator is zero.",
+    "sql": "SELECT 5.0/NULLIF(COUNT(*),0) AS value FROM empty_events",
+    "expected": [
+      [
+        null
+      ]
+    ]
+  },
+  {
+    "id": "rows-15-chart",
+    "question": "Generate the integers 1 to 15 with a read-only recursive CTE, labeled Item 01 through Item 15, and chart all 15 values as bars.",
+    "sql": "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<15) SELECT printf('Item %02d',x) AS label,x AS value FROM n",
+    "expectedRows": 15,
+    "chart": true
+  },
+  {
+    "id": "rows-101-limit",
+    "question": "Use a read-only recursive CTE to return integers 1 to 101. Explain if the result is limited.",
+    "sql": "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<101) SELECT x AS value FROM n",
+    "expectedRows": 100,
+    "truncated": true
+  },
+  {
+    "id": "missing-date",
+    "question": "How many rows in legacy_orders are from last month? Do not substitute orders; explain if the data cannot answer.",
+    "statement": "no.{0,30}(date|time)|lack.{0,30}(date|time)|cannot.{0,70}(month|filter)|can't.{0,70}(month|filter)"
+  },
+  {
+    "id": "readonly-capability",
+    "question": "Can DB Chat add a new date column to legacy_orders for me?",
+    "statement": "read.only|cannot|can't|unable",
+    "forbiddenStatement": "\\bALTER\\s+TABLE\\b|I tried"
+  },
+  {
+    "id": "structured-report",
+    "question": "Create a concise analytics report for completed orders using create_report and saved result references. Define net revenue as amount-refund. Include a total net revenue KPI, a customer breakdown table and a bar chart. State the metric definition and whether currency is known.",
+    "report": true,
+    "expectedKpi": 610,
+    "maxNarrativeWords": 180
+  }
+]

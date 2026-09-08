@@ -1,14 +1,16 @@
+import { referencedResultIds } from './conversationContext.js';
+import { defaultEffortForModel } from './config.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { SecretVault, splitSecrets, displayConnection, customChatTitle, type AccountStore, type ConnectionTestResult, type StoredConnection } from './accountStore.js';
 import { publicConnectionUri } from '../shared/connectionSecrets.js';
-import type { ChatMessage, ConnectionConfig, QueryResultArtifact, WebChatSession, WebChatSummary } from '../shared/types.js';
+import type { ConnectionKnowledge, SourceSnapshot, ChatMessage, ConnectionConfig, QueryResultArtifact, WebChatSession, WebChatSummary } from '../shared/types.js';
 import type { Principal, WebAccountSettings, WebUser, WebTurnSnapshot } from './types.js';
 import type { AccountRepository } from './accountRepository.js';
 interface AuthUser { id: string; email?: string; email_confirmed_at?: string; created_at: string; user_metadata?: { display_name?: string } }
 interface AuthTokens { access_token: string; refresh_token: string; expires_in: number; user: AuthUser }
 interface Profile { user_id: string; email: string; display_name: string; email_verified: boolean; created_at: string; settings: WebAccountSettings; encrypted_provider_key?: string | null }
 interface Session { id_hash: string; user_id: string; encrypted_tokens: string; access_expires_at: number; expires_at: number; absolute_expires_at: number; refreshed_at: number; refresh_lock_until: number; purpose?: string }
-interface ChatRow { id: string; user_id: string; title: string; connection_id?: string; custom_title: boolean; created_at: string; updated_at: string; message_count: number; artifact_count: number }
+interface ChatRow { source?: SourceSnapshot; pinned?: boolean; id: string; user_id: string; title: string; connection_id?: string; custom_title: boolean; created_at: string; updated_at: string; message_count: number; artifact_count: number }
 interface ConnectionRow { id: string; user_id: string; config: ConnectionConfig; encrypted_secrets?: string; status: StoredConnection['status']; last_tested_at?: string; table_count?: number; last_error?: string }
 export interface SupabaseAccountStoreOptions {
   url: string; publishableKey: string; serviceRoleKey: string; secretKey: string;
@@ -58,7 +60,7 @@ export class SupabaseAccountStore implements AccountRepository {
     return rows.length > 0;
   }
   private idFilter(id: string): string { return '&id=eq.' + encodeURIComponent(id); }
-  private defaultSettings(): WebAccountSettings { return { provider: 'openrouter', model: this.options.defaultModel, effortLevel: 'medium' }; }
+  private defaultSettings(): WebAccountSettings { return { provider: 'openrouter', model: this.options.defaultModel, effortLevel: defaultEffortForModel(this.options.defaultModel) }; }
   private user(profile: Profile): WebUser { return { id: profile.user_id, email: profile.email, displayName: profile.display_name, emailVerified: profile.email_verified, createdAt: profile.created_at }; }
   private async profile(id: string): Promise<Profile> { const row = (await this.rows<Profile>('dbchat_profiles', id))[0]; if (!row) throw new Error('Account not found.'); return row; }
   private async syncUser(user: AuthUser): Promise<WebUser> {
@@ -199,23 +201,74 @@ export class SupabaseAccountStore implements AccountRepository {
   }
   async deleteConnection(userId: string, id: string) { const deleted = await this.remove('dbchat_connections', userId, this.idFilter(id)); if (deleted && (await this.getSettings(userId)).activeConnectionId === id) await this.updateSettings(userId, { activeConnectionId: null }); return deleted; }
   async markConnectionTest(userId: string, id: string, result: ConnectionTestResult) { if (!await this.getConnectionSummary(userId, id)) throw new Error('Connection not found.'); await this.patch('dbchat_connections', userId, { status: result.ok ? 'ready' : 'unavailable', last_tested_at: new Date().toISOString(), table_count: result.tableCount ?? null, last_error: result.error ?? null }, this.idFilter(id)); return (await this.getConnectionSummary(userId, id))!; }
-  private summary(row: ChatRow): WebChatSummary { return { id: row.id, title: row.title, connectionId: row.connection_id ?? undefined, messageCount: row.message_count, artifactCount: row.artifact_count, createdAt: row.created_at, updatedAt: row.updated_at }; }
+  private summary(row: ChatRow): WebChatSummary { return { source: row.source, pinned: row.pinned, id: row.id, title: row.title, connectionId: row.connection_id ?? undefined, messageCount: row.message_count, artifactCount: row.artifact_count, createdAt: row.created_at, updatedAt: row.updated_at }; }
   async listChats(userId: string) { return (await this.rows<ChatRow>('dbchat_chats', userId, '&order=updated_at.desc')).map(row => this.summary(row)); }
+  async searchChats(userId: string, options: { q?: string; connectionId?: string; pinned?: boolean; offset: number; limit: number }): Promise<{ chats: WebChatSummary[]; total: number; nextOffset?: number }> {
+    const result = await this.request<{ chats: ChatRow[]; total: number }>('/rest/v1/rpc/dbchat_search_chats', 'POST', { owner: userId, query_text: options.q ?? '', source_id: options.connectionId ?? null, pinned_only: options.pinned ?? false, page_offset: options.offset, page_limit: options.limit });
+    return { chats: result.chats.map(row => this.summary(row)), total: result.total, nextOffset: options.offset + options.limit < result.total ? options.offset + options.limit : undefined };
+  }
+  private async allChatRows<T>(table: string, userId: string, chatId: string): Promise<T[]> {
+    const result: T[] = [];
+    for (let offset = 0; ; offset += 500) {
+      const page = await this.rows<T>(table, userId, '&chat_id=eq.' + encodeURIComponent(chatId) + '&order=position.asc&limit=500&offset=' + offset);
+      result.push(...page);
+      if (page.length < 500) return result;
+    }
+  }
   async getChat(userId: string, id: string): Promise<WebChatSession | null> {
     const row = (await this.rows<ChatRow>('dbchat_chats', userId, this.idFilter(id)))[0]; if (!row) return null;
-    const [messages, artifacts] = await Promise.all([this.rows<{ body: ChatMessage }>('dbchat_messages', userId, '&chat_id=eq.' + encodeURIComponent(id) + '&order=position.asc'), this.rows<{ body: QueryResultArtifact }>('dbchat_artifacts', userId, '&chat_id=eq.' + encodeURIComponent(id) + '&order=position.asc')]);
-    return { ...this.summary(row), messages: messages.map(item => item.body), artifacts: artifacts.map(item => item.body) };
+    const [messages, artifacts] = await Promise.all([this.allChatRows<{ body: ChatMessage }>('dbchat_messages', userId, id), this.allChatRows<{ body: QueryResultArtifact }>('dbchat_artifacts', userId, id)]);
+    const latestTurn = (await this.rows<{ snapshot: WebTurnSnapshot }>('dbchat_turns', userId, '&chat_id=eq.' + encodeURIComponent(id) + '&order=created_at.desc&limit=1'))[0]?.snapshot;
+    return { ...this.summary(row), latestTurn, messages: messages.map(item => item.body), artifacts: artifacts.map(item => item.body) };
   }
-  async createChat(userId: string, connectionId?: string) {
+  async getChatPage(userId: string, id: string, options: { before?: string; limit: number }): Promise<WebChatSession | null> {
+    const row = (await this.rows<ChatRow>('dbchat_chats', userId, this.idFilter(id)))[0];
+    if (!row) return null;
+    const chatFilter = '&chat_id=eq.' + encodeURIComponent(id);
+    let positionFilter = '';
+    if (options.before) {
+      const cursor = (await this.rows<{ position: number }>('dbchat_messages', userId, chatFilter + '&body->>id=eq.' + encodeURIComponent(options.before) + '&select=position&limit=1'))[0];
+      if (!cursor) throw new Error('Invalid history cursor.');
+      positionFilter = '&position=lt.' + cursor.position;
+    }
+    const page = await this.rows<{ body: ChatMessage }>('dbchat_messages', userId, chatFilter + positionFilter + '&order=position.desc&limit=' + (options.limit + 1));
+    const historyHasMore = page.length > options.limit;
+    const messages = page.slice(0, options.limit).reverse().map(item => item.body);
+    const ids = messages.map(message => message.id);
+    let artifacts = ids.length ? await this.rows<{ body: QueryResultArtifact }>('dbchat_artifacts', userId, chatFilter + '&body->>messageId=in.' + encodeURIComponent('(' + ids.map(id => JSON.stringify(id)).join(',') + ')') + '&order=position.asc') : [];
+    // Recovery needs only turn identity/status; event replay and result snapshots have their own endpoint.
+    const turn = (await this.rows<{ id: string; chat_id: string; assistant_message_id: string; created_at: string; status: WebTurnSnapshot['status']; question?: string; attemptOf?: string; connectionId?: string; error?: string; intent?: WebTurnSnapshot['intent'] }>('dbchat_turns', userId, chatFilter + '&order=created_at.desc&limit=1&select=' + encodeURIComponent('id,chat_id,assistant_message_id,created_at,status:snapshot->>status,question:snapshot->>question,attemptOf:snapshot->>attemptOf,connectionId:snapshot->>connectionId,error:snapshot->>error,intent:snapshot->intent')))[0];
+    const latestTurn: WebTurnSnapshot | undefined = turn ? { id: turn.id, chatId: turn.chat_id, assistantMessageId: turn.assistant_message_id, createdAt: turn.created_at, status: turn.status, question: turn.question, attemptOf: turn.attemptOf, connectionId: turn.connectionId, error: turn.error, intent: turn.intent, events: [] } : undefined;
+    const referenced = new Set(referencedResultIds(messages));
+    if (latestTurn?.intent?.artifactId && ids.includes(latestTurn.assistantMessageId ?? '')) referenced.add(latestTurn.intent.artifactId);
+    const missing = [...referenced].filter(id => !artifacts.some(artifact => artifact.body.queryId === id));
+    if (missing.length) artifacts = [...artifacts, ...await this.rows<{ body: QueryResultArtifact }>('dbchat_artifacts', userId, chatFilter + '&body->>queryId=in.' + encodeURIComponent('(' + missing.map(id => JSON.stringify(id)).join(',') + ')'))];
+    return { ...this.summary(row), messages, artifacts: artifacts.map(item => item.body), latestTurn, historyHasMore, historyCursor: historyHasMore ? messages[0]?.id : undefined };
+  }
+  async createChat(userId: string, connectionId?: string, source?: SourceSnapshot) {
     if (connectionId && !await this.getConnectionSummary(userId, connectionId)) throw new Error('Connection not found.');
     const id = 'chat_' + randomBytes(12).toString('hex');
-    await this.request('/rest/v1/dbchat_chats', 'POST', { id, user_id: userId, connection_id: connectionId ?? null }); return (await this.getChat(userId, id))!;
+    const connection = connectionId ? await this.getConnectionSummary(userId, connectionId) : null;
+    source ??= connection ? { connectionId: connection.id, label: connection.label, kind: connection.kind, capturedAt: new Date().toISOString() } : undefined;
+    await this.request('/rest/v1/dbchat_chats', 'POST', { id, user_id: userId, connection_id: connectionId ?? null, source: source ?? null }); return (await this.getChat(userId, id))!;
   }
   async updateChat(userId: string, id: string, patch: Parameters<AccountStore['updateChat']>[2]) {
     if (patch.title !== undefined) customChatTitle(patch.title);
     if (patch.connectionId && !await this.getConnectionSummary(userId, patch.connectionId)) throw new Error('Connection not found.');
     await this.request('/rest/v1/rpc/dbchat_update_chat', 'POST', { owner: userId, chat: id, changes: patch });
     const result = await this.getChat(userId, id); if (!result) throw new Error('Chat not found.'); return result;
+  }
+  async getConnectionKnowledge(userId: string, connectionId: string): Promise<ConnectionKnowledge> {
+    return (await this.rows<{ body: ConnectionKnowledge }>('dbchat_connection_knowledge', userId, '&connection_id=eq.' + encodeURIComponent(connectionId)))[0]?.body ?? { version: 1, glossary: [], examples: [], updatedAt: new Date().toISOString() };
+  }
+  async saveConnectionKnowledge(userId: string, connectionId: string, value: ConnectionKnowledge): Promise<ConnectionKnowledge> {
+    if (!await this.getConnectionSummary(userId, connectionId)) throw new Error('Connection not found.');
+    await this.request('/rest/v1/dbchat_connection_knowledge?on_conflict=user_id,connection_id', 'POST', { user_id: userId, connection_id: connectionId, body: value }, undefined, 'resolution=merge-duplicates');
+    return value;
+  }
+  async updateMessageMetadata(userId: string, chatId: string, messageId: string, patch: Pick<ChatMessage, 'pinned' | 'feedback'>): Promise<WebChatSession> {
+    await this.request('/rest/v1/rpc/dbchat_update_message_metadata', 'POST', { owner: userId, chat: chatId, message_id: messageId, changes: patch });
+    const chat = await this.getChat(userId, chatId); if (!chat) throw new Error('Chat not found.'); return chat;
   }
   async deleteChat(userId: string, id: string) { return this.remove('dbchat_chats', userId, this.idFilter(id)); }
   async hasUserKey(userId: string) { return Boolean((await this.profile(userId)).encrypted_provider_key); }
@@ -224,6 +277,9 @@ export class SupabaseAccountStore implements AccountRepository {
   async resolveProviderKey(userId: string, internalKey?: string): Promise<{ source: 'user' | 'internal' | 'none'; apiKey?: string; hasUserKey: boolean }> { const value = (await this.profile(userId)).encrypted_provider_key; return value ? { source: 'user', apiKey: this.vault.decrypt(value), hasUserKey: true } : { source: internalKey ? 'internal' : 'none', apiKey: internalKey, hasUserKey: false }; }
   async interruptPendingTurns(): Promise<void> { await this.request('/rest/v1/rpc/dbchat_interrupt_pending_turns', 'POST', {}); }
   async saveTurn(userId: string, snapshot: WebTurnSnapshot): Promise<void> { await this.request('/rest/v1/rpc/dbchat_save_turn', 'POST', { owner: userId, turn: snapshot }); }
+  async getTurnByRequestId(userId: string, requestId: string): Promise<WebTurnSnapshot | null> {
+    return (await this.rows<{ snapshot: WebTurnSnapshot }>('dbchat_turns', userId, '&request_id=eq.' + encodeURIComponent(requestId)))[0]?.snapshot ?? null;
+  }
   async getTurn(userId: string, id: string): Promise<WebTurnSnapshot | null> { return (await this.rows<{ snapshot: WebTurnSnapshot }>('dbchat_turns', userId, this.idFilter(id)))[0]?.snapshot ?? null; }
   async claimTurn(userId: string, turnId: string, chatId: string, requestId: string, userMessage: ChatMessage, assistantMessageId: string): Promise<{ turnId: string; created: boolean }> {
     return this.request('/rest/v1/rpc/dbchat_claim_turn', 'POST', { owner: userId, turn_id: turnId, chat: chatId, request_id: requestId, user_message: userMessage, assistant_message_id: assistantMessageId });

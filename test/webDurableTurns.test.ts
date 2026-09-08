@@ -7,29 +7,13 @@ import type { ChatMessage, ConnectionConfig, DatabaseConnector, QueryResultArtif
 import type { WebTurnSnapshot } from '../src/server/types';
 import type { AgentModelClient } from '../src/server/agent/types';
 class DurableAccounts extends AccountStore {
-  readonly turns = new Map<string, { owner: string; chat: string; snapshot: WebTurnSnapshot; finalized?: boolean }>();
-  readonly requests = new Map<string,string>();
   finalizeGate?: Promise<void>;
   finalizeStarted = false;
-  interruptPendingTurns = vi.fn(async () => {
-    for (const row of this.turns.values()) if (!row.finalized) { row.finalized = true; row.snapshot.status = 'error'; row.snapshot.error = 'Interrupted'; }
-  });
-  async claimTurn(owner: string, id: string, chat: string, request: string, message: ChatMessage, _assistant: string) {
-    const key = owner+':'+request; const prior = this.requests.get(key);
-    if (prior) return { turnId: prior, created: false };
-    this.requests.set(key,id); this.turns.set(id,{ owner,chat,snapshot:{ id,status:'queued',events:[] } });
-    const saved = this.getChat(owner,chat)!;
-    this.updateChat(owner,chat,{ messages:[...saved.messages,message] });
-    return { turnId:id,created:true };
-  }
-  async saveTurn(owner: string, snapshot: WebTurnSnapshot) { const row=this.turns.get(snapshot.id); if (row?.owner===owner) row.snapshot=structuredClone(snapshot); }
-  async getTurn(owner: string,id: string) { const row=this.turns.get(id); return row?.owner===owner ? structuredClone(row.snapshot) : null; }
-  async finalizeTurn(owner: string,snapshot: WebTurnSnapshot,message?: ChatMessage,artifacts: QueryResultArtifact[] = []) {
-    this.finalizeStarted=true; await this.finalizeGate;
-    const row=this.turns.get(snapshot.id); if (!row || row.owner!==owner || row.finalized) return;
-    const chat=this.getChat(owner,row.chat)!;
-    this.updateChat(owner,row.chat,{ messages:message ? [...chat.messages,message] : chat.messages, artifacts:[...chat.artifacts,...artifacts] });
-    row.snapshot=structuredClone(snapshot); row.finalized=true;
+  interruptPendingTurns = vi.fn(() => super.interruptPendingTurns());
+  async finalizeTurn(owner: string, snapshot: WebTurnSnapshot, message?: ChatMessage, artifacts: QueryResultArtifact[] = []) {
+    this.finalizeStarted = true;
+    await this.finalizeGate;
+    super.finalizeTurn(owner, snapshot, message, artifacts);
   }
 }
 const connector: DatabaseConnector = {
@@ -85,6 +69,7 @@ describe('durable web turn integration', () => {
     f.accounts.updateChat(f.auth.user.id,f.chat.id,{artifacts:[artifact]});
     const id=await f.submit(); await vi.waitFor(async()=>expect((await f.snapshot(id)).status).toBe('error'));
     expect(f.accounts.getChat(f.auth.user.id,f.chat.id)?.artifacts).toEqual([artifact]);
+    expect(f.accounts.getChat(f.auth.user.id,f.chat.id)?.messages.at(-1)?.metrics).toMatchObject({ terminalReason: 'error', totalMs: expect.any(Number), model: 'fixture' });
     const restartedBase=await start(f.accounts,f.model,f.database);
     const recovered=await f.snapshot(id,restartedBase); expect(recovered.status).toBe('error'); expect(recovered.events.at(-1)?.type).toBe('error');
     expect(f.accounts.interruptPendingTurns).toHaveBeenCalledTimes(2); expect(f.calls()).toBe(1);

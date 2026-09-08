@@ -1,3 +1,4 @@
+import { conversationContext, invalidateKnowledge, parseKnowledge, schemaFingerprint, schemaSuggestions } from './conversationContext.js';
 import { SupabaseSqliteStorage, type SqliteObjectStorage } from './supabaseSqliteStorage.js';
 import { prepareConnectionDestination } from './connectionPolicy.js';
 import http, { type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -13,6 +14,10 @@ import { WebSessionStore, type WebTurnRecord } from './sessionStore.js';
 import { WebAgentService } from './webAgentService.js';
 import type {
   ChatMessage,
+  FollowUpIntent,
+  DatabaseSchema,
+  SourceSnapshot,
+  TurnMetrics,
   ConnectionConfig,
   ModelChatMessage,
   QueryResultArtifact
@@ -552,7 +557,11 @@ export class WebServer {
     }
 
     if (request.method === 'GET' && route === '/chats') {
-      sendJson(response, 200, { chats: await this.accounts.listChats(principal.id) }, legacyCookie);
+      const q = (url.searchParams.get('q') ?? '').trim().toLowerCase();
+      const connectionId = url.searchParams.get('connectionId');
+      const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+      const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 50));
+      sendJson(response, 200, await this.accounts.searchChats(principal.id, { q, connectionId: connectionId ?? undefined, pinned: url.searchParams.get('pinned') === 'true', offset, limit }), legacyCookie);
       return;
     }
 
@@ -563,17 +572,57 @@ export class WebServer {
         sendJson(response, 404, { error: 'Connection not found.' }, legacyCookie);
         return;
       }
-      const chat = await this.accounts.createChat(principal.id, connectionId);
+      const summary = connectionId ? await this.connectionSummaryForPrincipal(principal, connectionId) : null;
+      const chat = await this.accounts.createChat(principal.id, connectionId, summary ? { connectionId: summary.id, label: summary.label, kind: summary.kind, capturedAt: new Date().toISOString() } : undefined);
       sendJson(response, 201, { chat }, legacyCookie);
       return;
     }
 
+    const messageMetadataMatch = route.match(/^\/chats\/([^/]+)\/messages\/([^/]+)(\/feedback)?$/);
+    if (messageMetadataMatch && (request.method === 'PATCH' || request.method === 'POST')) {
+      const body = this.requireRecord(await readJson(request, 8192));
+      try {
+        const patch: Pick<ChatMessage, 'feedback' | 'pinned'> = {};
+        if (messageMetadataMatch[3] && request.method === 'POST') {
+          if (body.rating !== 'helpful' && body.rating !== 'unhelpful') throw new Error('Choose helpful or unhelpful.');
+          const correction = stringField(body, 'correction');
+          if (correction && correction.length > 4000) throw new Error('Correction is too long.');
+          patch.feedback = { rating: body.rating, correction, updatedAt: new Date().toISOString() };
+        } else {
+          if (request.method !== 'PATCH' || typeof body.pinned !== 'boolean') throw new Error('Provide pinned as a boolean.');
+          patch.pinned = body.pinned;
+        }
+        const chat = await this.accounts.updateMessageMetadata(principal.id, messageMetadataMatch[1], messageMetadataMatch[2], patch);
+        sendJson(response, 200, { chat }, legacyCookie);
+      } catch (error) { sendJson(response, 400, { error: safeClientError(error) }); }
+      return;
+    }
+
+    const knowledgeMatch = route.match(/^\/connections\/([^/]+)\/knowledge$/);
+    if (knowledgeMatch && ['GET', 'PUT'].includes(request.method ?? '')) {
+      if (!await this.connectionSummaryForPrincipal(principal, knowledgeMatch[1])) { sendJson(response, 404, { error: 'Connection not found.' }); return; }
+      let knowledge = await this.accounts.getConnectionKnowledge(principal.id, knowledgeMatch[1]);
+      if (request.method === 'PUT') {
+        try {
+          const body = this.requireRecord(await readJson(request, 128 * 1024));
+          knowledge = await this.accounts.saveConnectionKnowledge(principal.id, knowledgeMatch[1], parseKnowledge(body.knowledge ?? body, knowledge));
+        } catch (error) { sendJson(response, 400, { error: safeClientError(error) }); return; }
+      }
+      sendJson(response, 200, { knowledge }, legacyCookie); return;
+    }
+
     const chatMatch = route.match(/^\/chats\/([^/]+)$/);
     if (chatMatch && request.method === 'GET') {
-      const chat = await this.accounts.getChat(principal.id, chatMatch[1]);
+      const paginated = url.searchParams.has('limit') || url.searchParams.has('before');
+      const chat = paginated ? await this.accounts.getChatPage(principal.id, chatMatch[1], { before: url.searchParams.get('before') ?? undefined, limit: Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 50)) }) : await this.accounts.getChat(principal.id, chatMatch[1]);
       if (!chat) {
         sendJson(response, 404, { error: 'Chat not found.' }, legacyCookie);
         return;
+      }
+      chat.sourceAvailable = Boolean(chat.connectionId && (await this.connectionSummaryForPrincipal(principal, chat.connectionId))?.status === 'ready');
+      if (chat.latestTurn && (!paginated || ['queued', 'running'].includes(chat.latestTurn.status))) {
+        const turn = await this.findTurn(chat.latestTurn.id, principal);
+        if (turn) chat.latestTurn = paginated ? { ...this.sessions.snapshot(turn), events: [], artifacts: undefined } : this.sessions.snapshot(turn);
       }
       sendJson(response, 200, { chat }, legacyCookie);
       return;
@@ -581,16 +630,12 @@ export class WebServer {
 
     if (chatMatch && request.method === 'PATCH') {
       const body = this.requireRecord(await readJson(request, this.config.maxChatBodyBytes ?? 16 * 1024 * 1024));
-      const connectionId = stringField(body, 'connectionId');
-      if (connectionId && !await this.connectionSummaryForPrincipal(principal, connectionId)) {
-        sendJson(response, 404, { error: 'Connection not found.' }, legacyCookie);
-        return;
+      if (Object.keys(body).some(key => !['title', 'pinned'].includes(key)) || (body.pinned !== undefined && typeof body.pinned !== 'boolean')) {
+        sendJson(response, 400, { error: 'Only title and pinned can be changed. Saved evidence and source are server-owned.' }); return;
       }
       const chat = await this.accounts.updateChat(principal.id, chatMatch[1], {
         title: body.title === undefined ? undefined : stringField(body, 'title', true),
-        connectionId,
-        messages: body.messages === undefined ? undefined : this.parsePersistedMessages(body.messages),
-        artifacts: body.artifacts === undefined ? undefined : this.parsePersistedArtifacts(body.artifacts)
+        pinned: body.pinned as boolean | undefined
       });
       sendJson(response, 200, { chat }, legacyCookie);
       return;
@@ -681,7 +726,7 @@ export class WebServer {
       return;
     }
 
-    const schemaMatch = route.match(/^\/connections\/([^/]+)\/(?:schema|introspect)$/);
+    const schemaMatch = route.match(/^\/connections\/([^/]+)\/(?:schema|introspect|suggestions)$/);
     if (schemaMatch && request.method === 'GET') {
       const connection = await this.connectionSummaryForPrincipal(principal, schemaMatch[1]);
       const connectionConfig = await this.connectionConfigForPrincipal(principal, schemaMatch[1]);
@@ -692,7 +737,8 @@ export class WebServer {
       try {
         await prepareConnectionDestination(connectionConfig, this.config.allowedDatabaseHosts);
         const schema = await this.withSqliteConnection(principal.id, connectionConfig, local => this.service.testConnection(local));
-        sendJson(response, 200, { schema }, legacyCookie);
+        await this.refreshKnowledgeSchema(principal.id, schemaMatch[1], schema);
+        sendJson(response, 200, route.endsWith('/suggestions') ? { suggestions: schemaSuggestions(schema) } : { schema }, legacyCookie);
       } catch (error) {
         sendJson(response, 422, { error: safeClientError(error, 'The schema could not be loaded.') }, legacyCookie);
       }
@@ -732,8 +778,18 @@ export class WebServer {
     if (request.method === 'POST' && route === '/chat/turns') {
       const body = this.requireRecord(await readJson(request, this.config.maxBodyBytes));
       let messages: ModelChatMessage[];
-      try { messages = this.parseMessages(body); }
+      try {
+        const question = typeof body.question === 'string' ? body.question : Array.isArray(body.messages) ? body.messages.at(-1)?.content : undefined;
+        messages = body.chatId || body.question !== undefined ? this.parseMessages({ messages: [{ role: 'user', content: question }] }) : this.parseMessages(body);
+      }
       catch (error) { sendJson(response, 400, { error: safeClientError(error) }, legacyCookie); return; }
+      if (typeof body.chatId === 'string' && typeof body.clientRequestId === 'string') {
+        const prior = await this.accounts.getTurnByRequestId(principal.id, body.clientRequestId);
+        if (prior) {
+          if (prior.chatId !== body.chatId) { sendJson(response, 400, { error: 'Request belongs to another chat.' }); return; }
+          sendJson(response, 202, { turnId: prior.id }, legacyCookie); return;
+        }
+      }
       const selectedConnectionId = stringField(body, 'connectionId')
         ?? (await this.buildBootstrap(principal)).activeConnectionId;
       if (!selectedConnectionId) {
@@ -770,7 +826,26 @@ export class WebServer {
           const latest = messages.at(-1);
           if (latest?.role !== 'user' || typeof latest.content !== 'string') throw new Error('End the request with a question.');
           const userMessage: ChatMessage = { id: userId, role: 'user', content: latest.content, createdAt: turn.createdAt };
-          turn.chatId = chatId; turn.assistantMessageId = assistantId;
+          turn.chatId = chatId; turn.assistantMessageId = assistantId; turn.question = latest.content;
+          let effectiveIntent: unknown = body.intent;
+          if (body.attemptOf !== undefined) {
+            const attempt = await this.accounts.getTurn(principal.id, stringField(body, 'attemptOf', true)!);
+            if (!attempt || attempt.chatId !== chatId || ['queued', 'running'].includes(attempt.status)) throw new Error('Choose a finished attempt from this chat.');
+            turn.attemptOf = attempt.id;
+            if (effectiveIntent === undefined) effectiveIntent = attempt.intent;
+          }
+          if (effectiveIntent !== undefined) {
+            if (!isRecord(effectiveIntent) || !['compare', 'filter', 'explain', 'inspect-exceptions', 'change-chart', 'rerun'].includes(String(effectiveIntent.action))) throw new Error('Invalid follow-up action.');
+            const artifactId = stringField(effectiveIntent, 'artifactId');
+            const messageId = stringField(effectiveIntent, 'messageId');
+            if (!artifactId && !messageId) throw new Error('Choose the answer or result for this action.');
+            if (artifactId && !chat.artifacts.some(artifact => artifact.queryId === artifactId)) throw new Error('Result not found in this chat.');
+            if (messageId && !chat.messages.some(message => message.id === messageId)) throw new Error('Message not found in this chat.');
+            turn.intent = { action: effectiveIntent.action as FollowUpIntent['action'], artifactId, messageId, text: stringField(effectiveIntent, 'text')?.slice(0, 4000) };
+          }
+          turn.messages = conversationContext(chat, latest.content, turn.intent);
+          turn.referencedArtifacts = chat.artifacts;
+
           const key = principal.id + ':' + requestId;
           const prior = this.submittedTurns.get(key);
           const claim = this.accounts.claimTurn
@@ -781,7 +856,7 @@ export class WebServer {
             sendJson(response, 202, { turnId: claim.turnId }, legacyCookie); return;
           }
           this.submittedTurns.set(key, turn.id);
-          if (!this.accounts.claimTurn) await this.accounts.updateChat(principal.id, chatId, { messages: [...chat.messages, userMessage] });
+          await this.accounts.saveTurn(principal.id, this.sessions.snapshot(turn));
         } catch (error) {
           this.sessions.discard(turn);
           sendJson(response, 400, { error: safeClientError(error, 'The question could not be saved.') }); return;
@@ -995,6 +1070,12 @@ export class WebServer {
     await fs.rm(parent === root ? candidate : parent, { recursive: true, force: true });
   }
 
+  private async refreshKnowledgeSchema(userId: string, connectionId: string, schema: DatabaseSchema): Promise<void> {
+    const knowledge = await this.accounts.getConnectionKnowledge(userId, connectionId);
+    const fingerprint = schemaFingerprint(schema);
+    if (knowledge.schemaFingerprint !== fingerprint) await this.accounts.saveConnectionKnowledge(userId, connectionId, invalidateKnowledge(knowledge, fingerprint));
+  }
+
   private async findTurn(id: string, principal: Principal): Promise<WebTurnRecord | undefined> {
     const active = this.sessions.getTurnForPrincipal(id, principal);
     if (active) return active;
@@ -1008,11 +1089,15 @@ export class WebServer {
       await this.accounts.finalizeTurn?.(principal.id, saved);
     }
     return { ...saved, principalId: principal.id, messages: [], eventBytes: 0,
-      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      createdAt: saved.createdAt ?? new Date().toISOString(), updatedAt: new Date().toISOString(),
       abortController: new AbortController(), subscribers: new Set() };
   }
 
   private async persistTerminal(turn: WebTurnRecord, status: 'complete' | 'error' | 'aborted', message?: ChatMessage, artifacts: QueryResultArtifact[] = [], error?: string): Promise<void> {
+    if (!message && turn.assistantMessageId) message = { id: turn.assistantMessageId, role: 'assistant', content: status === 'aborted' ? 'Answer stopped.' : error ?? 'The answer could not be completed.', createdAt: new Date().toISOString() };
+    if (message && turn.metrics) message.metrics ??= turn.metrics;
+    if (message) message.turn = { id: turn.id, status, question: turn.question ?? turn.messages.at(-1)?.content ?? '', attemptOf: turn.attemptOf, intent: turn.intent };
+    turn.message = message;
     const data = status === 'complete' ? { message, artifacts, artifactIds: artifacts.map(a => a.queryId) } : { message: error ?? 'Turn cancelled.' };
     const snapshot = { ...this.sessions.snapshot(turn), status, message, artifacts, error,
       events: [...turn.events, { id: turn.events.length + 1, turnId: turn.id, type: status, timestamp: new Date().toISOString(), data }] };
@@ -1041,13 +1126,31 @@ export class WebServer {
       await prepareConnectionDestination(connection, this.config.allowedDatabaseHosts);
       const provider = await this.accounts.resolveProviderKey(turn.principalId, this.config.openRouterApiKey);
       const settings = await this.accounts.getSettings(turn.principalId);
+      const knowledge = await this.accounts.getConnectionKnowledge(turn.principalId, connection.id);
+      const source: SourceSnapshot = { connectionId: connection.id, label: connection.label, kind: connection.kind, capturedAt: new Date().toISOString() };
       const result = await this.withSqliteConnection(turn.principalId, connection, local => this.service.run(turn.messages, turn.id,
-        event => this.sessions.publishAgentEvent(turn, event), turn.abortController.signal,
-        local, provider.apiKey, settings.model, settings.effortLevel), turn.abortController.signal);
+        event => {
+          if (isRecord(event.data.metrics)) turn.metrics = event.data.metrics as unknown as TurnMetrics;
+          if (event.type === 'result' && isRecord(event.data.artifact) && event.data.artifact.kind === 'query-result') {
+            const artifact = { ...event.data.artifact, messageId: turn.assistantMessageId, source, capturedAt: new Date().toISOString() } as unknown as QueryResultArtifact;
+            turn.artifacts = [...(turn.artifacts ?? []).filter(item => item.queryId !== artifact.queryId), artifact];
+            event = { ...event, data: { ...event.data, artifact } };
+          }
+          this.sessions.publishAgentEvent(turn, event);
+          if (event.type === 'result') {
+            const snapshot = structuredClone(this.sessions.snapshot(turn));
+            turn.persistence = (turn.persistence ?? Promise.resolve()).then(async () => { await this.accounts.saveTurn(turn.principalId, snapshot); });
+            // A rejected save is reconciled by the awaited chain before finalization.
+            void turn.persistence.catch(() => undefined);
+          }
+        }, turn.abortController.signal,
+        local, provider.apiKey, settings.model, settings.effortLevel, { referencedArtifacts: turn.referencedArtifacts ?? [], knowledge, source, onSchema: async schema => { await this.refreshKnowledgeSchema(turn.principalId, connection.id, schema); } }), turn.abortController.signal);
+      turn.metrics = result.metrics ?? result.message.metrics ?? turn.metrics;
+      await turn.persistence;
       if (turn.abortController.signal.aborted) throw new Error(turn.error ?? 'Turn cancelled.');
       if (turn.assistantMessageId) {
         result.message.id = turn.assistantMessageId;
-        result.artifacts = result.artifacts.map(artifact => ({ ...artifact, messageId: turn.assistantMessageId }));
+        result.artifacts = result.artifacts.map(artifact => ({ ...artifact, messageId: turn.assistantMessageId, source, capturedAt: turn.artifacts?.find(observed => observed.queryId === artifact.queryId)?.capturedAt ?? new Date().toISOString() }));
       }
       // Once the database commit begins, cancellation cannot undo that answer.
       turn.committing = true;
@@ -1056,7 +1159,10 @@ export class WebServer {
     } catch (error) {
       const cancelled = turn.abortController.signal.aborted && !turn.error;
       const message = turn.error ?? safeClientError(error, 'The answer could not be generated.');
-      try { await this.persistTerminal(turn, cancelled ? 'aborted' : 'error', undefined, [], message); }
+      try {
+        await turn.persistence?.catch(() => undefined);
+        await this.persistTerminal(turn, cancelled ? 'aborted' : 'error', undefined, turn.artifacts ?? [], message);
+      }
       catch { console.error('[dbchat:web] terminal persistence failed', { turnId: turn.id }); }
       if (cancelled) this.sessions.abort(turn);
       else this.sessions.fail(turn, message);
@@ -1064,62 +1170,6 @@ export class WebServer {
       turn.executing = false;
       clearTimeout(timeout);
     }
-  }
-
-  private parsePersistedMessages(value: unknown): ChatMessage[] {
-    if (!Array.isArray(value) || value.length > 1000) {
-      throw new Error('Chat history is too large.');
-    }
-    return value.map((message) => {
-      if (!isRecord(message)) throw new Error('Invalid chat message.');
-      const role = message.role;
-      const content = message.content;
-      if (role !== 'user' && role !== 'assistant') throw new Error('Invalid chat message role.');
-      if (typeof content !== 'string' || content.length > (role === 'assistant' ? 64 * 1024 : this.config.maxMessageChars) || (role === 'user' && !content.trim())) {
-        throw new Error('Chat message is empty or too large.');
-      }
-      if (typeof message.id !== 'string' || typeof message.createdAt !== 'string') {
-        throw new Error('Invalid chat message metadata.');
-      }
-      return {
-        id: message.id,
-        role,
-        content,
-        createdAt: message.createdAt
-      };
-    });
-  }
-
-  private parsePersistedArtifacts(value: unknown): QueryResultArtifact[] {
-    if (!Array.isArray(value) || value.length > 1000) throw new Error('Chat results are too large.');
-    return value.map((artifact) => {
-      if (!isRecord(artifact) || artifact.kind !== 'query-result' || typeof artifact.queryId !== 'string' || typeof artifact.query !== 'string') {
-        throw new Error('Invalid query result.');
-      }
-      const result = artifact.result;
-      if (!isRecord(result) || !Array.isArray(result.columns) || !result.columns.every((column) => typeof column === 'string') || !Array.isArray(result.rows) || result.rows.length > this.config.maxResultRows) {
-        throw new Error('Invalid query result data.');
-      }
-      if (!result.rows.every(isRecord) || typeof result.rowCount !== 'number' || typeof result.elapsedMs !== 'number') {
-        throw new Error('Invalid query result metadata.');
-      }
-      return {
-        kind: 'query-result',
-        queryId: artifact.queryId,
-        messageId: typeof artifact.messageId === 'string' ? artifact.messageId : undefined,
-        query: artifact.query,
-        purpose: typeof artifact.purpose === 'string' ? artifact.purpose : undefined,
-        schema: isRecord(artifact.schema) ? artifact.schema as unknown as QueryResultArtifact['schema'] : undefined,
-        result: {
-          columns: result.columns,
-          rows: result.rows,
-          rowCount: result.rowCount,
-          elapsedMs: result.elapsedMs,
-          truncated: result.truncated === true,
-          rowLimit: typeof result.rowLimit === 'number' ? result.rowLimit : undefined
-        }
-      };
-    });
   }
 
   private parseMessages(body: Record<string, unknown>): ModelChatMessage[] {

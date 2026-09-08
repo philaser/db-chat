@@ -162,7 +162,7 @@ describe('database safety policy', () => {
     const executeQuery = vi.fn(async (_query: string) => ({ columns: ['id'], rows: [{ id: 1 }], rowCount: 1, elapsedMs: 0 }));
     const schema: DatabaseSchema = { kind, label: 'test', tables: [{ name: 'items', columns: [] }] };
     const connector: DatabaseConnector = { executeQuery, introspect: async () => schema, connect: async () => {}, close() {}, setSafetyLevel() {}, getContextForPrompt: async () => '' };
-    const result = await sampleDataTool.execute({ tableName: 'items', limit: 3 }, { connector, schema } as ToolContext);
+    const result = await sampleDataTool.execute({ tableName: 'items', mode: 'rows', limit: 3 }, { connector, schema } as ToolContext);
     expect(result.ok).toBe(true);
     const query = executeQuery.mock.calls[0][0];
     if (kind === 'mongodb') expect(JSON.parse(query)).toMatchObject({ collection: 'items', method: 'find', body: { limit: 3 } });

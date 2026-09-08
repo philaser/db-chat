@@ -9,6 +9,21 @@ function mockFetch(handler: (url: URL, init: RequestInit) => unknown) {
   return vi.fn(async (url: string | URL | Request, init?: RequestInit) => new Response(JSON.stringify(await handler(new URL(String(url)), init ?? {})), { status: 200 })) as unknown as Fetch;
 }
 describe('Supabase account repository', () => {
+  it.each([false, true])('applies measured defaults only when no profile exists (existing=%s)', async (existing) => {
+    const writes: Array<Record<string, unknown>> = [];
+    const profile = { user_id: user.id, email: user.email, email_verified: true, display_name: 'Person', created_at: user.created_at, settings: { provider: 'openrouter', model: 'chosen-model', effortLevel: 'high' } };
+    const fetch = mockFetch((url, init) => {
+      if (url.pathname === '/auth/v1/token') return tokens;
+      if (url.pathname.endsWith('dbchat_profiles')) {
+        if (init.method === 'POST' || init.method === 'PATCH') { writes.push(JSON.parse(String(init.body))); return []; }
+        return existing ? [profile] : [];
+      }
+      return [];
+    });
+    await new SupabaseAccountStore({ ...options, defaultModel: 'google/gemini-2.5-flash', fetch }).login(user.email, 'password');
+    if (existing) expect(writes).toEqual([]);
+    else expect(writes[0]).toMatchObject({ settings: { model: 'google/gemini-2.5-flash', effortLevel: 'low' } });
+  });
   it('uses modern publishable and secret keys as apikey headers without treating them as JWTs', async () => {
     const seen: Array<{url: string; headers: Headers}> = [];
     const fetch = mockFetch((url, init) => { seen.push({url:url.pathname,headers:new Headers(init.headers)}); return url.pathname.endsWith('/signup') ? user : []; });
@@ -93,5 +108,40 @@ describe('Supabase account repository', () => {
     await store.claimTurn(user.id, 'turn-one', 'chat-one', 'request-one', { id: 'm1', content: 'Question', role: 'user', createdAt: '' }, 'm2');
     await store.finalizeTurn(user.id, { id: 'turn-one', events: [], status: 'complete' });
     expect(calls).toEqual([expect.objectContaining({ owner: user.id, request_id: 'request-one' }), expect.objectContaining({ owner: user.id, turn: expect.objectContaining({ status: 'complete' }) })]);
+  });  it('loads a bounded history page with only linked artifacts and compact turn metadata', async () => {
+    const calls: URL[] = [];
+    const fetch = mockFetch((url) => {
+      calls.push(url);
+      if (url.pathname.endsWith('dbchat_chats')) return [{ id: 'chat-one', user_id: user.id, title: 'History', message_count: 1000, artifact_count: 500, created_at: '', updated_at: '' }];
+      if (url.pathname.endsWith('dbchat_messages') && url.searchParams.get('select') === 'position') return [{ position: 500 }];
+      if (url.pathname.endsWith('dbchat_messages')) return [499, 498, 497].map(position => ({ position, body: { id: 'm' + position, role: position % 2 ? 'assistant' : 'user', content: String(position), createdAt: '' } }));
+      if (url.pathname.endsWith('dbchat_artifacts')) return [{ body: { queryId: 'q499', messageId: 'm499', kind: 'query-result', query: 'SELECT 1', result: { columns: ['value'], rows: [{ value: 1 }], rowCount: 1, elapsedMs: 1 } } }];
+      if (url.pathname.endsWith('dbchat_turns')) return [{ id: 'latest', chat_id: 'chat-one', assistant_message_id: 'm999', status: 'complete', question: 'Latest question', created_at: '' }];
+      return [];
+    });
+    const page = await new SupabaseAccountStore({ ...options, fetch }).getChatPage(user.id, 'chat-one', { before: 'm500', limit: 2 });
+    expect(page?.messages.map(message => message.id)).toEqual(['m498', 'm499']);
+    expect(page).toMatchObject({ messageCount: 1000, historyHasMore: true, historyCursor: 'm498', latestTurn: { id: 'latest', status: 'complete', events: [] } });
+    expect(calls.every(url => url.searchParams.get('user_id') === 'eq.' + user.id)).toBe(true);
+    const messages = calls.find(url => url.searchParams.get('position') === 'lt.500')!;
+    expect(messages.searchParams.get('limit')).toBe('3');
+    expect(calls.find(url => url.pathname.endsWith('dbchat_artifacts'))?.searchParams.get('body->>messageId')).toBe('in.("m498","m499")');
+    expect(calls.find(url => url.pathname.endsWith('dbchat_turns'))?.searchParams.get('select')).not.toContain('snapshot,');
   });
+
+  it('sends search and knowledge operations with explicit ownership', async () => {
+    const writes: { path: string; body: Record<string, unknown> }[] = [];
+    const fetch = mockFetch((url, init) => {
+      if (init.method === 'POST') writes.push({ path: url.pathname, body: JSON.parse(String(init.body)) });
+      if (url.pathname.endsWith('dbchat_search_chats')) return { chats: [], total: 0 };
+      if (url.pathname.endsWith('dbchat_connections')) return [{ id: 'connection', user_id: user.id, config: { id: 'connection', label: 'Owned', kind: 'sqlite', createdAt: '' }, status: 'ready' }];
+      return [];
+    });
+    const store = new SupabaseAccountStore({ ...options, fetch });
+    await store.searchChats(user.id, { q: 'old question', offset: 20, limit: 10, connectionId: 'connection' });
+    await store.saveConnectionKnowledge(user.id, 'connection', { version: 1, glossary: [], examples: [], updatedAt: '' });
+    expect(writes[0].body).toMatchObject({ owner: user.id, query_text: 'old question', page_offset: 20, page_limit: 10 });
+    expect(writes[1].body).toMatchObject({ user_id: user.id, connection_id: 'connection' });
+  });
+
 });

@@ -1,10 +1,15 @@
 import os from 'node:os';
 import path from 'node:path';
-import type { ConnectionConfig, DatabaseKind } from '../shared/types.js';
+import type { ConnectionConfig, DatabaseKind, EffortLevel } from '../shared/types.js';
 
 export type WebAuthMode = 'dev' | 'app';
 
-export const DEFAULT_WEB_MODEL = 'deepseek/deepseek-v4-flash-0731';
+export const DEFAULT_WEB_MODEL = 'google/gemini-2.5-flash';
+
+/** Preserve operator-selected models; this effort default applies only to new settings. */
+export function defaultEffortForModel(model: string): EffortLevel {
+  return model === DEFAULT_WEB_MODEL ? 'low' : 'medium';
+}
 
 export interface WebServerConfig {
   storageMode?: 'local' | 'supabase';

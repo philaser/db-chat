@@ -14,6 +14,11 @@ export interface WebTurnRecord {
   principalId: string;
   connectionId?: string;
   chatId?: string;
+  metrics?: import('../shared/types.js').TurnMetrics;
+  question?: string;
+  attemptOf?: string;
+  intent?: import('../shared/types.js').FollowUpIntent;
+  referencedArtifacts?: QueryResultArtifact[];
   assistantMessageId?: string;
   messages: ModelChatMessage[];
   status: WebTurnStatus;
@@ -21,6 +26,7 @@ export interface WebTurnRecord {
   eventBytes: number;
   executing?: boolean;
   committing?: boolean;
+  persistence?: Promise<void>;
   message?: ChatMessage;
   artifacts?: QueryResultArtifact[];
   error?: string;
@@ -187,6 +193,13 @@ export class WebSessionStore {
   snapshot(turn: WebTurnRecord): WebTurnSnapshot {
     return {
       id: turn.id,
+      chatId: turn.chatId,
+      metrics: turn.metrics,
+      question: turn.question,
+      attemptOf: turn.attemptOf,
+      intent: turn.intent,
+      assistantMessageId: turn.assistantMessageId,
+      createdAt: turn.createdAt,
       connectionId: turn.connectionId,
       status: turn.status,
       events: turn.events,

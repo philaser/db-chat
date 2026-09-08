@@ -19,6 +19,12 @@ export interface StreamChunk {
   reasoning?: string;
   toolCalls?: ToolCallDelta[];
   finishReason?: string;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+    costUsd?: number;
+  };
 }
 
 export interface ToolCallDelta {
@@ -129,12 +135,20 @@ export class OpenRouterClient {
   private parseChunk(chunk: Record<string, unknown>): StreamChunk {
     const choice = (chunk.choices as Array<Record<string, unknown>>)?.[0] ?? {};
     const delta = choice.delta as Record<string, unknown> | undefined;
+    const rawUsage = chunk.usage as Record<string, unknown> | undefined;
+    const number = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 
     return {
       content: delta?.content as string | undefined,
       reasoning: delta?.reasoning_content as string | undefined,
       toolCalls: delta?.tool_calls as ToolCallDelta[] | undefined,
-      finishReason: choice.finish_reason as string | undefined
+      finishReason: choice.finish_reason as string | undefined,
+      usage: rawUsage ? {
+        promptTokens: number(rawUsage.prompt_tokens),
+        completionTokens: number(rawUsage.completion_tokens),
+        totalTokens: number(rawUsage.total_tokens),
+        costUsd: number(rawUsage.cost)
+      } : undefined
     };
   }
 }
