@@ -57,6 +57,20 @@ export interface ToolContext {
   resolveArtifact?: (resultId: string) => QueryResultArtifact | undefined;
   /** Allocate a stable ID before a query result is returned to the model. */
   allocateResultId?: () => string;
+  /** Start a server-owned export without placing the exported rows in model context. */
+  requestExport?: (request: {
+    resultId?: string;
+    query?: string;
+    format: 'csv' | 'xlsx' | 'json';
+    title: string;
+  }) => Promise<{ id: string; format: 'csv' | 'xlsx' | 'json'; title: string; status: string }>;
+  /** Render validated report blocks into a downloadable server-owned artifact. */
+  requestReport?: (request: {
+    title: string;
+    blocks: Record<string, unknown>[];
+    resultIds: string[];
+    format: 'html' | 'markdown';
+  }) => Promise<{ id: string; format: 'html' | 'markdown'; title: string; status: string }>;
   emitEvent: (event: AgentEvent) => void;
 }
 

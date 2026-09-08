@@ -62,13 +62,15 @@ describe('agent execution invariants', () => {
     } };
     const configured = fixture(client);
     configured.toolRegistry.register(createReportTool());
-    const result = await runAgentLoop([], 'final-report', undefined, { ...configured, referencedArtifacts: [{
+    const result = await runAgentLoop([], 'final-report', undefined, { ...configured, requestReport: async (request) => ({ id: 'report-download', format: request.format, title: request.title, status: 'completed' }), referencedArtifacts: [{
       kind: 'query-result', queryId: 'net', query: 'SELECT 610 AS net',
       result: { columns: ['net'], rows: [{ net: 610 }], rowCount: 1, elapsedMs: 1 }
     }] });
     expect(rounds).toBe(1);
     expect(result.message.content).toContain('"value":610');
     expect(result.message.content).toContain('currency is unknown');
+    expect(result.message.content).toContain('"exportId":"report-download"');
+    expect(result.message.content.match(/"exportId":"report-download"/g)).toHaveLength(1);
     expect(result.metrics).toMatchObject({ terminalReason: 'completed', toolCallCount: 1 });
   });
 
@@ -180,6 +182,32 @@ describe('agent execution invariants', () => {
     const bypass = await runAgentLoop([], 'raw-bypass', undefined, fixture(bypassClient));
     expect(bypass.message.content).not.toContain('"type":"kpi"');
     expect(bypass.message.content).toContain('Structured output was omitted');
+  });
+
+  it('attaches an omitted verified download when the model includes only the chart fence', async () => {
+    let round = 0;
+    const chart = { chartType: 'bar', columns: ['name', 'value'], rows: [{ name: 'A', value: 1 }], nameKey: 'name', valueKeys: ['value'] };
+    const client: AgentModelClient = { async *streamChat() {
+      if (round++ === 0) {
+        yield { toolCalls: [
+          { index: 0, id: 'chart', function: { name: 'get_schema_info', arguments: '{"kind":"chart"}' } },
+          { index: 1, id: 'export', function: { name: 'get_schema_info', arguments: '{"kind":"export"}' } }
+        ] };
+        return;
+      }
+      yield { content: `Included chart.\n\n\`\`\`chart\n${JSON.stringify(chart)}\n\`\`\`` };
+    } };
+    const configured = fixture(client);
+    configured.toolRegistry = new ToolRegistry();
+    configured.toolRegistry.register({
+      definition: { type: 'function', function: { name: 'get_schema_info', description: 'fixture', parameters: {} } },
+      execute: async input => input.kind === 'chart'
+        ? { ok: true, summary: 'chart', data: chart }
+        : { ok: true, summary: 'export', data: { blocks: [{ type: 'download', exportId: 'export-1', title: 'All data', format: 'csv' }] } }
+    });
+    const result = await runAgentLoop([], 'chart-download', undefined, configured);
+    expect(result.message.content.match(/```chart/g)).toHaveLength(1);
+    expect(result.message.content.match(/"exportId":"export-1"/g)).toHaveLength(1);
   });
 
   it('cancels and removes a pending approval', async () => {

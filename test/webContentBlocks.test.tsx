@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StructuredContent, parseContentBlocks, splitContent } from '../src/web/contentBlocks.js';
 
@@ -129,6 +129,29 @@ describe('web content blocks', () => {
     expect(screen.getByLabelText('Active: true')).toHaveTextContent('true');
     expect(screen.getByLabelText('Margin: —')).toHaveTextContent('—');
     expect(screen.getByLabelText('Margin: —')).not.toHaveTextContent('%');
+  });
+
+  it('polls a safe download block and uses the authenticated export route', async () => {
+    const fetcher = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => new Response(JSON.stringify(init?.method === 'DELETE' ? { ok: true } : { export: { status: 'ready' } }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetcher);
+    const blocks = parseContentBlocks(JSON.stringify([{ type: 'download', exportId: 'export/id', title: 'Customer data', format: 'xlsx' }]));
+    render(<StructuredContent blocks={blocks!} />);
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Download' })).toHaveAttribute('href', '/api/v1/exports/export%2Fid/download'));
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/exports/export%2Fid', { credentials: 'same-origin' });
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Customer data download' }));
+    await waitFor(() => expect(screen.queryByLabelText('Download Customer data')).not.toBeInTheDocument());
+    expect(fetcher).toHaveBeenLastCalledWith('/api/v1/exports/export%2Fid', { method: 'DELETE', credentials: 'same-origin' });
+  });
+
+  it('cancels a preparing chat download and reports network failures', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ export: { status: 'running', rowCount: 12 } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockRejectedValueOnce(new Error('Network unavailable'));
+    vi.stubGlobal('fetch', fetcher);
+    render(<StructuredContent blocks={[{ type: 'download', exportId: 'job-2', title: 'Raw rows', format: 'csv' }]} />);
+    expect(await screen.findByText(/12 rows prepared/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Network unavailable');
   });
 
   it('labels bounded table and chart evidence with its visible coverage', () => {

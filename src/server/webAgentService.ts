@@ -47,6 +47,8 @@ export interface WebAgentRunContext {
   knowledge?: ConnectionKnowledge;
   source?: SourceSnapshot;
   onSchema?: (schema: DatabaseSchema) => Promise<void>;
+  requestExport?: import('./agent/types.js').ToolContext['requestExport'];
+  requestReport?: import('./agent/types.js').ToolContext['requestReport'];
 }
 
 export class WebAgentService {
@@ -67,7 +69,7 @@ export class WebAgentService {
     this.modelClient = options.modelClient;
     this.injectedConnector = options.connector;
     this.permissionManager.setSafetyLevel('safe');
-    this.permissionManager.setAllowedTools(['run_database_query', 'get_schema_info', 'sample_data', 'get_result', 'visualize_data', 'ask_clarification', 'create_report']);
+    this.permissionManager.setAllowedTools(['run_database_query', 'get_schema_info', 'sample_data', 'get_result', 'visualize_data', 'ask_clarification', 'create_report', 'export_data']);
   }
 
   async initialize(): Promise<void> {
@@ -252,6 +254,8 @@ export class WebAgentService {
         approvalManager: this.approvalManager,
         referencedArtifacts: runContext.referencedArtifacts,
         knowledge,
+        requestExport: runContext.requestExport,
+        requestReport: runContext.requestReport,
         runtime: {
           currentTimeUtc: new Date().toISOString(),
           timezone: 'unknown; the user or database must establish it when material',

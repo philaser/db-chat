@@ -2,6 +2,14 @@ import { DEFAULT_PERSONAL_PROVIDER_MODELS, PERSONAL_PROVIDER_MODELS, validatePer
 import { conversationContext, invalidateKnowledge, parseKnowledge, schemaFingerprint, schemaSuggestions } from './conversationContext.js';
 import { SupabaseSqliteStorage, type SqliteObjectStorage } from './supabaseSqliteStorage.js';
 import { prepareConnectionDestination } from './connectionPolicy.js';
+import { createConfiguredConnector } from './connectorFactory.js';
+import { classifyQuery } from './connectors/QueryValidator.js';
+import { parseElasticsearchQuery } from './connectors/elasticsearchValidation.js';
+import { ExportJobs, ExportError, DEFAULT_EXPORT_LIMITS, EXPORT_MIME, type DataFormat, type ExportSnapshot } from './exports/exportJobs.js';
+import { writeDataExport } from './exports/dataExport.js';
+import { buildReportDownload, type ReportRequest } from './exports/reportExport.js';
+import { createReadStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import http, { type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -188,6 +196,7 @@ export interface WebServerOptions {
   accounts?: AccountRepository;
   sqliteStorage?: SqliteObjectStorage;
   connector?: import('../shared/types.js').DatabaseConnector;
+  exportConnectorFactory?: typeof createConfiguredConnector;
 }
 
 interface UploadedSqliteFile {
@@ -214,6 +223,8 @@ export class WebServer {
   private readonly requestBudgets = new Map<string, { count: number; resetAt: number }>();
   private readonly loginAttempts = new Map<string, LoginAttemptWindow>();
   private server: Server | null = null;
+  readonly exports: ExportJobs;
+  private readonly exportConnectorFactory: typeof createConfiguredConnector;
 
   constructor(
     readonly config: WebServerConfig,
@@ -235,6 +246,11 @@ export class WebServer {
       ? new SupabaseSqliteStorage({ url: config.supabase!.url, key: config.supabase!.serviceRoleKey, maxBytes: config.maxSqliteUploadBytes ?? 50 * 1024 * 1024 }) : undefined);
     this.sessions = new WebSessionStore(config.sessionTtlMs);
     this.service = new WebAgentService(config, options);
+    this.exportConnectorFactory = options.exportConnectorFactory ?? createConfiguredConnector;
+    this.exports = new ExportJobs({ ...DEFAULT_EXPORT_LIMITS,
+      maxRows: config.exportMaxRows ?? DEFAULT_EXPORT_LIMITS.maxRows,
+      maxBytes: config.exportMaxBytes ?? DEFAULT_EXPORT_LIMITS.maxBytes,
+      timeoutMs: config.exportTimeoutMs ?? DEFAULT_EXPORT_LIMITS.timeoutMs });
   }
 
   async initialize(): Promise<void> {
@@ -267,6 +283,7 @@ export class WebServer {
   }
 
   async close(): Promise<void> {
+    await this.exports.close();
     this.service.close();
     // Uploaded SQLite files are durable workspace assets. They are removed only
     // when the owning connection is deleted, not when the server restarts.
@@ -454,6 +471,60 @@ export class WebServer {
     const legacyCookie = legacySession.isNew
       ? LEGACY_COOKIE_NAME + '=' + encodeURIComponent(legacySession.id) + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=1800'
       : undefined;
+
+    const exportMatch = route.match(/^\/exports\/([a-f0-9-]+)(?:\/(download|cancel))?$/);
+    if (exportMatch) {
+      const id = exportMatch[1];
+      const job = this.exports.get(principal.id, id);
+      const chatId = this.exports.chatId(principal.id, id);
+      if (!job || !chatId || !await this.accounts.getChat(principal.id, chatId)) {
+        sendJson(response, 404, { error: 'Download expired or unavailable. Generate it again from the chat.' }); return;
+      }
+      if (request.method === 'GET' && exportMatch[2] === 'download') {
+        const filename = this.exports.file(principal.id, id);
+        if (!filename) { sendJson(response, 409, { error: 'This download is not ready.', export: job }); return; }
+        const downloadName = job.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'db-chat';
+        response.writeHead(200, { 'Content-Type': EXPORT_MIME[job.format], 'Content-Disposition': `attachment; filename="${downloadName}-${id.slice(0, 8)}.${job.format === 'markdown' ? 'md' : job.format}"`, 'Content-Length': String(job.byteCount), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:" });
+        await pipeline(createReadStream(filename), response); return;
+      }
+      if (request.method === 'GET' && !exportMatch[2]) { sendJson(response, 200, { export: job }); return; }
+      if (request.method === 'POST' && exportMatch[2] === 'cancel') { sendJson(response, 200, { export: await this.exports.cancel(principal.id, id) }); return; }
+      if (request.method === 'DELETE' && !exportMatch[2]) { await this.exports.remove(principal.id, id); sendJson(response, 200, { ok: true }); return; }
+      sendJson(response, 405, { error: 'Method not allowed.' }); return;
+    }
+
+    const createExportMatch = route.match(/^\/chats\/([^/]+)\/exports$/);
+    if (request.method === 'GET' && createExportMatch) {
+      if (!await this.accounts.getChat(principal.id, createExportMatch[1])) { sendJson(response, 404, { error: 'Chat not found.' }); return; }
+      sendJson(response, 200, { exports: this.exports.list(principal.id, createExportMatch[1]) }); return;
+    }
+    if (request.method === 'POST' && createExportMatch) {
+      const chat = await this.accounts.getChat(principal.id, createExportMatch[1]);
+      if (!chat) { sendJson(response, 404, { error: 'Chat not found.' }); return; }
+      try {
+        const body = this.requireRecord(await readJson(request, 64 * 1024));
+        const currentTurn = chat.latestTurn ? await this.findTurn(chat.latestTurn.id, principal) : undefined;
+        const liveArtifacts = currentTurn?.chatId === chat.id ? currentTurn.artifacts ?? [] : [];
+        const artifact = [...chat.artifacts, ...liveArtifacts].find(item => item.queryId === body.resultId);
+        if (!artifact) { sendJson(response, 404, { error: 'Result not found in this chat.' }); return; }
+        if (!['csv', 'xlsx', 'json'].includes(String(body.format)) || !['visible', 'all'].includes(String(body.scope))) throw new ExportError('Choose an export format and scope.');
+        const format = body.format as DataFormat;
+        let job: ExportSnapshot;
+        if (body.scope === 'visible') {
+          const columns = body.columns === undefined ? artifact.result.columns : body.columns;
+          const indices = body.rowIndices === undefined ? artifact.result.rows.map((_row, index) => index) : body.rowIndices;
+          if (!Array.isArray(columns) || !columns.length || columns.some(column => typeof column !== 'string' || !artifact.result.columns.includes(column)) || new Set(columns).size !== columns.length) throw new ExportError('Choose existing, distinct result columns.');
+          if (!Array.isArray(indices) || indices.length > artifact.result.rows.length || indices.some(index => !Number.isInteger(index) || index < 0 || index >= artifact.result.rows.length) || new Set(indices).size !== indices.length) throw new ExportError('Choose existing result rows.');
+          const result = { ...artifact.result, columns: columns as string[], rows: indices.map(index => Object.fromEntries((columns as string[]).map(column => [column, artifact.result.rows[index][column] ?? null]))), rowCount: indices.length };
+          job = this.exports.start(principal.id, chat.id, { title: artifact.purpose ?? 'Visible results', format, scope: 'visible' }, context => writeDataExport(format, (async function* () { yield result; })(), context));
+        } else {
+          if (body.columns !== undefined || body.rowIndices !== undefined) throw new ExportError('All matching results reruns the saved query; local table filters apply only to visible-row exports.');
+          job = await this.startQueryExport(principal, chat.id, chat.connectionId, artifact.query, format, artifact.purpose ?? 'All matching results', artifact);
+        }
+        sendJson(response, 202, { export: job });
+      } catch (error) { sendJson(response, 400, { error: error instanceof ExportError ? error.message : 'The export request could not be created.' }); }
+      return;
+    }
 
     if (request.method === 'GET' && route === '/bootstrap') {
       const bootstrap = await this.buildBootstrap(principal);
@@ -1083,6 +1154,47 @@ export class WebServer {
     return await this.accounts.getConnectionConfig(principal.id, id);
   }
 
+  private async startQueryExport(principal: Principal, chatId: string, connectionId: string | undefined, query: string, format: DataFormat, title: string, artifact?: QueryResultArtifact): Promise<ExportSnapshot> {
+    if (!connectionId || (artifact?.source && artifact.source.connectionId !== connectionId)) throw new ExportError('The original result connection is unavailable.');
+    if (query.length > 100_000 || classifyQuery(query) !== 'read') throw new ExportError('Export requires one read-only query.');
+    const connection = await this.connectionConfigForPrincipal(principal, connectionId);
+    if (!connection) throw new ExportError('The original database connection is unavailable.');
+    if (connection.kind === 'elasticsearch') {
+      const parsed = parseElasticsearchQuery(query);
+      if (!('operation' in parsed) && (parsed.body.aggs || parsed.body.aggregations)) throw new ExportError('For Elasticsearch summaries, export the visible data or ask for the underlying matching documents. Full downloads require a document search.');
+    }
+    return this.exports.start(principal.id, chatId, { title, format, scope: 'all' }, async context => {
+      // Resolve credentials and pin the destination again for every separate export connection.
+      const current = await this.connectionConfigForPrincipal(principal, connectionId);
+      if (!current) throw new ExportError('The original database connection is unavailable.');
+      await prepareConnectionDestination(current, this.config.allowedDatabaseHosts);
+      context.signal.throwIfAborted();
+      await this.withSqliteConnection(principal.id, current, async local => {
+        const connector = this.exportConnectorFactory(local.kind);
+        try {
+          connector.setSafetyLevel('safe');
+          await connector.connect(local);
+          context.signal.throwIfAborted();
+          if (!connector.exportQuery) throw new ExportError('Full exports are unavailable for this connection type.');
+          await writeDataExport(format, connector.exportQuery(query, { signal: context.signal, batchSize: 500 }), context);
+        } finally { connector.close(); }
+      }, context.signal);
+    });
+  }
+
+  private startReportExport(principal: Principal, chatId: string, request: ReportRequest, artifacts: QueryResultArtifact[]): ExportSnapshot {
+    const owned = request.resultIds.map(id => artifacts.find(artifact => artifact.queryId === id));
+    if (!owned.length || owned.some(artifact => !artifact)) throw new ExportError('Report evidence is unavailable in this chat.');
+    return this.exports.start(principal.id, chatId, { title: request.title, format: request.format, scope: 'report' }, async context => {
+      context.signal.throwIfAborted();
+      const body = buildReportDownload(request, owned as QueryResultArtifact[]);
+      const bytes = Buffer.byteLength(body);
+      if (bytes > context.limits.maxBytes) throw new ExportError('The report exceeds the download size limit. Use fewer evidence tables.');
+      await fs.writeFile(context.filename, body, { mode: 0o600, flag: 'wx', signal: context.signal });
+      context.progress(owned.reduce((sum, artifact) => sum + artifact!.result.rows.length, 0), bytes);
+    });
+  }
+
   private resolveSqliteUpload(principal: Principal, uploadId: string): Partial<ConnectionConfig> {
     const upload = this.sqliteUploads.get(uploadId);
     if (!upload || upload.principalId !== principal.id) {
@@ -1190,7 +1302,21 @@ export class WebServer {
             void turn.persistence.catch(() => undefined);
           }
         }, turn.abortController.signal,
-        local, provider.apiKey, settings.model, settings.effortLevel, { referencedArtifacts: turn.referencedArtifacts ?? [], knowledge, source, onSchema: async schema => { await this.refreshKnowledgeSchema(turn.principalId, connection.id, schema); } }, settings.provider), turn.abortController.signal);
+        local, provider.apiKey, settings.model, settings.effortLevel, { referencedArtifacts: turn.referencedArtifacts ?? [], knowledge, source,
+          requestExport: turn.chatId ? async request => {
+            turn.abortController.signal.throwIfAborted();
+            const artifacts = [...(turn.artifacts ?? []), ...(turn.referencedArtifacts ?? [])];
+            const artifact = request.resultId ? artifacts.find(item => item.queryId === request.resultId) : undefined;
+            if (request.resultId && !artifact) throw new ExportError('Result not found in this chat.');
+            const job = await this.startQueryExport(principal, turn.chatId!, connection.id, artifact?.query ?? request.query ?? '', request.format, request.title, artifact);
+            return { ...job, format: request.format };
+          } : undefined,
+          requestReport: turn.chatId ? async request => {
+            turn.abortController.signal.throwIfAborted();
+            const job = this.startReportExport(principal, turn.chatId!, request, [...(turn.artifacts ?? []), ...(turn.referencedArtifacts ?? [])]);
+            return { ...job, format: request.format };
+          } : undefined,
+          onSchema: async schema => { await this.refreshKnowledgeSchema(turn.principalId, connection.id, schema); } }, settings.provider), turn.abortController.signal);
       turn.metrics = result.metrics ?? result.message.metrics ?? turn.metrics;
       await turn.persistence;
       if (turn.abortController.signal.aborted) throw new Error(turn.error ?? 'Turn cancelled.');

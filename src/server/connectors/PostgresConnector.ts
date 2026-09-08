@@ -1,5 +1,5 @@
 import { boundResult, resultLimit } from './resultLimits.js';
-import { QueryValidator, type SafetyLevel } from './QueryValidator.js';
+import { classifyQuery, QueryValidator, type SafetyLevel } from './QueryValidator.js';
 import type {
   ConnectionConfig,
   DatabaseConnector,
@@ -182,6 +182,34 @@ export class PostgresConnector implements DatabaseConnector {
     }, this.maxRows);
   }
 
+  async *exportQuery(query: string, options?: { signal?: AbortSignal; batchSize?: number }): AsyncIterable<QueryResult> {
+    if (classifyQuery(query) !== 'read') throw new Error('Exports require one explicit read-only query.');
+    const client = this.requireClient();
+    const signal = options?.signal;
+    const batchSize = exportBatchSize(options?.batchSize);
+    signal?.throwIfAborted();
+    const cursor = `dbchat_export_${Date.now().toString(36)}`;
+    const started = performance.now();
+    let began = false;
+    try {
+      await queryWithSignal(client, 'BEGIN READ ONLY', signal, () => this.clearAndClose(client));
+      began = true;
+      await queryWithSignal(client, `DECLARE ${cursor} NO SCROLL CURSOR FOR ${query}`, signal, () => this.clearAndClose(client));
+      for (;;) {
+        const result = await queryWithSignal(client, `FETCH FORWARD ${batchSize} FROM ${cursor}`, signal, () => this.clearAndClose(client));
+        const rows = result.rows as Record<string, unknown>[];
+        const columns = result.fields.map(field => field.name);
+        if (rows.length === 0) {
+          if (result.fields.length) yield { columns, rows: [], rowCount: 0, elapsedMs: Math.round(performance.now() - started) };
+          break;
+        }
+        yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
+      }
+    } finally {
+      if (began && this.client === client) await client.query('ROLLBACK').catch(() => undefined);
+    }
+  }
+
   async getContextForPrompt(): Promise<string> {
     const schema = await this.introspect();
     if (schema.tables.length === 0) {
@@ -259,3 +287,7 @@ function queryWithSignal(client: PostgresClient, sql: string, signal: AbortSigna
 }
 
 function quoteIdentifier(value: string): string { return '"' + value.replaceAll('"', '""') + '"'; }
+function exportBatchSize(value = 500): number {
+  if (!Number.isFinite(value) || value < 1) throw new Error('Export batch size must be a positive finite number.');
+  return Math.min(10_000, Math.floor(value));
+}

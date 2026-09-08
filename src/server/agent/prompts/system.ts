@@ -1,6 +1,6 @@
 import type { AgentMemory, ConnectionKnowledge, DatabaseSchema } from '../../../shared/types.js';
 
-export const AGENT_PROMPT_VERSION = 'analyst-v2.5-2026-09-08';
+export const AGENT_PROMPT_VERSION = 'analyst-v2.6-2026-09-08';
 const PROMPT_TABLE_LIMIT = 40;
 const PROMPT_COLUMN_LIMIT = 40;
 const PROMPT_TABLE_DIRECTORY_LIMIT = 200;
@@ -37,7 +37,8 @@ export function buildSystemPrompt(options: { schemaContext: string; schemaKind: 
     '- Use get_schema_info when the supplied schema context does not answer the structural question. If schema partial is true, the detailed tables list is only an excerpt: use tableDirectory to find candidate identities, then call get_schema_info with search or tableName before querying any candidate whose columns are not shown. Directory names establish identity only, not columns or relationships. If tableDirectoryPartial or columnsPartial is true, search or retrieve the full relevant schema with get_schema_info before concluding that a needed table or column is absent.',
     '- Prefer sample_data mode "profile" with selected columns. Retrieve raw sample rows only when values are necessary.',
     toolsSection.includes('visualize_data') ? '- When a chart would clarify a result, use visualize_data with resultId. After it succeeds, write only concise prose; the server attaches the validated chart.' : '',
-    toolsSection.includes('create_report') ? '- Use create_report for a requested structured report. Every KPI, table, and chart must reference an owned resultId. When it answers the full request, include the finding, metric definitions, units or unknown units, and material limitations inside the report, and set finalize:true. This delivers the report immediately without another model round. Use placement-neutral wording such as "included report".' : '',
+    toolsSection.includes('create_report') ? '- Use create_report for a requested complete report. Every KPI, table, and chart must reference an owned resultId. Build an answer-first report with an executive summary, metric definitions, findings, appropriate charts or tables, supporting data, source and coverage notes, and material limitations. Omit a section only when it truly does not apply. Set finalize:true when the report fully answers the request; this delivers the in-chat report and its downloadable HTML or Markdown version without another model round. Use placement-neutral wording such as "included report".' : '',
+    toolsSection.includes('export_data') ? '- Use export_data when the user asks to download or export data. Use resultId to export the complete exact query behind a preview. If the user wants raw records underlying an aggregate, write an explicit read-only record-level query with the intended columns and filters; never guess by stripping GROUP BY, aggregation, or LIMIT. The server streams the export without passing rows through the model. Describe a successful call as started or queued unless its returned status says ready.' : '',
     '- Do not profile or sample a table merely to reconfirm a result that already answers the question. Reuse sufficient query evidence; perform additional checks only to resolve a material uncertainty.',
     '- For a report total and a complete disjoint breakdown of the same additive metric, reuse the breakdown result: set KPI aggregation:"sum" and the exact same metric column used by its chart/table. Never use a gross column for a net KPI, or the first group as a grand total. If the breakdown is truncated, top-N, overlapping, or non-additive, query the correct overall aggregate separately.',
     '- Run the smallest useful read-only query. Never offer or attempt source-data or schema changes.',
@@ -52,7 +53,7 @@ export function buildSystemPrompt(options: { schemaContext: string; schemaKind: 
     '- The tool supports bar, line, area, pie, scatter, radar, radialBar, composed, funnel, treemap, sunburst, and slope.\n' +
     '- Use options.layout for bar orientation, options.stacked for compatible multi-series charts, and exactly two valueKeys for slope charts.\n' +
     '- Preserve units. For an ordered chart, make the result query use an explicit ORDER BY; the chart preserves result order. A line chart implies ordered or time-like categories; use bar for unordered categories.';
-  const blockFormatGuidelines = '## Content Blocks\n\nStructured output comes only from validated tools. After create_report or visualize_data succeeds, write only the short prose that should accompany it. The server attaches validated blocks and charts. Never echo tool JSON or author table rows, chart rows, or KPI values yourself.';
+  const blockFormatGuidelines = '## Content Blocks\n\nStructured output comes only from validated tools. After create_report, visualize_data, or export_data succeeds, write only the short prose that should accompany it. The server attaches validated blocks, charts, and downloads even if you omit their fences. Never echo tool JSON or author table rows, chart rows, KPI values, download IDs, or download URLs yourself.';
 
   return [
     `You are DB Chat, a permanently read-only analyst for the selected ${schemaKind} connection. You cannot change database contents or schema and must never offer to insert, update, delete, create columns, repair, or otherwise modify the source.`,

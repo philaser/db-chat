@@ -118,6 +118,21 @@ try {
   assert.match(events.columns.find(column => column.name === 'amount').type, /number/);
   assert.equal(schema.tables.find(table => table.name === 'empty_collection').columns.length, 0);
 
+  const exportAdmin = new MongoClient(rootUri);
+  await exportAdmin.connect();
+  await exportAdmin.db(database).collection('export_rows').insertMany(Array.from({ length: 1205 }, (_, index) => ({ seq: index + 1 })));
+  await exportAdmin.close();
+
+  const exportQuery = JSON.stringify({ collection: 'export_rows', method: 'find', body: { filter: {}, options: { sort: { seq: 1 } } } });
+  const exported = [];
+  for await (const batch of connector.exportQuery(exportQuery)) exported.push(...batch.rows);
+  assert.equal(exported.length, 1205);
+  assert.equal(exported.at(-1).seq, 1205);
+  const limited = [];
+  for await (const batch of connector.exportQuery(JSON.stringify({ collection: 'export_rows', method: 'find', body: { filter: {}, limit: 1005, options: { sort: { seq: 1 } } } }))) limited.push(...batch.rows);
+  assert.equal(limited.length, 1005);
+  await assert.rejects(async () => { for await (const _batch of connector.exportQuery(JSON.stringify({ collection: 'export_rows', method: 'deleteOne', filter: {} }))) {} }, /read-only/);
+
   const aggregate = await connector.executeQuery(JSON.stringify({ collection: 'events', method: 'aggregate', body: { pipeline: [
     { $match: { seq: { $lte: 3 } } },
     { $group: { _id: '$category', total: { $sum: { $cond: [{ $isNumber: '$amount' }, '$amount', 0] } }, nullCount: { $sum: { $cond: [{ $eq: [{ $ifNull: ['$optional', null] }, null] }, 1, 0] } }, firstDate: { $min: '$happenedAt' } } },
@@ -192,6 +207,7 @@ try {
     truncated: bounded.truncated,
     reconnect: 'passed',
     cancellation: 'passed',
+    fullStreamingExport: exported.length,
     authFailure: 'passed',
     readRoleWriteDenial: 'passed',
     webAgentServiceTurn: 'passed'

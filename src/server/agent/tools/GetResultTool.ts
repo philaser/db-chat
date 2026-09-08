@@ -39,7 +39,7 @@ export const getResultTool: Tool = {
     const loadedRowCount = artifact.result.rows.length;
     return {
       ok: true,
-      summary: `Retrieved ${rows.length} of ${loadedRowCount} loaded row(s) from result ${resultId}.`,
+      summary: `Retrieved ${rows.length} of ${loadedRowCount} loaded row(s) from result ${resultId}${artifact.result.truncationReason === 'byte-limit' ? `; the saved preview stopped at the ${artifact.result.byteLimit}-byte limit.` : artifact.result.truncated ? `; the saved preview stopped at the ${artifact.result.rowLimit}-row limit.` : '.'}`,
       data: {
         resultId,
         columns: requested,
@@ -51,6 +51,8 @@ export const getResultTool: Tool = {
         hasMore: offset + rows.length < loadedRowCount || artifact.result.truncated === true,
         truncated: artifact.result.truncated ?? false,
         rowLimit: artifact.result.rowLimit,
+        byteLimit: artifact.result.byteLimit,
+        truncationReason: artifact.result.truncationReason,
         source: artifact.source,
         capturedAt: artifact.capturedAt
       }

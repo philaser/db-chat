@@ -1155,7 +1155,7 @@ function NoConnectionState({ onNavigate }: { onNavigate: (path: string) => void 
       <div className="empty-emblem"><Database size={22} /></div>
       <p className="overline">NO CONNECTION</p>
       <h1>Add a connection.</h1>
-      <p>Add a connection before asking a question. Queries are read-only and bounded.</p>
+      <p>Connect your database to start asking questions. DB Chat won’t modify your data.</p>
       <Button variant="primary" onClick={() => onNavigate('/settings/connections/new')}>Add your first connection <ArrowRight size={16} /></Button>
       <span className="safe-note"><ShieldCheck size={14} /> Credentials are encrypted and are not shown after saving.</span>
     </section>
@@ -1237,6 +1237,7 @@ function EntryStage({
 }
 
 type InspectorTab = 'results' | 'query' | 'schema';
+type DataExportState = { id: string; title?: string; format: 'csv' | 'xlsx' | 'json' | 'html' | 'markdown'; status: 'queued' | 'running' | 'ready' | 'error' | 'cancelled'; rowCount?: number; byteCount?: number; expiresAt?: string; error?: string };
 
 const DEFAULT_INSPECTOR_WIDTH = 400;
 const MIN_INSPECTOR_WIDTH = 360;
@@ -1257,15 +1258,19 @@ export { readableColumnLabel } from './formatting.js';
 
 export function DataInspector({
   artifact,
+  chatId = '',
   connectionLabel,
   connectionId,
+  onAskUnderlyingRecords,
   onClose,
   inspectorWidth,
   onInspectorWidthChange
 }: {
   artifact: QueryResultArtifact;
+  chatId?: string;
   connectionLabel: string;
   connectionId: string;
+  onAskUnderlyingRecords?: (question: string) => void;
   onClose: () => void;
   inspectorWidth: number;
   onInspectorWidthChange: (width: number) => void;
@@ -1285,6 +1290,10 @@ export function DataInspector({
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
   const [hiddenColumns, setHiddenColumns] = useState<string[]>([]);
   const [columnsOpen, setColumnsOpen] = useState(false);
+  const [exportScope, setExportScope] = useState<'visible' | 'all'>('visible');
+  const [exportFormat, setExportFormat] = useState<'csv' | 'xlsx' | 'json'>('csv');
+  const [dataExport, setDataExport] = useState<DataExportState | null>(null);
+  const [recentExports, setRecentExports] = useState<DataExportState[]>([]);
   const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const inspectorRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -1293,17 +1302,20 @@ export function DataInspector({
     return () => { if (origin?.isConnected) origin.focus(); };
   }, []);
   const result = artifact.result;
+  const aggregateResult = /\bgroup\s+by\b|\b(?:count|sum|avg|min|max)\s*\(/i.test(artifact.query);
   const visibleColumns = result.columns.filter((column) => !hiddenColumns.includes(column));
-  const visibleRows = useMemo(() => {
+  const visibleEntries = useMemo(() => {
     const needle = resultSearch.trim().toLowerCase();
-    const filtered = needle ? result.rows.filter((row) => visibleColumns.some((column) => formatValue(row[column]).toLowerCase().includes(needle))) : [...result.rows];
+    const entries = result.rows.map((row, index) => ({ row, index }));
+    const filtered = needle ? entries.filter(({ row }) => visibleColumns.some((column) => formatValue(row[column]).toLowerCase().includes(needle))) : entries;
     if (!sortColumn) return filtered;
     return filtered.sort((left, right) => {
-      const a = left[sortColumn]; const b = right[sortColumn];
+      const a = left.row[sortColumn]; const b = right.row[sortColumn];
       const order = typeof a === 'number' && typeof b === 'number' ? a - b : String(a ?? '').localeCompare(String(b ?? ''), undefined, { numeric: true });
       return sortDirection === 'asc' ? order : -order;
     });
   }, [result.rows, resultSearch, sortColumn, sortDirection, hiddenColumns]);
+  const visibleRows = visibleEntries.map(({ row }) => row);
   const visibleResult: QueryResult = { ...result, columns: visibleColumns, rows: visibleRows, rowCount: visibleRows.length };
   const tabs: Array<{ id: InspectorTab; label: string }> = [
     { id: 'results', label: 'Results' },
@@ -1332,7 +1344,25 @@ export function DataInspector({
     setSortDirection('asc');
     setHiddenColumns([]);
     setColumnsOpen(false);
+    setDataExport(null);
   }, [artifact.queryId, artifact.schema, connectionId]);
+
+  useEffect(() => {
+    if (!chatId) return;
+    let disposed = false;
+    void api<{ exports: DataExportState[] }>(`/api/v1/chats/${encodeURIComponent(chatId)}/exports`).then((payload) => {
+      if (disposed || !Array.isArray(payload.exports)) return;
+      setRecentExports(payload.exports);
+      const active = payload.exports.find((item) => item.status === 'queued' || item.status === 'running');
+      if (active) setDataExport(active);
+    }).catch(() => undefined);
+    return () => { disposed = true; };
+  }, [chatId, artifact.queryId]);
+
+  useEffect(() => {
+    if (!dataExport?.id) return;
+    setRecentExports((current) => [dataExport, ...current.filter((item) => item.id !== dataExport.id)].slice(0, 5));
+  }, [dataExport]);
 
   useEffect(() => {
     if (tab !== 'schema' || artifact.schema || schema) return;
@@ -1373,13 +1403,34 @@ export function DataInspector({
     if (label === 'query') setTab('query');
   };
 
-  const download = () => {
-    const url = URL.createObjectURL(new Blob([serializeCsv(visibleResult)], { type: 'text/csv;charset=utf-8' }));
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = artifact.queryId + '.csv';
-    anchor.click();
-    URL.revokeObjectURL(url);
+  useEffect(() => {
+    if (!dataExport?.id || !['queued', 'running'].includes(dataExport.status)) return;
+    const timer = window.setTimeout(() => void api<{ export: typeof dataExport }>(`/api/v1/exports/${encodeURIComponent(dataExport.id)}`).then((payload) => setDataExport(payload.export)).catch((reason) => setDataExport((current) => current ? { ...current, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be generated.' } : current)), 1200);
+    return () => window.clearTimeout(timer);
+  }, [dataExport]);
+
+  const createExport = async () => {
+    setDataExport({ id: '', format: exportFormat, status: 'queued' });
+    try {
+      const payload = await api<{ export: DataExportState }>(`/api/v1/chats/${encodeURIComponent(chatId)}/exports`, { method: 'POST', body: JSON.stringify({ resultId: artifact.queryId, format: exportFormat, scope: exportScope, ...(exportScope === 'visible' ? { columns: visibleColumns, rowIndices: visibleEntries.map(({ index }) => index) } : {}) }) });
+      setDataExport(payload.export);
+    } catch (reason) {
+      setDataExport({ id: '', format: exportFormat, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be started.' });
+    }
+  };
+  const cancelExport = async () => {
+    if (!dataExport?.id) return;
+    try { const payload = await api<{ export: DataExportState }>(`/api/v1/exports/${encodeURIComponent(dataExport.id)}/cancel`, { method: 'POST' }); setDataExport(payload.export); }
+    catch (reason) { setDataExport((current) => current ? { ...current, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be cancelled.' } : current); }
+  };
+  const clearExport = async () => {
+    if (!dataExport?.id) { setDataExport(null); return; }
+    try { await api<{ ok: true }>(`/api/v1/exports/${encodeURIComponent(dataExport.id)}`, { method: 'DELETE' }); setRecentExports((current) => current.filter((item) => item.id !== dataExport.id)); setDataExport(null); }
+    catch (reason) { setDataExport((current) => current ? { ...current, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be removed.' } : current); }
+  };
+  const removeRecentExport = async (item: DataExportState) => {
+    try { await api<{ ok: true }>(`/api/v1/exports/${encodeURIComponent(item.id)}`, { method: 'DELETE' }); setRecentExports((current) => current.filter((entry) => entry.id !== item.id)); }
+    catch (reason) { setDataExport({ ...item, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be removed.' }); }
   };
 
   const moveTab = (event: KeyboardEvent<HTMLButtonElement>, current: InspectorTab) => {
@@ -1440,7 +1491,7 @@ export function DataInspector({
   };
 
   return (
-    <aside ref={inspectorRef} id="data-inspector-panel" className={'data-inspector' + (expanded ? ' inspector-expanded' : '')} aria-label="Data inspector" onKeyDown={(event) => {
+    <aside ref={inspectorRef} id="data-inspector-panel" className={'data-inspector' + (tab === 'results' ? ' inspector-results-active' : '') + (expanded ? ' inspector-expanded' : '')} aria-label="Data inspector" onKeyDown={(event) => {
       if (event.key === 'Escape') { event.stopPropagation(); onClose(); }
       if (event.key === 'Tab' && window.innerWidth <= 760) {
         const controls = Array.from(inspectorRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex="0"], input, textarea') ?? []).filter((element) => element.getClientRects().length > 0);
@@ -1503,7 +1554,7 @@ export function DataInspector({
       <div className="inspector-body">
         {tab === 'results' && (
           <div id="inspector-panel-results" role="tabpanel" aria-labelledby="inspector-tab-results" className="inspector-panel">
-            {result.truncated && <p className="result-limit-note" role="status">Showing the first {result.rows.length} rows. This result is limited; narrow your question for a complete subset. Copy and CSV include these rows only.</p>}
+            {result.truncated && <p className="result-limit-note" role="status">{result.truncationReason === 'byte-limit' ? `Showing ${result.rows.length} rows because large cell values reached the preview size limit. Hide or request fewer columns for a smaller result, or use All matching rows to export the original query.` : `Showing the first ${result.rows.length} rows. The preview is limited; narrow your question for a complete subset or use All matching rows to export the original query with its original LIMIT.`}</p>}
             <div className="result-controls" aria-label="Result controls">
               <label className="result-search"><Search size={15} aria-hidden="true" /><span className="sr-only">Filter loaded rows</span><input value={resultSearch} onChange={(event) => setResultSearch(event.target.value)} placeholder="Filter loaded rows" /></label>
               <div className="result-column-control">
@@ -1600,15 +1651,27 @@ export function DataInspector({
           </div>
         )}
       </div>
-      <div className="inspector-footer">
+      <div className={'inspector-footer' + (tab === 'results' ? ' inspector-footer-results' : '')}>
         {tab === 'results' && (
           <>
             <button type="button" className="inspector-footer-action" onClick={() => void copy(serializeTsv(visibleResult), 'result')} disabled={visibleRows.length === 0}>
               <Clipboard size={16} aria-hidden="true" /> {copied ? 'Copied' : 'Copy'}
             </button>
-            <button type="button" className="inspector-footer-action" onClick={download} disabled={visibleRows.length === 0} aria-label="Export CSV">
-              <Download size={16} aria-hidden="true" /> Export visible rows
-            </button>
+            <div className="inspector-export">
+              <label>Rows<select aria-label="Export rows" value={exportScope} onChange={(event) => setExportScope(event.target.value as 'visible' | 'all')}><option value="visible">Visible rows</option><option value="all">All matching rows</option></select></label>
+              <label>Format<select aria-label="Export format" value={exportFormat} onChange={(event) => setExportFormat(event.target.value as 'csv' | 'xlsx' | 'json')}><option value="csv">CSV</option><option value="xlsx">Excel</option><option value="json">JSON</option></select></label>
+              <button type="button" className="inspector-footer-action" onClick={() => void createExport()} disabled={!chatId || (exportScope === 'visible' && visibleRows.length === 0) || dataExport?.status === 'queued' || dataExport?.status === 'running'}><Download size={16} aria-hidden="true" /> Export</button>
+            </div>
+            {exportScope === 'all' && <p className="inspector-export-note">Runs the original read-only query again. Values may have changed since this preview.</p>}
+            {aggregateResult && onAskUnderlyingRecords && <button type="button" className="inspector-underlying-action" onClick={() => onAskUnderlyingRecords('Show the underlying row-level records for this result, using the same definitions and filters.')}>Ask for underlying records</button>}
+            {dataExport && <div className="inspector-export-status" role="status">
+              {(dataExport.status === 'queued' || dataExport.status === 'running') && <><span>{dataExport.status === 'queued' ? 'Export queued…' : `Generating export${typeof dataExport.rowCount === 'number' ? ` · ${dataExport.rowCount.toLocaleString()} rows prepared` : '…'}`}</span>{dataExport.id && <button type="button" onClick={() => void cancelExport()}>Cancel</button>}</>}
+              {dataExport.status === 'ready' && <><span>{typeof dataExport.rowCount === 'number' ? `${dataExport.rowCount.toLocaleString()} rows` : 'Export ready'}{dataExport.expiresAt ? ` · Expires ${new Date(dataExport.expiresAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}` : ''}</span><a href={`/api/v1/exports/${encodeURIComponent(dataExport.id)}/download`} download>Download {dataExport.format.toUpperCase()}</a></>}
+              {dataExport.status === 'cancelled' && <span>Export cancelled.</span>}
+              {dataExport.status === 'error' && <span role="alert">{dataExport.error || 'The export could not be generated.'}</span>}
+              {(dataExport.status === 'ready' || dataExport.status === 'cancelled' || dataExport.status === 'error') && <button type="button" onClick={() => void clearExport()}>Remove</button>}
+            </div>}
+            {recentExports.some((item) => item.id !== dataExport?.id) && <div className="inspector-export-history" aria-label="Recent downloads"><strong>Recent downloads</strong>{recentExports.filter((item) => item.id !== dataExport?.id).map((item) => <div key={item.id}><span>{item.title ?? `Result ${item.format.toUpperCase()}`} · {item.status}</span>{item.status === 'ready' && <a href={`/api/v1/exports/${encodeURIComponent(item.id)}/download`} download>Download</a>}<button type="button" onClick={() => item.status === 'queued' || item.status === 'running' ? setDataExport(item) : void removeRecentExport(item)}>{item.status === 'queued' || item.status === 'running' ? 'View' : 'Remove'}</button></div>)}</div>}
           </>
         )}
         {tab === 'query' && (
@@ -2222,8 +2285,10 @@ export function ChatWorkspace({
       {inspectorOpen && currentArtifact && (
         <DataInspector
           artifact={currentArtifact}
+          chatId={persistedChatIdRef.current ?? chatId ?? ''}
           connectionLabel={currentArtifact.source?.label ?? chatSource?.label ?? active?.label ?? 'Original source'}
           connectionId={currentArtifact.source?.connectionId ?? chatSource?.connectionId ?? active?.id ?? ''}
+          onAskUnderlyingRecords={(question) => { setDraft(question); setInspectorOpen(false); window.setTimeout(() => document.querySelector<HTMLTextAreaElement>('[aria-label="Question"]')?.focus(), 0); }}
           onClose={() => { setInspectorOpen(false); window.setTimeout(() => inspectorOpenerRef.current?.focus(), 0); }}
           inspectorWidth={inspectorWidth}
           onInspectorWidthChange={setInspectorWidth}

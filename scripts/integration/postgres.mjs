@@ -106,6 +106,7 @@ async function main() {
     create table "odd.schema"."Table""Name" ("select" integer primary key, "mixed Case" text);
     create table private_data.secrets (id integer primary key, value text not null);
     create sequence sales.probe_seq;
+    create table sales.export_rows (id integer primary key);
     insert into crm."Customers" values (1, 1, 'Ada'), (1, 2, 'Grace');
     insert into sales."Orders" (tenant_id, customer_id, order_id, amount, booked_at, note)
       select 1, case when n % 2 = 0 then 1 else 2 end, n,
@@ -117,9 +118,10 @@ async function main() {
       from generate_series(1, 150) n;
     insert into "odd.schema"."Table""Name" values (1, 'quoted identifier works');
     insert into private_data.secrets values (1, 'must not be visible');
+    insert into sales.export_rows select n from generate_series(1, 1205) n;
     grant connect on database integration to dbchat_reader;
     grant usage on schema crm, sales, "odd.schema" to dbchat_reader;
-    grant select on crm."Customers", sales."Orders", "odd.schema"."Table""Name" to dbchat_reader;
+    grant select on crm."Customers", sales."Orders", sales.export_rows, "odd.schema"."Table""Name" to dbchat_reader;
     grant usage on sequence sales.probe_seq to dbchat_reader;
   `);
 
@@ -153,7 +155,7 @@ async function main() {
 
   const schema = await connector.introspect();
   assert.deepEqual(schema.tables.map(table => table.qualifiedName), [
-    '"crm"."Customers"', '"odd.schema"."Table""Name"', '"sales"."Orders"'
+    '"crm"."Customers"', '"odd.schema"."Table""Name"', '"sales"."Orders"', '"sales"."export_rows"'
   ]);
   assert(!schema.tables.some(table => table.schema === 'private_data'));
   const orders = schema.tables.find(table => table.qualifiedName === '"sales"."Orders"');
@@ -193,6 +195,15 @@ async function main() {
   assert.equal(bounded.rowCount, 100);
   assert.equal(bounded.truncated, true);
   assert.equal(bounded.rowLimit, 100);
+
+  const exported = [];
+  for await (const batch of connector.exportQuery('select id from sales.export_rows order by id')) exported.push(...batch.rows);
+  assert.equal(exported.length, 1205);
+  assert.equal(exported.at(-1).id, 1205);
+  const limitedExport = [];
+  for await (const batch of connector.exportQuery('select id from sales.export_rows order by id limit 1005; -- explicit')) limitedExport.push(...batch.rows);
+  assert.equal(limitedExport.length, 1005);
+  await assert.rejects(async () => { for await (const _batch of connector.exportQuery('delete from sales.export_rows')) {} }, /read-only/);
 
   connector.setSafetyLevel('safe');
   await assert.rejects(() => connector.executeQuery('insert into sales."Orders" values (1, 1, 151, 1, now(), null)'), /Write queries are not permitted/);
@@ -261,7 +272,7 @@ async function main() {
     truncatedRowsReturned: bounded.rowCount,
     cancellationMs, statementTimeoutMs,
     checks: ['quoted and schema-qualified identifiers', 'composite primary and foreign keys', 'restricted introspection',
-      'decimal, null, and timestamp boundaries', 'join totals', 'result truncation', 'safe-mode and database read-only enforcement',
+      'decimal, null, and timestamp boundaries', 'join totals', 'result truncation', 'full streaming export and explicit limit', 'safe-mode and database read-only enforcement',
       'invalid authentication', 'signal cancellation and reconnect', 'server statement timeout and connection reuse',
       'unexpected disconnect and reconnect', 'scripted WebAgentService turn through WebPolicyConnector'],
     agentArtifactRows: agentResult.artifacts[0].result.rowCount,

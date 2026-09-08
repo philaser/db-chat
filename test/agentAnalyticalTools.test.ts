@@ -104,6 +104,31 @@ describe('analytical tool contracts', () => {
     expect(table?.coverage).toEqual({ returnedRowCount: 15, loadedRowCount: 100, totalRowCount: 100, truncated: false });
   });
 
+  it('starts full data exports from owned results or explicit read-only queries', async () => {
+    const registry = createToolRegistry();
+    const requestExport = vi.fn(async (request) => ({ id: 'export-1', format: request.format, title: request.title, status: 'queued' }));
+    const ctx = { ...context([artifact('owned', 100, true)]), requestExport };
+    const owned = await registry.execute('export_data', { resultId: 'owned', format: 'xlsx', title: 'All matching metrics' }, ctx);
+    expect(requestExport).toHaveBeenCalledWith({ resultId: 'owned', format: 'xlsx', title: 'All matching metrics' });
+    expect(owned.data).toMatchObject({ blocks: [{ type: 'download', exportId: 'export-1', format: 'xlsx' }], exportStatus: 'queued' });
+
+    await registry.execute('export_data', { query: 'SELECT id, amount FROM metrics WHERE amount > 0', format: 'csv', title: 'Matching records' }, ctx);
+    expect(requestExport).toHaveBeenLastCalledWith({ query: 'SELECT id, amount FROM metrics WHERE amount > 0', format: 'csv', title: 'Matching records' });
+    expect((await registry.execute('export_data', { resultId: 'missing', format: 'json', title: 'Missing' }, ctx)).data).toMatchObject({ errorCode: 'RESULT_NOT_FOUND' });
+    expect((await registry.execute('export_data', { query: 'DELETE FROM metrics', format: 'csv', title: 'Unsafe' }, ctx)).ok).toBe(false);
+  });
+
+  it('adds a downloadable artifact to a validated complete report', async () => {
+    const registry = createToolRegistry();
+    const requestReport = vi.fn(async () => ({ id: 'report-1', format: 'markdown' as const, title: 'Verified summary', status: 'completed' }));
+    const report = await registry.execute('create_report', {
+      title: 'Verified summary', downloadFormat: 'markdown', finalize: true,
+      blocks: [{ type: 'takeaway', text: 'Amounts are shown in database units; the time range is not defined.' }, { type: 'table', resultId: 'owned' }]
+    }, { ...context([artifact('owned', 3)]), requestReport });
+    expect(requestReport).toHaveBeenCalledWith(expect.objectContaining({ title: 'Verified summary', format: 'markdown', resultIds: ['owned'] }));
+    expect((report.data?.blocks as Array<Record<string, unknown>>).at(-1)).toEqual({ type: 'download', exportId: 'report-1', title: 'Verified summary', format: 'markdown' });
+  });
+
   it('returns a stable result ID and blocks writes before connector execution', async () => {
     const executeQuery = vi.fn(async () => ({ columns: ['count'], rows: [{ count: 3 }], rowCount: 1, elapsedMs: 1 }));
     const connector = { executeQuery } as unknown as DatabaseConnector;
@@ -112,6 +137,14 @@ describe('analytical tool contracts', () => {
     const write = await runDatabaseQueryTool.execute({ query: 'UPDATE items SET value = 1', purpose: 'Repair data' }, context([], null, connector));
     expect(write.data).toMatchObject({ errorCode: 'READ_ONLY_POLICY', retryable: false });
     expect(executeQuery).toHaveBeenCalledOnce();
+  });
+
+  it('exposes byte-limited preview coverage instead of implying an empty full result', async () => {
+    const executeQuery = vi.fn(async () => ({ columns: ['payload'], rows: [], rowCount: 0, elapsedMs: 1, truncated: true, byteLimit: 1024, truncationReason: 'byte-limit' as const }));
+    const connector = { executeQuery } as unknown as DatabaseConnector;
+    const result = await runDatabaseQueryTool.execute({ query: 'SELECT payload FROM items', purpose: 'Inspect payloads' }, context([], null, connector));
+    expect(result.summary).toContain('1024-byte limit');
+    expect(result.data).toMatchObject({ returnedRowCount: 0, totalRowCount: null, truncated: true, byteLimit: 1024, truncationReason: 'byte-limit', hasMore: true });
   });
 
   it('profiles selected columns without raw rows and excludes credential-like fields', async () => {
@@ -163,7 +196,7 @@ describe('analytical tool contracts', () => {
     expect(oversized.tableDirectory).toHaveLength(200);
 
     const prompt = buildSystemPrompt({ schemaContext, schemaKind: 'postgres', memories: [], toolsSection: 'get_schema_info' });
-    expect(AGENT_PROMPT_VERSION).toBe('analyst-v2.5-2026-09-08');
+    expect(AGENT_PROMPT_VERSION).toBe('analyst-v2.6-2026-09-08');
     expect(prompt).toContain('the detailed tables list is only an excerpt');
     expect(prompt).toContain('Directory names establish identity only, not columns or relationships.');
     expect(prompt.indexOf('sales.orders')).toBeGreaterThan(prompt.indexOf('<untrusted_database_schema>'));

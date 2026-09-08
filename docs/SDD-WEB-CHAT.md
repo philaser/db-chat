@@ -41,6 +41,13 @@ The conversation contract now includes:
 - Markdown/rich-text answers and a closed report component set. Printable HTML
   and Markdown exports contain saved evidence, SQL, provenance and limits;
   exports are snapshots and clearly identify partially loaded history.
+- Saved query results show up to 100 rows in chat and the data inspector. The
+  inspector exports its current filtered, sorted, visible-column view as CSV,
+  Excel or JSON, or requests a refreshed export of all rows matching the
+  original read-only query. Jobs expose progress, cancellation, failure and an
+  authenticated download. Typed download blocks contain a server-owned export
+  ID instead of a model-provided URL. Underlying records for an aggregate
+  require an explicit row-level follow-up query.
 - Prompt/model version and phase timing, first useful evidence, query/tool
   counts, retries, and provider-reported token/cost usage. Missing provider usage
   is unavailable rather than an invented zero. Synthetic evaluation distinguishes

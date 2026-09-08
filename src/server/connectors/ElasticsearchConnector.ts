@@ -64,7 +64,7 @@ export class ElasticsearchConnector implements DatabaseConnector {
     };
   }
 
-  async executeQuery(query: string): Promise<QueryResult> {
+  async executeQuery(query: string, options?: { signal?: AbortSignal }): Promise<QueryResult> {
     const parsed = parseElasticsearchQuery(query);
     if ('operation' in parsed) {
       if (this.safetyLevel === 'safe') {
@@ -73,10 +73,55 @@ export class ElasticsearchConnector implements DatabaseConnector {
       return this.executeDocumentWrite(parsed);
     }
 
-    return this.executeSearch(parsed);
+    return this.executeSearch(parsed, options?.signal);
   }
 
-  private async executeSearch(parsed: ReturnType<typeof parseElasticsearchSearchQuery>): Promise<QueryResult> {
+  async *exportQuery(query: string, options?: { signal?: AbortSignal; batchSize?: number }): AsyncIterable<QueryResult> {
+    const parsed = parseElasticsearchQuery(query);
+    if ('operation' in parsed) throw new Error('Exports require one explicit read-only query.');
+    const blockedKey = findBlockedKey(parsed.body);
+    if (blockedKey) throw new Error(`Elasticsearch blocked key "${blockedKey}" in search body.`);
+    if (parsed.body.aggs || parsed.body.aggregations) {
+      throw new Error('Raw Elasticsearch exports do not support aggregations. Use a hits query so every matching document can be exported.');
+    }
+    const signal = options?.signal;
+    const batchSize = exportBatchSize(options?.batchSize);
+    signal?.throwIfAborted();
+    const requested = typeof parsed.body.size === 'number' && Number.isFinite(parsed.body.size)
+      ? Math.max(0, Math.floor(parsed.body.size)) : undefined;
+    const started = performance.now();
+    if (requested === 0) {
+      yield { columns: [], rows: [], rowCount: 0, elapsedMs: 0 };
+      return;
+    }
+    let remaining = requested;
+    let scrollId: string | undefined;
+    try {
+      let response = await this.request<ElasticsearchSearchResponse>(
+        `${encodeIndexPattern(parsed.index)}/_search?scroll=1m`,
+        { method: 'POST', body: JSON.stringify({ ...parsed.body, size: Math.min(batchSize, remaining ?? batchSize), timeout: '30s' }), signal }
+      );
+      for (;;) {
+        assertCompleteSearchPage(response);
+        scrollId = response._scroll_id ?? scrollId;
+        let rows = rowsFromExportResponse(response);
+        if (remaining !== undefined) rows = rows.slice(0, remaining);
+        if (rows.length) {
+          const columns = collectColumns(rows);
+          yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
+          if (remaining !== undefined) { remaining -= rows.length; if (remaining <= 0) break; }
+        }
+        if (!(response.hits?.hits?.length) || !scrollId || response.aggregations) break;
+        response = await this.request<ElasticsearchSearchResponse>('_search/scroll', {
+          method: 'POST', body: JSON.stringify({ scroll: '1m', scroll_id: scrollId }), signal
+        });
+      }
+    } finally {
+      if (scrollId) await this.request('_search/scroll', { method: 'DELETE', body: JSON.stringify({ scroll_id: scrollId }) }).catch(() => undefined);
+    }
+  }
+
+  private async executeSearch(parsed: ReturnType<typeof parseElasticsearchSearchQuery>, signal?: AbortSignal): Promise<QueryResult> {
     const blockedKey = findBlockedKey(parsed.body);
     if (blockedKey) {
       throw new Error(`Elasticsearch blocked key "${blockedKey}" in search body.`);
@@ -94,7 +139,8 @@ export class ElasticsearchConnector implements DatabaseConnector {
       `${encodeIndexPattern(parsed.index)}/_search`,
       {
         method: 'POST',
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        signal
       }
     );
     const elapsedMs = typeof response.took === 'number'
@@ -178,7 +224,7 @@ export class ElasticsearchConnector implements DatabaseConnector {
     const initWithHeaders: RequestInit = {
       ...init,
       redirect: 'error',
-      signal: AbortSignal.timeout(35_000),
+      signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(35_000)]) : AbortSignal.timeout(35_000),
       headers: {
         accept: 'application/json',
         ...(init.body ? { 'content-type': 'application/json' } : {}),
@@ -192,6 +238,7 @@ export class ElasticsearchConnector implements DatabaseConnector {
         ? await requestWithoutCertificateVerification(url, initWithHeaders, this.config?.elasticsearchVerifyCerts !== false, this.config?.resolvedAddress)
         : await fetch(url, initWithHeaders);
     } catch (error) {
+      if (init.signal?.aborted) throw abortError(init.signal, 'Elasticsearch query was cancelled.');
       throw new Error(`Could not reach Elasticsearch at ${url.origin}: ${networkErrorMessage(error)}`);
     }
 
@@ -222,6 +269,12 @@ export class ElasticsearchConnector implements DatabaseConnector {
     }
     return this.baseUrl;
   }
+}
+
+function abortError(signal: AbortSignal, fallback: string): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException(fallback, 'AbortError');
 }
 
 function buildBaseUrl(config: ConnectionConfig): URL {
@@ -326,7 +379,11 @@ interface ElasticsearchProperty {
 }
 
 interface ElasticsearchSearchResponse {
+  _scroll_id?: string;
   took?: number;
+  timed_out?: boolean;
+  terminated_early?: boolean;
+  _shards?: { failed?: number };
   hits?: {
     total?: number | { value?: number };
     hits?: Array<{
@@ -338,6 +395,20 @@ interface ElasticsearchSearchResponse {
     }>;
   };
   aggregations?: Record<string, unknown>;
+}
+
+function assertCompleteSearchPage(response: ElasticsearchSearchResponse): void {
+  if (response.timed_out) throw new Error('Elasticsearch export timed out before all matching documents were returned.');
+  if (response.terminated_early) throw new Error('Elasticsearch export terminated early before all matching documents were returned.');
+  if ((response._shards?.failed ?? 0) > 0) throw new Error(`Elasticsearch export failed on ${response._shards!.failed} shard(s).`);
+  if ((response.hits?.hits?.length ?? 0) > 0 && !response._scroll_id) {
+    throw new Error('Elasticsearch export did not receive a scroll cursor for the remaining matching documents.');
+  }
+}
+
+function exportBatchSize(value = 500): number {
+  if (!Number.isFinite(value) || value < 1) throw new Error('Export batch size must be a positive finite number.');
+  return Math.min(MAX_SAFE_SIZE, Math.floor(value));
 }
 
 interface ElasticsearchWriteResponse {
@@ -386,6 +457,18 @@ function rowsFromSearchResponse(response: ElasticsearchSearchResponse): Record<s
   const total = response.hits?.total;
   const totalHits = typeof total === 'number' ? total : total?.value;
   return typeof totalHits === 'number' ? [{ total_hits: totalHits }] : [];
+}
+
+function rowsFromExportResponse(response: ElasticsearchSearchResponse): Record<string, unknown>[] {
+  const aggregationRows = response.aggregations ? rowsFromAggregations(response.aggregations) : [];
+  if (aggregationRows.length) return aggregationRows;
+  return (response.hits?.hits ?? []).map(hit => ({
+    _index: hit._index,
+    _id: hit._id,
+    _score: hit._score,
+    ...flattenValue(hit._source ?? {}),
+    ...flattenValue(hit.fields ?? {})
+  }));
 }
 
 function rowsFromAggregations(aggregations: Record<string, unknown>, prefix = ''): Record<string, unknown>[] {
