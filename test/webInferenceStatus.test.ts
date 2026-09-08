@@ -9,11 +9,13 @@ describe('web inference status copy', () => {
       credentialSource: 'internal',
       hasUserKey: false,
       userKeyUiEnabled: false,
+      canChangeModel: false,
+      models: [{ id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' }],
       status: 'ready'
     })).toEqual({
       available: true,
       title: 'Managed inference ready',
-      description: 'DB Chat will use the service OpenRouter key.'
+      description: 'DB Chat uses the shared managed model.'
     });
   });
 
@@ -24,6 +26,8 @@ describe('web inference status copy', () => {
       credentialSource: 'none',
       hasUserKey: false,
       userKeyUiEnabled: false,
+      canChangeModel: false,
+      models: [{ id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' }],
       status: 'unavailable'
     })).toEqual({
       available: false,
@@ -39,6 +43,8 @@ describe('web inference status copy', () => {
       credentialSource: 'user',
       hasUserKey: true,
       userKeyUiEnabled: false,
+      canChangeModel: true,
+      models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }],
       status: 'ready'
     })).toMatchObject({
       available: true,

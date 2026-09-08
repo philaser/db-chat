@@ -1,5 +1,6 @@
 import { referencedResultIds } from './conversationContext.js';
 import { defaultEffortForModel } from './config.js';
+import { DEFAULT_PERSONAL_PROVIDER_MODELS } from './model/providers.js';
 import {
   createCipheriv,
   createDecipheriv,
@@ -24,6 +25,8 @@ import type {
 } from '../shared/types.js';
 import type {
   Principal,
+  PersonalInferenceProvider,
+  ResolvedProviderKey,
   WebAccountSettings,
   WebConnectionStatus,
   WebConnectionSummary,
@@ -402,6 +405,7 @@ export class AccountStore {
   updateSettings(userId: string, patch: {
     displayName?: string;
     activeConnectionId?: string | null;
+    provider?: WebAccountSettings['provider'];
     model?: string;
     effortLevel?: EffortLevel;
     currentPassword?: string;
@@ -423,6 +427,7 @@ export class AccountStore {
       user.settings.activeConnectionId = patch.activeConnectionId ?? undefined;
     }
     if (patch.model !== undefined) user.settings.model = patch.model.trim() || this.defaultModel;
+    if (patch.provider !== undefined) user.settings.provider = patch.provider;
     if (patch.effortLevel !== undefined) user.settings.effortLevel = patch.effortLevel;
     if (patch.newPassword !== undefined) {
       if (!patch.currentPassword || !user.passwordSalt || !user.passwordHash || !verifyPassword(patch.currentPassword, user.passwordSalt, user.passwordHash)) {
@@ -707,9 +712,12 @@ export class AccountStore {
   }
 
   hasUserKey(userId: string): boolean {
-    return Boolean(this.users.get(userId)?.encryptedProviderKey);
+    const encrypted = this.users.get(userId)?.encryptedProviderKey;
+    if (!encrypted) return false;
+    return this.personalProviderKey(encrypted) !== null;
   }
 
+  /** @deprecated Retained for reading/writing pre-provider OpenRouter credentials. */
   setUserKey(userId: string, apiKey: string): void {
     const user = this.users.get(userId);
     if (!user) throw new Error('Account not found.');
@@ -719,24 +727,49 @@ export class AccountStore {
     this.persist();
   }
 
+  setUserProviderKey(userId: string, provider: PersonalInferenceProvider, apiKey: string): void {
+    const user = this.users.get(userId);
+    if (!user) throw new Error('Account not found.');
+    const value = apiKey.trim();
+    if (!value || value.length < 10) throw new Error('Enter a valid provider key.');
+    user.encryptedProviderKey = this.vault.encrypt(JSON.stringify({ provider, apiKey: value }));
+    user.settings = {
+      ...user.settings,
+      provider,
+      model: DEFAULT_PERSONAL_PROVIDER_MODELS[provider],
+      effortLevel: 'low'
+    };
+    this.persist();
+  }
+
   removeUserKey(userId: string): void {
     const user = this.users.get(userId);
     if (!user) throw new Error('Account not found.');
     user.encryptedProviderKey = undefined;
+    user.settings = { ...user.settings, ...this.defaultSettings() };
     this.persist();
   }
 
-  resolveProviderKey(userId: string, internalKey?: string): { source: 'user' | 'internal' | 'none'; apiKey?: string; hasUserKey: boolean } {
+  resolveProviderKey(userId: string, internalKey?: string): ResolvedProviderKey {
     const user = this.users.get(userId);
-    const hasUserKey = Boolean(user?.encryptedProviderKey);
     if (user?.encryptedProviderKey) {
-      try {
-        return { source: 'user', apiKey: this.vault.decrypt(user.encryptedProviderKey), hasUserKey };
-      } catch {
-        return { source: internalKey ? 'internal' : 'none', apiKey: internalKey, hasUserKey };
-      }
+      const personal = this.personalProviderKey(user.encryptedProviderKey);
+      if (personal) return { ...personal, source: 'user', hasUserKey: true };
     }
-    return { source: internalKey ? 'internal' : 'none', apiKey: internalKey, hasUserKey };
+    return { provider: 'openrouter', source: internalKey ? 'internal' : 'none', apiKey: internalKey, hasUserKey: false };
+  }
+
+  private personalProviderKey(encrypted: string): { provider: PersonalInferenceProvider; apiKey: string } | null {
+    const plaintext = this.vault.decrypt(encrypted);
+    if (!plaintext.trimStart().startsWith('{')) return null;
+    let value: unknown;
+    try { value = JSON.parse(plaintext); } catch { throw new Error('Stored provider key is invalid. Remove it and add it again.'); }
+    if (!value || typeof value !== 'object') throw new Error('Stored provider key is invalid. Remove it and add it again.');
+    const envelope = value as { provider?: unknown; apiKey?: unknown };
+    if ((envelope.provider !== 'openai' && envelope.provider !== 'deepseek') || typeof envelope.apiKey !== 'string' || envelope.apiKey.trim().length < 10) {
+      throw new Error('Stored provider key is invalid. Remove it and add it again.');
+    }
+    return { provider: envelope.provider, apiKey: envelope.apiKey };
   }
 
   private createSession(userId: string): string {

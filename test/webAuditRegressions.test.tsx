@@ -9,7 +9,7 @@ const connection = { id: 'db', label: 'Analytics', kind: 'postgres', status: 're
 const bootstrap = {
   ready: true, user: { id: 'u', email: 'u@example.test', displayName: 'Audit user', emailVerified: true, createdAt: '2026-09-05' },
   connections: [connection], activeConnectionId: 'db', settings: { provider: 'openrouter' as const, model: 'fixture', effortLevel: 'medium' as const },
-  inference: { provider: 'openrouter' as const, model: 'fixture', credentialSource: 'internal' as const, hasUserKey: false, userKeyUiEnabled: false, status: 'ready' as const },
+  inference: { provider: 'openrouter' as const, model: 'fixture', credentialSource: 'internal' as const, hasUserKey: false, userKeyUiEnabled: false, canChangeModel: false, models: [{ id: 'fixture', name: 'Fixture' }], status: 'ready' as const },
   capabilities: { queryResults: true, csvExport: true, charts: true }, limits: { maxHistoryMessages: 40, maxMessageChars: 8000, maxResultRows: 100, maxResultBytes: 1048576 }
 };
 const messages: ChatMessage[] = [

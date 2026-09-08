@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { QueryResultArtifact } from '../src/shared/types.js';
-import { AppBar, AuthScreen, ChatSidebarRow, DataInspector, streamActivityText } from '../src/web/App.js';
+import { AppBar, AuthScreen, ChatSidebarRow, DataInspector, InferencePage, streamActivityText } from '../src/web/App.js';
 
 const bootstrap = {
   ready: true,
@@ -23,7 +23,9 @@ const bootstrap = {
     model: 'deepseek/deepseek-v4-flash-0731',
     credentialSource: 'internal' as const,
     hasUserKey: false,
-    userKeyUiEnabled: false,
+    userKeyUiEnabled: true,
+    canChangeModel: false,
+    models: [{ id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' }],
     status: 'ready' as const
   },
   capabilities: { queryResults: true, csvExport: true, charts: true },
@@ -48,6 +50,38 @@ afterEach(() => {
 });
 
 describe('web app interactions', () => {
+  it('keeps managed Gemini read-only and saves a validated personal provider key', async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('fetch', fetcher);
+    render(<InferencePage bootstrap={{ ...bootstrap, inference: { ...bootstrap.inference, model: 'google/gemini-2.5-flash' }, settings: { ...bootstrap.settings, model: 'google/gemini-2.5-flash' } }} onRefresh={refresh} />);
+
+    expect(screen.getByText('Gemini 2.5 Flash')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Model')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Personal provider'), { target: { value: 'deepseek' } });
+    fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'sk-personal-fixture' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save key' }));
+
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/settings/provider-key', expect.objectContaining({ method: 'POST', body: JSON.stringify({ provider: 'deepseek', apiKey: 'sk-personal-fixture' }) })));
+    await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+    expect(screen.getByLabelText('DeepSeek API key')).toHaveValue('');
+  });
+
+  it('lets personal OpenAI users choose a model and return to managed inference', async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('fetch', fetcher);
+    render(<InferencePage bootstrap={{ ...bootstrap, inference: { ...bootstrap.inference, provider: 'openai', credentialSource: 'user', hasUserKey: true, canChangeModel: true, model: 'gpt-5', models: [{ id: 'gpt-5', name: 'GPT-5' }, { id: 'gpt-5-mini', name: 'GPT-5 mini' }] }, settings: { ...bootstrap.settings, provider: 'openai', model: 'gpt-5' } }} onRefresh={refresh} />);
+
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'gpt-5-mini' } });
+    fireEvent.change(screen.getByLabelText('Reasoning effort'), { target: { value: 'high' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/settings', expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ model: 'gpt-5-mini', effortLevel: 'high' }) })));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove personal key' }));
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/settings/provider-key', expect.objectContaining({ method: 'DELETE' })));
+  });
+
   it('maps streamed work events to a compact current-status label', () => {
     expect(streamActivityText('status', { message: 'Preparing the result' })).toBe('Preparing the result');
     expect(streamActivityText('tool-start', { toolName: 'run_database_query', purpose: 'Running a read-only query' })).toBe('Running a read-only query');

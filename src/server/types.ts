@@ -1,4 +1,6 @@
 import type { ChatMessage, QueryResultArtifact } from '../shared/types.js';
+import type { InferenceProvider } from './model/providers.js';
+export type { InferenceProvider, PersonalInferenceProvider } from './model/providers.js';
 
 export interface Principal {
   id: string;
@@ -16,8 +18,15 @@ export interface WebUser {
   createdAt: string;
 }
 
+export interface ResolvedProviderKey {
+  provider: InferenceProvider;
+  source: 'user' | 'internal' | 'none';
+  apiKey?: string;
+  hasUserKey: boolean;
+}
+
 export interface WebAccountSettings {
-  provider: 'openrouter';
+  provider: InferenceProvider;
   model: string;
   effortLevel: 'none' | 'low' | 'medium' | 'high' | 'max';
   activeConnectionId?: string;

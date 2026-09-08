@@ -15,6 +15,7 @@ import { MemoryStore } from './agent/MemoryStore.js';
 import { PermissionManager } from './agent/PermissionManager.js';
 import { createToolRegistry } from './webToolRegistry.js';
 import { OpenRouterClient } from './model/OpenRouterClient.js';
+import type { InferenceProvider } from './model/providerConfig.js';
 import type { AgentModelClient, AgentController } from './agent/types.js';
 import type { WebServerConfig } from './config.js';
 import { schemaFingerprint } from './conversationContext.js';
@@ -153,7 +154,8 @@ export class WebAgentService {
     providerApiKey?: string,
     model?: string,
     effortLevel?: EffortLevel,
-    runContext: WebAgentRunContext = { referencedArtifacts: [] }
+    runContext: WebAgentRunContext = { referencedArtifacts: [] },
+    provider: InferenceProvider = 'openrouter'
   ): Promise<TurnResult> {
     let connector = this.connector;
     let schema = this.schema;
@@ -181,9 +183,12 @@ export class WebAgentService {
         throw new Error(this.readyError ?? 'The selected connection is not ready.');
       }
 
-      const apiKey = providerApiKey ?? this.config.openRouterApiKey;
+      // A managed OpenRouter key must never be sent to a personal provider host.
+      const apiKey = provider === 'openrouter'
+        ? (providerApiKey ?? this.config.openRouterApiKey)
+        : providerApiKey;
       const client = this.modelClient ?? (apiKey
-        ? new OpenRouterClient({ apiKey })
+        ? new OpenRouterClient({ apiKey, provider })
         : null);
 
       if (!client) {
