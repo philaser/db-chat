@@ -44,7 +44,11 @@ describe('durable web turn integration', () => {
     const headers={'content-type':'application/json',cookie};
     const body={chatId:chat.id,connectionId:connection.id,clientRequestId:'request-one',userMessageId:'user-one',assistantMessageId:'assistant-one',messages:[{role:'user',content:'Question'}]};
     const submit=async()=>{ const response=await fetch(base+'/chat/turns',{method:'POST',headers,body:JSON.stringify(body)}); expect(response.status).toBe(202); return (await response.json()).turnId as string; };
-    const snapshot=async(id:string,newBase=base)=>(await fetch(newBase+'/chat/turns/'+id,{headers})).json() as Promise<WebTurnSnapshot>;
+    const snapshot=async(id:string,newBase=base)=>{
+      const response=await fetch(newBase+'/chat/turns/'+id,{headers});
+      expect(response.status).toBe(200);
+      return response.json() as Promise<WebTurnSnapshot>;
+    };
     return {accounts,auth,chat,base,model,database,headers,submit,snapshot,body,server:servers.at(-1)!,calls:()=>calls};
   }
   it('does not publish completion until the terminal message has been saved',async()=>{
@@ -234,9 +238,17 @@ describe('durable web turn integration', () => {
     const f = await fixture();
     vi.spyOn(f.accounts, 'finalizeTurn').mockRejectedValue(new Error('Fenced worker'));
     const id = await f.submit();
-    await vi.waitFor(() => expect(f.accounts.finalizeTurn).toHaveBeenCalled());
-    expect((await f.snapshot(id)).status).not.toBe('complete');
+    // Recovery retries the failed terminal write after execution finishes. Its
+    // failure makes the worker unavailable, so wait for that state explicitly.
+    await vi.waitFor(async () => expect((await fetch(f.base + '/health')).status).toBe(503));
+    expect(f.accounts.finalizeTurn).toHaveBeenCalledWith(f.auth.user.id, expect.objectContaining({ id, status: 'complete' }), expect.anything(), expect.any(Array), expect.any(String));
+    expect(f.accounts.finalizeTurn).toHaveBeenCalledWith(f.auth.user.id, expect.objectContaining({ id, status: 'error', error: 'The answer worker stopped before this answer finished. Please retry.' }));
+    const response = await fetch(f.base + '/chat/turns/' + id, { headers: f.headers });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: 'The answer service is restarting or temporarily unavailable. Please reconnect.' });
+    const saved = f.accounts.getTurn(f.auth.user.id, id);
+    expect(saved).toMatchObject({ id, status: 'running' });
     expect(f.accounts.getChat(f.auth.user.id, f.chat.id)?.messages).toHaveLength(1);
-    expect((await f.snapshot(id)).events.some(event => event.type === 'complete')).toBe(false);
+    expect(saved!.events.some(event => event.type === 'complete')).toBe(false);
   });
 });
