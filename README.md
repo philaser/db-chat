@@ -30,6 +30,13 @@ cp .env.example .env
 npm run dev
 ```
 
+Installation compiles the SQLite dependency with native memory accounting and
+verifies that its heap limit rejects an oversized allocation. A C/C++ toolchain
+and Python are required (Xcode command-line tools on macOS, build tools on Linux,
+or Visual Studio C++ build tools on Windows). The Docker build includes them;
+the runtime image does not. After changing Node versions or installing with
+scripts disabled, run `npm run prepare:sqlite` before serving uploaded databases.
+
 Configure the Supabase project URL, publishable key, server-only service role key,
 stable encryption key and model key in `.env` before starting managed mode. Apply
 the SQL migrations to the selected project before use. Configure the Supabase site
@@ -46,6 +53,8 @@ permitted for production. OAuth is intentionally deferred.
 npm test                 # Backend, connector, web UI and shell-policy checks
 npm run typecheck
 npm run build            # Browser assets + Node backend, without Electron
+npm run test:persistence # Actual migrations in disposable embedded Postgres
+npm run test:databases   # Docker engines + concurrent account/quota SQL checks
 npm start                # Serve the built product
 ```
 
@@ -62,29 +71,30 @@ Place the service behind HTTPS and set the public application origin accordingly
 Static-only hosting is insufficient: database drivers, SSE, secret decryption and
 SQLite execution require the Node service.
 
-For Render Free, `render.yaml` uses the existing Dockerfile, one Frankfurt web
-service, and `/api/v1/health`, without a Render database or persistent disk.
-Supply the prompted environment variables through Render's secret settings;
-retain the existing encryption key. The app uses Render's `RENDER_EXTERNAL_URL` as its origin automatically; set
-`DBCHAT_WEB_ALLOWED_ORIGIN` only when using a custom domain. Do not upload `.env`. Automatic deploys are
-disabled: suspend the existing service before deploying a replacement because
-startup recovery currently assumes no other active instance. Verify it is stopped
-before resuming/deploying; this entails downtime. Configure the same public origin
-in Supabase Auth and complete email setup before customer signup.
+`render.yaml` proposes one Render Starter service in Frankfurt with
+`/api/v1/health`, automatic deployment disabled, one database operation at a time,
+two active turns, four simultaneous API requests and one upload. This is a reviewed configuration template; it
+does not upgrade the existing service. Set the HTTPS origin and secret settings
+in Render, retaining the existing encryption key. Do not upload `.env`.
 
-Render Free sleeps after 15 idle minutes and can take about a minute to wake.
-Its monthly limits and service-initiated traffic restrictions apply to calls to
-Supabase, model APIs, and customer databases. Do not upgrade or enable paid
-resources automatically. Supabase sends Auth emails through its configured SMTP
-provider, so Render Free's SMTP-port restriction does not block that integration.
-See [Render Free limits](https://render.com/docs/free).
+The first upgrade from the old binary requires a maintenance stop, all migrations,
+then the new binary: the old recovery logic cannot coexist with leased workers.
+After that transition, new workers coordinate through Supabase and can overlap.
+Do not roll back to an old binary while new workers are serving traffic. See
+[Supabase deployment and recovery](supabase/README.md).
+
+Free services can sleep and have resource and traffic restrictions; they do not
+provide an always-on production availability promise. See
+[Render Free limits](https://render.com/docs/free) and
+[deployment behavior](https://render.com/docs/deploys). Changing plans or deploying
+this template requires an explicit operator decision.
 
 Keep the service role key, model key and connection-encryption key server-only.
 Do not use browser build variables for secrets. Retain the encryption key securely
 and separately from database backups; losing it makes saved connection secrets
 unrecoverable. Uploaded SQLite files live in the private Supabase Storage bucket
 `dbchat-sqlite`; the Node service uses temporary files during queries and needs no
-persistent disk in Supabase mode. Apply both SQL migrations before use. Configure
+persistent disk in Supabase mode. Apply every SQL migration in `supabase/migrations` before use. Configure
 outbound network rules, process/resource limits, model spend limits, monitoring,
 backup restore checks and rollback before serving customers. Review the migration
 and operations documentation shipped with the Supabase adapter.
@@ -97,6 +107,33 @@ roles and appropriate TLS/network restrictions. Public destination validation an
 application query checks complement, rather than replace, network egress controls
 and least-privilege credentials. Each engine needs live integration verification;
 new engines can be added incrementally without an invitation-only launch model.
+
+Managed inference has durable daily allowances: 100 accepted answers per account
+and 1,000 across the service by default, resetting at midnight UTC. Failed and
+cancelled attempts count; idempotent retries and personal-provider answers do not.
+The `.env.example` documents these settings and separate upload allowances.
+Provider-side monetary limits are still required. Apply all migrations before
+starting this version; do not treat a successful local build as a migration.
+
+Authenticated write limits are per account. If you configure
+`DBCHAT_WEB_TRUSTED_PROXY_HOPS`, first verify the exact proxy chain and block direct
+access to the Node service. Otherwise leave it at zero. SIGTERM drains active
+work within `DBCHAT_WEB_SHUTDOWN_GRACE_MS` (25 seconds by default). Supabase
+worker leases fence stale writes, recover expired workers and make accepted turns
+readable and cancellable from another instance. Health fails if coordination is
+lost. Short request-rate windows remain per process; daily usage and active turn
+and export limits are shared.
+
+Saved data is kept until the customer deletes it. The default retained policy
+allows 100 connections, 1,000 chats, 100,000 messages and artifacts each, 100 MiB
+of logical saved JSON and 1 GiB of SQLite files per account. Accepted turns reserve
+completion capacity and have a bounded finalization allowance; these are admission
+limits, not an exact disk-space ceiling. See the policy and overflow contract in
+[supabase/README.md](supabase/README.md). Expired sessions, abandoned uploads and
+temporary exports are cleaned automatically; saved chats and attached files do
+not expire. Saved reads have byte budgets; large histories remain stored and can
+be read in smaller pages. Explicit earlier-answer follow-ups load their selected
+evidence within the context budget. Account deletion enters a durable retryable job before removing data.
 
 ## Optional desktop shell
 
@@ -128,8 +165,8 @@ version label: `major`, `minor` or `patch`.
 
 ## Design
 
-Start with [DESIGN.md](DESIGN.md). The web design and style guide govern the single
-customer experience. The previous Scape desktop specifications are historical.
+Start with [DESIGN.md](DESIGN.md). It links the product/architecture document,
+screen design, and style guide that govern the single customer experience.
 
 ## Data downloads and analytical reports
 
@@ -159,13 +196,14 @@ rows, 100 MiB of data/worksheet/file size, and five minutes; configure
 `DBCHAT_EXPORT_MAX_ROWS`, `DBCHAT_EXPORT_MAX_BYTES`, and
 `DBCHAT_EXPORT_TIMEOUT_MS` to change those limits. At most two jobs execute at
 once, with one per account; additional jobs queue. Up to five downloads per
-account and ten per instance may be retained. Remove completed downloads to free
+account and ten across the hosted service may be retained. Remove completed downloads to free
 capacity. CSV escapes formula-like text for spreadsheet safety; JSON preserves
 nested data. Excel exports reject cells that exceed Excel's text limit instead
 of silently cutting off their contents.
 
-Downloads are temporary: they expire after one hour and are unavailable after a
-service restart. Regenerate them from the saved chat when needed. The files use
-private temporary storage and need no paid persistent disk. This queue, like
-active chat turns, assumes one Node instance. A distributed job store is required
-before running multiple instances.
+Downloads are temporary and expire after one hour. In hosted mode, private
+Supabase Storage and a durable job registry preserve completed files across
+restarts and route downloads through any worker. Interrupted execution becomes
+a retryable error after its lease expires; it is never published as complete.
+Cancelled jobs hold execution capacity until work has stopped. Local development
+uses a process-local queue and temporary files.

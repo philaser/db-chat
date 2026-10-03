@@ -96,7 +96,7 @@ function validateSpec(spec: ValidatedChartSpec): string | null {
       if (value !== null && value !== undefined && value !== '' && !(typeof value === 'number' ? Number.isFinite(value) : typeof value === 'string' && Number.isFinite(Number(value)))) {
         return `valueKey "${vk}" contains a non-numeric value at row ${i}`;
       }
-      if (typeof value === 'string' && /^[-+]?\d+$/.test(value.trim()) && !Number.isSafeInteger(Number(value))) {
+      if (typeof value === 'string' && Number.isInteger(Number(value)) && !Number.isSafeInteger(Number(value))) {
         return `valueKey "${vk}" contains an integer outside the safe chart range at row ${i}`;
       }
       if (typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value)) {

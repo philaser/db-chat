@@ -9,6 +9,11 @@ function mockFetch(handler: (url: URL, init: RequestInit) => unknown) {
   return vi.fn(async (url: string | URL | Request, init?: RequestInit) => new Response(JSON.stringify(await handler(new URL(String(url)), init ?? {})), { status: 200 })) as unknown as Fetch;
 }
 describe('Supabase account repository', () => {
+  it('fails startup readiness with an operator hint when a required migration is missing', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response('private upstream error', { status: 404 }));
+    await expect(new SupabaseAccountStore({ ...options, fetch }).assertStorageReady()).rejects.toThrow('Apply all DB Chat migrations');
+  });
+
   it('atomically stores and resolves direct provider key envelopes', async () => {
     const vault = new SecretVault(options.secretKey);
     let profile = { user_id: user.id, email: user.email, email_verified: true, display_name: 'Person', created_at: user.created_at, settings: { provider: 'openrouter' as const, model: 'managed-model', effortLevel: 'low' as const }, encrypted_provider_key: null as string | null };
@@ -133,8 +138,8 @@ describe('Supabase account repository', () => {
     const calls: unknown[] = [];
     const fetch = mockFetch((_url, init) => { calls.push(JSON.parse(String(init.body))); return { turnId: 'turn-one', created: true }; });
     const store = new SupabaseAccountStore({ ...options, fetch });
-    await store.claimTurn(user.id, 'turn-one', 'chat-one', 'request-one', { id: 'm1', content: 'Question', role: 'user', createdAt: '' }, 'm2');
-    await store.finalizeTurn(user.id, { id: 'turn-one', events: [], status: 'complete' });
+    await store.claimTurn(user.id, 'turn-one', 'chat-one', 'request-one', { id: 'm1', content: 'Question', role: 'user', createdAt: '' }, 'm2', { workerId: 'worker-one' });
+    await store.finalizeTurn(user.id, { id: 'turn-one', events: [], status: 'complete' }, undefined, [], 'worker-one');
     expect(calls).toEqual([expect.objectContaining({ owner: user.id, request_id: 'request-one' }), expect.objectContaining({ owner: user.id, turn: expect.objectContaining({ status: 'complete' }) })]);
   });  it('loads a bounded history page with only linked artifacts and compact turn metadata', async () => {
     const calls: URL[] = [];
@@ -153,7 +158,7 @@ describe('Supabase account repository', () => {
     expect(calls.every(url => url.searchParams.get('user_id') === 'eq.' + user.id)).toBe(true);
     const messages = calls.find(url => url.searchParams.get('position') === 'lt.500')!;
     expect(messages.searchParams.get('limit')).toBe('3');
-    expect(calls.find(url => url.pathname.endsWith('dbchat_artifacts'))?.searchParams.get('body->>messageId')).toBe('in.("m498","m499")');
+    expect(calls.find(url => url.pathname.endsWith('dbchat_artifacts'))?.searchParams.get('body->>messageId')).toBe('in.("m499")');
     expect(calls.find(url => url.pathname.endsWith('dbchat_turns'))?.searchParams.get('select')).not.toContain('snapshot,');
   });
 
@@ -170,6 +175,91 @@ describe('Supabase account repository', () => {
     await store.saveConnectionKnowledge(user.id, 'connection', { version: 1, glossary: [], examples: [], updatedAt: '' });
     expect(writes[0].body).toMatchObject({ owner: user.id, query_text: 'old question', page_offset: 20, page_limit: 10 });
     expect(writes[1].body).toMatchObject({ user_id: user.id, connection_id: 'connection' });
+  });
+
+  it('paginates full chats without duplicate limit/offset parameters or repeated pages', async () => {
+    const offsets: number[] = [];
+    const fetch = mockFetch(url => {
+      expect(url.searchParams.getAll('limit')).toHaveLength(1);
+      expect(url.searchParams.getAll('offset').length).toBeLessThanOrEqual(1);
+      if (url.pathname.endsWith('dbchat_chats')) return [{ id: 'chat', user_id: user.id, title: 'History', message_count: 1001, artifact_count: 0, created_at: '', updated_at: '' }];
+      if (url.pathname.endsWith('dbchat_messages')) {
+        const offset = Number(url.searchParams.get('offset'));
+        offsets.push(offset);
+        return Array.from({ length: Math.min(500, 1001 - offset) }, (_, index) => ({ body: { id: String(offset + index), role: 'user', content: 'Question', createdAt: '' } }));
+      }
+      return [];
+    });
+    const chat = await new SupabaseAccountStore({ ...options, fetch }).getChat(user.id, 'chat');
+    expect(offsets).toEqual([0, 500, 1000]);
+    expect(chat?.messages).toHaveLength(1001);
+    expect(chat?.messages.at(-1)?.id).toBe('1000');
+  });
+
+  it('surfaces only the structured quota result from the atomic claim RPC', async () => {
+    const fetch = mockFetch((url, init) => {
+      expect(url.pathname).toBe('/rest/v1/rpc/dbchat_claim_turn_coordinated');
+      expect(JSON.parse(String(init.body))).toMatchObject({ managed: true, account_daily_limit: 3, global_daily_limit: 5, turn_context: { attemptOf: 'prior' } });
+      return { created: false, quotaExceeded: 'account' };
+    });
+    const store = new SupabaseAccountStore({ ...options, fetch });
+    await expect(store.claimTurn(user.id, 'turn', 'chat', 'request', { id: 'user', role: 'user', content: 'Question', createdAt: '' }, 'answer', { workerId: 'worker-one', managed: true, accountDailyLimit: 3, globalDailyLimit: 5, attemptOf: 'prior' })).rejects.toThrow('daily managed answer limit');
+  });
+
+  it('fails closed without a worker identity and preserves the final snapshot returned by fencing', async () => {
+    const saved = { id: 'turn', status: 'aborted', events: [], error: 'Answer stopped.' };
+    const fetch = mockFetch((url, init) => {
+      expect(url.pathname).toBe('/rest/v1/rpc/dbchat_finalize_turn_fenced');
+      expect(JSON.parse(String(init.body))).toMatchObject({ owner: user.id, worker: 'worker-id' });
+      return saved;
+    });
+    const store = new SupabaseAccountStore({ ...options, fetch });
+    await expect(store.saveTurn(user.id, { id: 'turn', status: 'running', events: [] })).rejects.toThrow('temporarily unavailable');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(await store.finalizeTurn(user.id, { id: 'turn', status: 'complete', events: [] }, undefined, [], 'worker-id')).toEqual(saved);
+  });
+
+  it('recognizes fencing without exposing backend error details', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(Response.json({ message: 'DBCHAT_WORKER_FENCED', details: 'private payload' }, { status: 400 }))
+      .mockResolvedValueOnce(Response.json({ message: 'private credentials' }, { status: 500 }));
+    const store = new SupabaseAccountStore({ ...options, fetch });
+    await expect(store.saveTurn(user.id, { id: 'turn', status: 'running', events: [] }, 'worker')).rejects.toThrow('temporarily unavailable');
+    await expect(store.saveTurn(user.id, { id: 'turn', status: 'running', events: [] }, 'worker')).rejects.toThrow('Saved data is temporarily unavailable');
+  });
+
+  it('maps the fixed retained-data quota marker to a safe typed error', async () => {
+    const { RetainedDataQuotaError } = await import('../src/server/accountRepository');
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(Response.json({ message: 'DBCHAT_RETENTION_LIMIT', details: 'private SQL row' }, { status: 400 }));
+    await expect(new SupabaseAccountStore({ ...options, fetch }).saveTurn(user.id, { id: 'turn', status: 'running', events: [] }, 'worker')).rejects.toBeInstanceOf(RetainedDataQuotaError);
+  });
+
+  it('verifies a deletion password without creating an application session or revoking other devices', async () => {
+    const urls: string[] = [];
+    const fetch = mockFetch((url, init) => {
+      urls.push(url.pathname + url.search);
+      if (url.pathname.endsWith('dbchat_profiles')) return [{ user_id: user.id, email: user.email }];
+      if (url.pathname.endsWith('/token')) return tokens;
+      expect(url.pathname + url.search).toBe('/auth/v1/logout?scope=local');
+      expect(new Headers(init.headers).get('authorization')).toBe('Bearer private-access');
+      return {};
+    });
+    await new SupabaseAccountStore({ ...options, fetch }).verifyAccountPassword(user.id, 'fixture-password');
+    expect(urls).toHaveLength(3);
+    expect(urls.some(url => url.includes('dbchat_sessions'))).toBe(false);
+  });
+
+  it('returns session capacity errors safely and cleans up the newly issued provider session', async () => {
+    const { SessionCapacityError } = await import('../src/server/accountRepository');
+    const urls: string[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async (input) => {
+      const url = new URL(String(input)); urls.push(url.pathname + url.search);
+      if (url.pathname.endsWith('/token')) return Response.json(tokens);
+      if (url.pathname.endsWith('dbchat_profiles')) return Response.json([{user_id:user.id,email:user.email,email_verified:true,settings:{}}]);
+      if (url.pathname.endsWith('dbchat_sessions')) return Response.json({message:'DBCHAT_SESSION_LIMIT',details:'private row'},{status:400});
+      return Response.json({});
+    });
+    await expect(new SupabaseAccountStore({ ...options, fetch }).login(user.email, 'fixture-password')).rejects.toBeInstanceOf(SessionCapacityError);
+    expect(urls.at(-1)).toBe('/auth/v1/logout?scope=local');
   });
 
 });

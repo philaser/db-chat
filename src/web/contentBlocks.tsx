@@ -224,9 +224,10 @@ function InteractiveChartBlock({ block }: { block: ContentBlock }) {
   const columns = Array.isArray(block.columns) ? block.columns.filter((column): column is string => typeof column === 'string') : [];
   const rows = Array.isArray(block.rows) ? block.rows.filter(isRecord) : [];
   const numeric = columns.filter((column) => rows.some((row) => typeof row[column] === 'number'));
+  const originalMetrics = Array.isArray(block.valueKeys) ? block.valueKeys.filter((key): key is string => typeof key === 'string') : numeric;
   const [chartType, setChartType] = useState(String(block.chartType ?? 'bar'));
   const [nameKey, setNameKey] = useState(String(block.nameKey ?? columns.find((column) => !numeric.includes(column)) ?? columns[0] ?? ''));
-  const [metric, setMetric] = useState(String((Array.isArray(block.valueKeys) ? block.valueKeys[0] : undefined) ?? numeric[0] ?? ''));
+  const [metric, setMetric] = useState(originalMetrics.length > 1 && block.chartType !== 'pie' ? '' : originalMetrics[0] ?? '');
   const root = useRef<HTMLDivElement>(null);
   const download = () => {
     const svg = root.current?.querySelector('svg'); if (!svg) return;
@@ -239,13 +240,13 @@ function InteractiveChartBlock({ block }: { block: ContentBlock }) {
   const coverage = coverageLabel(block, rows.length);
   return <div className="interactive-chart" ref={root}>
     <div className="chart-controls" aria-label="Chart display controls">
-      {editable && <><label>Type<select value={safeType} onChange={(event) => setChartType(event.target.value)}><option value="bar">Bar</option><option value="line">Line</option><option value="area">Area</option><option value="pie">Pie</option></select></label>
+      {editable && <><label>Type<select value={safeType} onChange={(event) => { setChartType(event.target.value); if (event.target.value === 'pie' && !metric) setMetric(originalMetrics[0] ?? ''); }}><option value="bar">Bar</option><option value="line">Line</option><option value="area">Area</option><option value="pie">Pie</option></select></label>
       <label>Group<select value={nameKey} onChange={(event) => setNameKey(event.target.value)}>{columns.map((column) => <option key={column} value={column} title={column}>{readableColumnLabel(column)}</option>)}</select></label>
-      <label>Metric<select value={metric} onChange={(event) => setMetric(event.target.value)}>{numeric.map((column) => <option key={column} value={column} title={column}>{readableColumnLabel(column)}</option>)}</select></label></>}
+      <label>Metric<select value={metric} onChange={(event) => setMetric(event.target.value)}>{originalMetrics.length > 1 && safeType !== 'pie' && <option value="">All original metrics</option>}{numeric.map((column) => <option key={column} value={column} title={column}>{readableColumnLabel(column)}</option>)}</select></label></>}
       <button type="button" onClick={download}>Download SVG</button>
     </div>
     <p className="chart-control-note">Display changes use this saved result and do not query the database.</p>
-    <ChartViewMemo block={editable ? { ...block, chartType: safeType, nameKey, valueKeys: [metric] } : block} />
+    <ChartViewMemo block={editable ? { ...block, chartType: safeType, nameKey, valueKeys: metric ? [metric] : originalMetrics } : block} />
     {coverage && <p className="result-coverage">{coverage}</p>}
   </div>;
 }
@@ -283,6 +284,7 @@ function DownloadBlock({ block }: { block: ContentBlock }) {
   }, [exportId]);
   const href = `/api/v1/exports/${encodeURIComponent(exportId)}/download`;
   const remove = async () => {
+    setError('');
     try {
       const response = await fetch(`/api/v1/exports/${encodeURIComponent(exportId)}`, { method: 'DELETE', credentials: 'same-origin' });
       if (!response.ok) throw new Error('The download could not be removed.');
@@ -290,6 +292,7 @@ function DownloadBlock({ block }: { block: ContentBlock }) {
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'The download could not be removed.'); }
   };
   const cancel = async () => {
+    setError('');
     try {
       const response = await fetch(`/api/v1/exports/${encodeURIComponent(exportId)}/cancel`, { method: 'POST', credentials: 'same-origin' });
       const payload = await response.json() as { export?: { status?: DownloadState; error?: string }; error?: string };
@@ -304,7 +307,7 @@ function DownloadBlock({ block }: { block: ContentBlock }) {
     {(status === 'ready' || status === 'error' || status === 'cancelled') && <button type="button" onClick={() => void remove()} aria-label={`Remove ${String(block.title)} download`}>Remove</button>}
     {(status === 'queued' || status === 'running') && <button type="button" onClick={() => void cancel()}>Cancel</button>}
     {(status === 'queued' || status === 'running') && <span className="assistant-download-progress" role="status">Preparing download…</span>}
-    {status === 'error' && <p role="alert">{error || 'The download could not be generated.'}</p>}
+    {(error || status === 'error') && <p role="alert">{error || 'The download could not be generated.'}</p>}
   </section>;
 }
 
@@ -334,7 +337,7 @@ function renderBlock(block: ContentBlock, index: number): ReactNode {
     case 'clarification':
       return <div key={index} className="assistant-clarification"><strong>{String(block.question)}</strong>{Array.isArray(block.choices) && <div>{block.choices.map((choice) => <button type="button" key={String(choice)} onClick={() => window.dispatchEvent(new CustomEvent('dbchat:clarification', { detail: String(choice) }))}>{String(choice)}</button>)}</div>}</div>;
     case 'download':
-      return <DownloadBlock key={index} block={block} />;
+      return <DownloadBlock key={`${index}:${String(block.exportId)}`} block={block} />;
     default:
       return null;
   }

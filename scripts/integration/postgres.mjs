@@ -1,3 +1,4 @@
+import { createTlsFixture } from './tlsFixture.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -153,6 +154,33 @@ async function main() {
   assert.equal((await connector.executeQuery('select 1::int as connected')).rows[0].connected, 1);
   await connector.executeQuery("select set_config('statement_timeout', '30000', false)");
 
+  // The guard must reject the frame header before pg buffers a giant cell.
+  await assert.rejects(() => connector.executeQuery("select repeat('x', 9000000) as oversized"), /transport size limit/);
+  await connector.connect(connection(port));
+  assert.equal((await connector.executeQuery('select 1::int as recovered')).rows[0].recovered, 1);
+  await assert.rejects(() => connector.executeQuery("select repeat('x', 1000000) as value from generate_series(1, 20)"), /transport size limit/);
+  await connector.connect(connection(port));
+
+  const tlsFixture = createTlsFixture();
+  try {
+    docker(['cp', tlsFixture.certificate, `${container}:/tmp/dbchat-server.crt`]);
+    docker(['cp', tlsFixture.key, `${container}:/tmp/dbchat-server.key`]);
+    docker(['exec', container, 'chown', 'postgres:postgres', '/tmp/dbchat-server.crt', '/tmp/dbchat-server.key']);
+    docker(['exec', container, 'chmod', '600', '/tmp/dbchat-server.key']);
+    psql("ALTER SYSTEM SET ssl_cert_file = '/tmp/dbchat-server.crt'; ALTER SYSTEM SET ssl_key_file = '/tmp/dbchat-server.key'; ALTER SYSTEM SET ssl = 'on'; SELECT pg_reload_conf();");
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const secure = new PostgresConnector();
+    const secureConfig = { ...connection(port), host: 'localhost', resolvedAddress: '127.0.0.1', ssl: true };
+    try {
+      await secure.connect(secureConfig);
+      assert.equal((await secure.executeQuery('select 1::int as secure')).rows[0].secure, 1);
+      await assert.rejects(secure.executeQuery("select repeat('x', 9000000) as oversized"), /transport size limit/);
+      await secure.connect(secureConfig);
+      assert.equal((await secure.executeQuery('select 1::int as recovered')).rows[0].recovered, 1);
+      await assert.rejects(secure.connect({ ...secureConfig, host: 'wrong-hostname.invalid' }), /hostname|altnames|certificate/i);
+    } finally { secure.close(); }
+  } finally { tlsFixture.close(); }
+
   const schema = await connector.introspect();
   assert.deepEqual(schema.tables.map(table => table.qualifiedName), [
     '"crm"."Customers"', '"odd.schema"."Table""Name"', '"sales"."Orders"', '"sales"."export_rows"'
@@ -274,7 +302,7 @@ async function main() {
     checks: ['quoted and schema-qualified identifiers', 'composite primary and foreign keys', 'restricted introspection',
       'decimal, null, and timestamp boundaries', 'join totals', 'result truncation', 'full streaming export and explicit limit', 'safe-mode and database read-only enforcement',
       'invalid authentication', 'signal cancellation and reconnect', 'server statement timeout and connection reuse',
-      'unexpected disconnect and reconnect', 'scripted WebAgentService turn through WebPolicyConnector'],
+      'oversized single-row and cumulative response transport rejection with reconnect', 'verified TLS transport, oversized TLS row rejection, and hostname mismatch denial', 'unexpected disconnect and reconnect', 'scripted WebAgentService turn through WebPolicyConnector'],
     agentArtifactRows: agentResult.artifacts[0].result.rowCount,
     limitations: ['A deterministic connection-establishment timeout test is omitted because the connector timeout is 10 seconds and unroutable addresses are environment-dependent.']
   }, null, 2) + '\n');

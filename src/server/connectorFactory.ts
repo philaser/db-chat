@@ -32,8 +32,19 @@ export class WebPolicyConnector implements DatabaseConnector {
     return this.inner.connect(config);
   }
 
-  introspect(): Promise<DatabaseSchema> {
-    return this.inner.introspect();
+  async introspect(): Promise<DatabaseSchema> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.inner.introspect(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            this.inner.close();
+            reject(new Error('Database schema discovery exceeded its 35-second deadline. Reduce the tables visible to this account.'));
+          }, 35_000);
+        })
+      ]);
+    } finally { clearTimeout(timer); }
   }
 
   setSafetyLevel(level: SafetyLevel): void {

@@ -29,6 +29,13 @@ function context(artifacts: QueryResultArtifact[] = [], schema: DatabaseSchema |
 }
 
 describe('analytical tool contracts', () => {
+  it.each(['9007199254740993', '9007199254740993.0', '9.007199254740993e15'])('rejects unsafe chart integers in every numeric representation: %s', async amount => {
+    const evidence: QueryResultArtifact = { ...artifact('large', 1), result: { columns: ['category', 'amount'], rows: [{ category: 'A', amount }], rowCount: 1, elapsedMs: 0 } };
+    const result = await createToolRegistry().execute('visualize_data', { resultId: 'large', chartType: 'bar', nameKey: 'category', valueKeys: ['amount'] }, context([evidence]));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/outside the safe chart range/);
+  });
+
   it('retrieves exact 15-row evidence and honestly labels a bounded 100-row artifact', async () => {
     const registry = createToolRegistry();
     const fifteen = artifact('result-15', 15);

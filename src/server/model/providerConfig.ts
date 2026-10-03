@@ -1,3 +1,4 @@
+import { readProviderJson } from './responseLimits.js';
 import type { ModelInfo } from '../../shared/types.js';
 
 export type InferenceProvider = 'openrouter' | 'openai' | 'deepseek';
@@ -45,12 +46,12 @@ export async function validatePersonalProviderKey(
   try {
     const response = await fetch(`${PROVIDER_BASE_URLS[provider]}/models`, {
       headers: { Authorization: `Bearer ${apiKey}` },
-      signal: controller.signal
+      signal: controller.signal, redirect: 'error'
     });
     if (!response.ok) {
       throw new Error(`The ${provider} API key could not be verified (HTTP ${response.status}).`);
     }
-    const payload = await response.json() as { data?: Array<{ id?: unknown }> };
+    const payload = await readProviderJson(response) as { data?: Array<{ id?: unknown }> };
     const defaultModel = DEFAULT_PERSONAL_PROVIDER_MODELS[provider];
     if (!Array.isArray(payload.data) || !payload.data.some((model) => model.id === defaultModel)) {
       throw new Error(`The ${provider} API key does not have access to ${defaultModel}.`);

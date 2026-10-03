@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createTlsFixture } from './tlsFixture.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -150,6 +151,47 @@ try {
     for await (const batch of connector.exportQuery('SELECT id FROM sequence_rows ORDER BY id LIMIT 1005')) limited.push(...batch.rows);
     assert.equal(limited.length, 1005);
     await assert.rejects(async () => { for await (const _batch of connector.exportQuery('DELETE FROM sequence_rows')) {} }, /read-only/);
+  });
+  await check('wire limits reject oversized cells and cumulative results, then reconnect', async () => {
+    await assert.rejects(connector.executeQuery("SELECT REPEAT('x', 9000000) AS oversized"), /transport size limit/);
+    await connector.connect(config);
+    await assert.rejects(connector.executeQuery("SELECT REPEAT('x', 1000000) AS value FROM sequence_rows LIMIT 20"), /transport size limit/);
+    await connector.connect(config);
+    assert.equal((await connector.executeQuery('SELECT 1 AS recovered')).rows[0].recovered, 1);
+  });
+  await check('driver timeout destroys the query before rollback and reconnects', async () => {
+    const deadlineConnector = new MySQLConnector();
+    await deadlineConnector.connect(config);
+    deadlineConnector.setSafetyLevel('safe');
+    // Exercise the real driver's timeout callback without adding 30 seconds to CI.
+    const connection = deadlineConnector.connection;
+    const query = connection.query.bind(connection);
+    connection.query = (input, values) => query(typeof input === 'object' ? { ...input, timeout: 200 } : input, values);
+    const started = performance.now();
+    try {
+      await assert.rejects(deadlineConnector.executeQuery('SELECT SLEEP(5)'), /timeout/i);
+      assert.ok(performance.now() - started < 2_000, 'Timed-out query waited for queued rollback');
+      await deadlineConnector.connect(config);
+      assert.equal((await deadlineConnector.executeQuery('SELECT 1 AS recovered')).rows[0].recovered, 1);
+    } finally { deadlineConnector.close(); }
+  });
+  await check('TLS verifies hostname and enforces the row limit before decoding', async () => {
+    const fixture = createTlsFixture();
+    const secure = new MySQLConnector();
+    try {
+      docker('cp', fixture.certificate, `${container}:/var/lib/mysql/server-cert.pem`);
+      docker('cp', fixture.certificate, `${container}:/var/lib/mysql/ca.pem`);
+      docker('cp', fixture.key, `${container}:/var/lib/mysql/server-key.pem`);
+      docker('exec', container, 'chown', 'mysql:mysql', '/var/lib/mysql/server-cert.pem', '/var/lib/mysql/server-key.pem', '/var/lib/mysql/ca.pem');
+      docker('exec', container, 'chmod', '600', '/var/lib/mysql/server-key.pem');
+      await root.query('ALTER INSTANCE RELOAD TLS');
+      await secure.connect({ ...config, ssl: true });
+      assert.equal((await secure.executeQuery('SELECT 1 AS secure')).rows[0].secure, 1);
+      await assert.rejects(secure.executeQuery("SELECT REPEAT('x', 9000000) AS oversized"), /transport size limit/);
+      await secure.connect({ ...config, ssl: true });
+      assert.equal((await secure.executeQuery('SELECT 1 AS recovered')).rows[0].recovered, 1);
+      await assert.rejects(secure.connect({ ...config, host: 'wrong-hostname.invalid', ssl: true }), /hostname|altnames|certificate/i);
+    } finally { secure.close(); fixture.close(); }
   });
   await check('safe mode and database grants both enforce read-only access', async () => {
     connector.setSafetyLevel('safe');

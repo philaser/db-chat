@@ -1,4 +1,7 @@
+import { SAVED_READ_BYTES, CONTEXT_ARTIFACT_BYTES, CONTEXT_MESSAGE_BYTES, CONTEXT_CANDIDATES, SavedDataReadLimitError, boundedContextMessages, isContextRelevant, isContextRetained, spendReadBudget, type ChatContextSelection, type SavedReadBudget } from './savedDataLimits.js';
+import { WorkerLeaseError, TurnCapacityError, type WorkerHeartbeat } from './workerCoordinator.js';
 import { referencedResultIds } from './conversationContext.js';
+import { ManagedTurnQuotaError, UploadQuotaError, type TurnClaimOptions, type UploadAllowance } from './turnQuota.js';
 import { defaultEffortForModel } from './config.js';
 import { DEFAULT_PERSONAL_PROVIDER_MODELS } from './model/providers.js';
 import {
@@ -86,6 +89,8 @@ interface AccountStoreSnapshot {
   sessions?: StoredSession[];
   turns?: { userId: string; requestId: string; snapshot: ChatTurnSnapshot }[];
   knowledge?: { userId: string; connectionId: string; value: ConnectionKnowledge }[];
+  managedUsage?: { day: string; scope: string; count: number }[];
+  uploadUsage?: { day: string; scope: string; count: number; bytes: number }[];
 }
 
 function loadOrCreateSecretKey(keyPath: string): string {
@@ -278,7 +283,11 @@ export class AccountStore {
   private readonly usersByEmail = new Map<string, string>();
   private readonly sessions = new Map<string, StoredSession>();
   private readonly connections = new Map<string, StoredConnection>();
+  private readonly workers = new Map<string, number>();
+  private readonly executions = new Map<string, { owner: string; worker: string; cancelled: boolean; finished: boolean }>();
   private readonly turns = new Map<string, { userId: string; requestId: string; snapshot: ChatTurnSnapshot }>();
+  private readonly managedUsage = new Map<string, { day: string; scope: string; count: number }>();
+  private readonly uploadUsage = new Map<string, { day: string; scope: string; count: number; bytes: number }>();
   private readonly knowledge = new Map<string, { userId: string; connectionId: string; value: ConnectionKnowledge }>();
   private readonly chats = new Map<string, StoredChatSession>();
   private readonly vault: SecretVault;
@@ -347,6 +356,11 @@ export class AccountStore {
       throw new Error('The email or password is incorrect.');
     }
     return { user: this.toUser(user), sessionId: this.createSession(user.id) };
+  }
+
+  verifyAccountPassword(userId: string, password: string): void {
+    const user = this.users.get(userId);
+    if (!user?.passwordHash || !user.passwordSalt || !verifyPassword(password, user.passwordSalt, user.passwordHash)) throw new Error('The email or password is incorrect.');
   }
 
   principalForSession(sessionId: string | undefined): Principal | null {
@@ -467,21 +481,75 @@ export class AccountStore {
     return chat?.userId === userId ? displayChat(chat) : null;
   }
 
+  getChatSummary(userId: string, chatId: string): WebChatSummary | null { const chat = this.chats.get(chatId); return chat?.userId === userId ? summarizeChat(chat) : null; }
+
+  hasChat(userId: string, chatId: string): boolean { return this.chats.get(chatId)?.userId === userId; }
+
+  getChatArtifact(userId: string, chatId: string, artifactId: string): QueryResultArtifact | null {
+    const chat = this.chats.get(chatId);
+    if (chat?.userId !== userId) return null;
+    const artifact = chat.artifacts.find(item => item.queryId === artifactId) ?? chat.latestTurn?.artifacts?.find(item => item.queryId === artifactId);
+    if (!artifact) return null;
+    spendReadBudget({ remaining: CONTEXT_ARTIFACT_BYTES }, Buffer.byteLength(JSON.stringify(artifact)));
+    return structuredClone(artifact);
+  }
+
+  getChatContext(userId: string, chatId: string, selection: ChatContextSelection = {}): WebChatSession | null {
+    const chat = this.chats.get(chatId);
+    if (chat?.userId !== userId) return null;
+    const relevant = chat.messages.map((body, position) => ({ body, position })).filter(row => isContextRelevant(row.body));
+    const recent = relevant.slice(-30);
+    const retained = relevant.filter(row => isContextRetained(row.body));
+    const candidates = retained.slice(-CONTEXT_CANDIDATES);
+    if (retained.length > CONTEXT_CANDIDATES) {
+      const horizon = candidates[0].position;
+      const contributing = [...new Map([...recent, ...candidates].filter(row => row.position >= horizon).map(row => [row.body.id, row])).values()];
+      if (contributing.reduce((sum, row) => sum + Math.min(8000, row.body.content.length), 0) < 64000) throw new SavedDataReadLimitError();
+    }
+    const selectedIds = new Set(selection.messageId ? [selection.messageId] : []);
+    const selectedArtifact = chat.artifacts.find(item => item.queryId === selection.artifactId);
+    if (selectedArtifact?.messageId) selectedIds.add(selectedArtifact.messageId);
+    const selected = relevant.filter(row => selectedIds.has(row.body.id));
+    for (const row of [...selected]) if (!row.body.turn?.question) {
+      const question = [...relevant].reverse().find(item => item.position <= row.position && item.body.role === 'user');
+      if (question) selected.push(question);
+    }
+    const messages = boundedContextMessages([...recent, ...candidates, ...selected]);
+    const budget: SavedReadBudget = { remaining: SAVED_READ_BYTES };
+    spendReadBudget({ remaining: CONTEXT_MESSAGE_BYTES, parent: budget }, Buffer.byteLength(JSON.stringify(messages)));
+    const ids = new Set(messages.map(message => message.id));
+    const results = new Set([...referencedResultIds(messages), ...(selection.artifactId ? [selection.artifactId] : [])]);
+    const artifacts = chat.artifacts.filter(artifact => artifact.messageId == null || results.has(artifact.queryId) || ids.has(artifact.messageId));
+    const artifactBudget = { remaining: CONTEXT_ARTIFACT_BYTES, parent: budget };
+    for (const artifact of artifacts) spendReadBudget(artifactBudget, Buffer.byteLength(JSON.stringify(artifact)));
+    return { ...summarizeChat(chat), messages, artifacts: structuredClone(artifacts), latestTurn: this.compactLatestTurn(chat.latestTurn) };
+  }
+
+  private compactLatestTurn(turn: WebChatSession['latestTurn']): WebChatSession['latestTurn'] {
+    if (!turn) return undefined;
+    return { id: turn.id, chatId: turn.chatId, assistantMessageId: turn.assistantMessageId, createdAt: turn.createdAt,
+      status: turn.status, question: turn.question, attemptOf: turn.attemptOf, connectionId: turn.connectionId,
+      error: turn.error, intent: turn.intent ? structuredClone(turn.intent) : undefined, events: [] };
+  }
+
   getChatPage(userId: string, chatId: string, options: { before?: string; limit: number }): WebChatSession | null {
-    const chat = this.getChat(userId, chatId);
-    if (!chat) return null;
+    if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 100) throw new Error('History page size must be between 1 and 100.');
+    const chat = this.chats.get(chatId);
+    if (chat?.userId !== userId) return null;
     const end = options.before ? chat.messages.findIndex(message => message.id === options.before) : chat.messages.length;
     if (end < 0) throw new Error('Invalid history cursor.');
     const start = Math.max(0, end - options.limit);
-    chat.messages = chat.messages.slice(start, end);
-    const ids = new Set(chat.messages.map(message => message.id));
-    const results = new Set(referencedResultIds(chat.messages));
+    const messages = chat.messages.slice(start, end);
+    const ids = new Set(messages.map(message => message.id));
+    const results = new Set(referencedResultIds(messages));
     if (chat.latestTurn?.intent?.artifactId && ids.has(chat.latestTurn.assistantMessageId ?? '')) results.add(chat.latestTurn.intent.artifactId);
-    chat.artifacts = chat.artifacts.filter(artifact => results.has(artifact.queryId) || (artifact.messageId ? ids.has(artifact.messageId) : start === 0));
-    chat.historyHasMore = start > 0;
-    chat.historyCursor = chat.historyHasMore ? chat.messages[0]?.id : undefined;
-    if (chat.latestTurn) chat.latestTurn = { ...chat.latestTurn, events: [], artifacts: undefined };
-    return chat;
+    const artifacts = chat.artifacts.filter(artifact => results.has(artifact.queryId) || (artifact.messageId ? ids.has(artifact.messageId) : start === 0));
+    const budget: SavedReadBudget = { remaining: SAVED_READ_BYTES };
+    spendReadBudget(budget, Buffer.byteLength(JSON.stringify(messages)));
+    const artifactBudget = { remaining: CONTEXT_ARTIFACT_BYTES, parent: budget };
+    for (const artifact of artifacts) spendReadBudget(artifactBudget, Buffer.byteLength(JSON.stringify(artifact)));
+    return { ...summarizeChat(chat), messages: structuredClone(messages), artifacts: structuredClone(artifacts),
+      latestTurn: this.compactLatestTurn(chat.latestTurn), historyHasMore: start > 0, historyCursor: start > 0 ? messages[0]?.id : undefined };
   }
 
   createChat(userId: string, connectionId?: string, source?: SourceSnapshot): WebChatSession {
@@ -558,24 +626,58 @@ export class AccountStore {
     return displayChat(chat!);
   }
 
-  claimTurn(userId: string, turnId: string, chatId: string, requestId: string, userMessage: ChatMessage, assistantMessageId: string): { turnId: string; created: boolean } {
+  claimTurn(userId: string, turnId: string, chatId: string, requestId: string, userMessage: ChatMessage, assistantMessageId: string, options: TurnClaimOptions = {}): { turnId: string; created: boolean } {
     const prior = [...this.turns.values()].find(item => item.userId === userId && item.requestId === requestId);
     if (prior) {
       if (prior.snapshot.chatId !== chatId) throw new Error('Request belongs to another chat.');
       return { turnId: prior.snapshot.id, created: false };
     }
+    if (options.workerId) {
+      this.assertWorker(options.workerId);
+      const active = [...this.executions.values()].filter(item => !item.finished && (this.workers.get(item.worker) ?? 0) > Date.now());
+      if (active.length >= (options.globalActiveLimit ?? 8) || active.filter(item => item.owner === userId).length >= (options.accountActiveLimit ?? 2)) throw new TurnCapacityError();
+    }
     const chat = this.chats.get(chatId);
     if (!chat || chat.userId !== userId) throw new Error('Chat not found.');
     if ([...this.turns.values()].some(item => item.userId === userId && item.snapshot.chatId === chatId && ['queued', 'running'].includes(item.snapshot.status))) throw new Error('A turn is already active in this chat.');
     if (userMessage.id === assistantMessageId || chat.messages.some(message => message.id === userMessage.id || message.id === assistantMessageId)) throw new Error('Message identifiers must be unique within this chat.');
-    const snapshot: ChatTurnSnapshot = { id: turnId, chatId, connectionId: chat.connectionId, question: userMessage.content, assistantMessageId, createdAt: userMessage.createdAt, status: 'queued', events: [] };
+    const day = new Date().toISOString().slice(0, 10);
+    if (options.managed) {
+      const account = this.managedUsage.get(day + ':' + userId)?.count ?? 0;
+      const global = this.managedUsage.get(day + ':global')?.count ?? 0;
+      if (account >= (options.accountDailyLimit ?? 100)) throw new ManagedTurnQuotaError('account');
+      if (global >= (options.globalDailyLimit ?? 1000)) throw new ManagedTurnQuotaError('global');
+      this.managedUsage.set(day + ':' + userId, { day, scope: userId, count: account + 1 });
+      this.managedUsage.set(day + ':global', { day, scope: 'global', count: global + 1 });
+    }
+    const snapshot: ChatTurnSnapshot = { id: turnId, chatId, connectionId: chat.connectionId, question: userMessage.content, assistantMessageId, createdAt: userMessage.createdAt, status: 'queued', events: [], attemptOf: options.attemptOf, intent: options.intent };
     this.turns.set(turnId, { userId, requestId, snapshot });
+    if (options.workerId) this.executions.set(turnId, { owner: userId, worker: options.workerId, cancelled: false, finished: false });
     chat.latestTurn = snapshot;
     this.updateChat(userId, chatId, { messages: [...chat.messages, userMessage] });
     return { turnId, created: true };
   }
 
-  saveTurn(userId: string, snapshot: ChatTurnSnapshot): void {
+  reserveSqliteUpload(userId: string, bytes: number, limits: UploadAllowance): void {
+    this.assertUser(userId);
+    const day = new Date().toISOString().slice(0, 10);
+    const account = this.uploadUsage.get(day + ':' + userId) ?? { day, scope: userId, count: 0, bytes: 0 };
+    const global = this.uploadUsage.get(day + ':global') ?? { day, scope: 'global', count: 0, bytes: 0 };
+    if (account.count >= limits.accountCount || global.count >= limits.globalCount || account.bytes + bytes > limits.accountBytes || global.bytes + bytes > limits.globalBytes) throw new UploadQuotaError();
+    this.uploadUsage.set(day + ':' + userId, { ...account, count: account.count + 1, bytes: account.bytes + bytes });
+    this.uploadUsage.set(day + ':global', { ...global, count: global.count + 1, bytes: global.bytes + bytes });
+    this.persist();
+  }
+
+  pruneUsage(): void {
+    const oldest = new Date(Date.now() - 86400_000).toISOString().slice(0, 10);
+    for (const [key, value] of this.managedUsage) if (value.day < oldest) this.managedUsage.delete(key);
+    for (const [key, value] of this.uploadUsage) if (value.day < oldest) this.uploadUsage.delete(key);
+    this.persist();
+  }
+
+  saveTurn(userId: string, snapshot: ChatTurnSnapshot, workerId?: string): void {
+    if (workerId) this.assertExecution(userId, snapshot.id, workerId);
     const old = this.turns.get(snapshot.id);
     if (old && old.userId !== userId) throw new Error('Turn not found.');
     if (old && !['queued', 'running'].includes(old.snapshot.status)) return;
@@ -595,10 +697,16 @@ export class AccountStore {
     return stored?.userId === userId ? structuredClone(stored.snapshot) : null;
   }
 
-  finalizeTurn(userId: string, snapshot: ChatTurnSnapshot, message?: ChatMessage, artifacts: QueryResultArtifact[] = snapshot.artifacts ?? []): void {
+  finalizeTurn(userId: string, snapshot: ChatTurnSnapshot, message?: ChatMessage, artifacts: QueryResultArtifact[] = snapshot.artifacts ?? [], workerId?: string): ChatTurnSnapshot | Promise<ChatTurnSnapshot> {
+    const execution = workerId ? this.assertExecution(userId, snapshot.id, workerId, true) : undefined;
     const previous = this.turns.get(snapshot.id);
     if (!previous || previous.userId !== userId) throw new Error('Turn not found.');
-    if (!['queued', 'running'].includes(previous.snapshot.status)) return;
+    if (!['queued', 'running'].includes(previous.snapshot.status)) return structuredClone(previous.snapshot);
+    if (execution?.finished) throw new WorkerLeaseError();
+    if (execution?.cancelled) {
+      message = message ? { ...message, content: 'Answer stopped.', turn: { ...message.turn!, status: 'aborted' } } : undefined; artifacts = [];
+      snapshot = { ...snapshot, status: 'aborted', error: 'Answer stopped.', artifacts: [], events: [...previous.snapshot.events, { id: previous.snapshot.events.length + 1, turnId: snapshot.id, type: 'aborted', timestamp: new Date().toISOString(), data: { message: 'Answer stopped.' } }] };
+    }
     const chat = snapshot.chatId ? this.chats.get(snapshot.chatId) : undefined;
     if (chat?.userId === userId) {
       const terminalMessage = message ?? (snapshot.assistantMessageId ? {
@@ -610,7 +718,52 @@ export class AccountStore {
       chat.latestTurn = structuredClone(snapshot);
     }
     previous.snapshot = structuredClone(snapshot);
+    if (execution) execution.finished = true;
     this.persist();
+    return structuredClone(snapshot);
+  }
+
+  isAccountDeleting(_owner: string): boolean { return false; }
+  registerWorker(id: string, leaseMs: number): WorkerHeartbeat {
+    if (this.workers.has(id)) return { alive: false, cancelledTurns: [] };
+    this.workers.set(id, Date.now() + leaseMs);
+    return { alive: true, cancelledTurns: [] };
+  }
+  heartbeatWorker(id: string, leaseMs: number): WorkerHeartbeat {
+    if ((this.workers.get(id) ?? 0) <= Date.now()) return { alive: false, cancelledTurns: [] };
+    this.workers.set(id, Date.now() + leaseMs);
+    return { alive: true, cancelledTurns: [...this.executions].filter(([, e]) => e.worker === id && e.cancelled && !e.finished).map(([turn]) => turn) };
+  }
+  releaseWorker(id: string): void { this.workers.set(id, 0); }
+  private assertWorker(id: string): void { if ((this.workers.get(id) ?? 0) <= Date.now()) throw new WorkerLeaseError(); }
+  private assertExecution(owner: string, turn: string, worker: string, allowFinished = false) {
+    this.assertWorker(worker);
+    const e = this.executions.get(turn);
+    if (!e || e.owner !== owner || e.worker !== worker || (!allowFinished && e.finished)) throw new WorkerLeaseError();
+    return e;
+  }
+  finishTurnExecution(owner: string, turn: string, worker: string): void {
+    const e = this.executions.get(turn); if (e?.owner === owner && e.worker === worker) e.finished = true;
+  }
+  cancelTurn(owner: string, turn: string): boolean {
+    if (this.turns.get(turn)?.userId !== owner) return false;
+    const e = this.executions.get(turn); if (e && !e.finished) e.cancelled = true;
+    return true;
+  }
+  cancelOwnerTurns(owner: string): number {
+    let active = 0;
+    for (const e of this.executions.values()) if (e.owner === owner && !e.finished) { e.cancelled = true; if ((this.workers.get(e.worker) ?? 0) > Date.now()) active++; }
+    return active;
+  }
+  async recoverExpiredTurns(): Promise<void> {
+    for (const [id, stored] of this.turns) {
+      if (!['queued', 'running'].includes(stored.snapshot.status)) continue;
+      const e = this.executions.get(id);
+      if (e && !e.finished && (this.workers.get(e.worker) ?? 0) > Date.now()) continue;
+      const error = 'The answer worker stopped before this answer finished. Please retry.';
+      await this.finalizeTurn(stored.userId, { ...stored.snapshot, status: 'error', error, events: [...stored.snapshot.events, { id: stored.snapshot.events.length + 1, turnId: id, type: 'error', timestamp: new Date().toISOString(), data: { message: error } }] });
+      if (e) e.finished = true;
+    }
   }
 
   interruptPendingTurns(): void {
@@ -828,6 +981,8 @@ export class AccountStore {
       this.chats.set(chat.id, chat);
     }
     for (const turn of snapshot.turns ?? []) this.turns.set(turn.snapshot.id, turn);
+    for (const usage of snapshot.managedUsage ?? []) this.managedUsage.set(usage.day + ':' + usage.scope, usage);
+    for (const usage of snapshot.uploadUsage ?? []) this.uploadUsage.set(usage.day + ':' + usage.scope, usage);
     for (const entry of snapshot.knowledge ?? []) this.knowledge.set(entry.userId + ':' + entry.connectionId, entry);
     const now = Date.now();
     for (const session of snapshot.sessions ?? []) {
@@ -848,7 +1003,9 @@ export class AccountStore {
       chats: [...this.chats.values()],
       sessions: [...this.sessions.values()],
       turns: [...this.turns.values()],
-      knowledge: [...this.knowledge.values()]
+      knowledge: [...this.knowledge.values()],
+      managedUsage: [...this.managedUsage.values()],
+      uploadUsage: [...this.uploadUsage.values()]
     };
     const temporaryPath = this.storePath + '.' + process.pid + '.tmp';
     fs.writeFileSync(temporaryPath, JSON.stringify(snapshot, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });

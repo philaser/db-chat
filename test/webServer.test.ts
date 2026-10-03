@@ -479,7 +479,7 @@ describe('web server', () => {
         'X-DBChat-Filename': encodeURIComponent('hosted-qa.sqlite'),
         Cookie: cookie!
       },
-      body: Buffer.from('sqlite fixture bytes')
+      body: Buffer.from('SQLite format 3\0fixture bytes')
     });
     expect(uploadResponse.status).toBe(201);
     const uploadBody = await uploadResponse.json() as { uploadId: string; fileName: string };

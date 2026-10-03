@@ -229,6 +229,20 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return payload;
 }
 
+/** Retry oversized history pages without changing their cursor or navigation owner. */
+async function fetchChatPage(chatId: string, options: { limit: number; before?: string }, isCurrent: () => boolean): Promise<{ chat: WebChatSession }> {
+  let limit = options.limit;
+  for (;;) {
+    const before = options.before === undefined ? '' : 'before=' + encodeURIComponent(options.before) + '&';
+    try {
+      return await api<{ chat: WebChatSession }>('/api/v1/chats/' + encodeURIComponent(chatId) + '?' + before + 'limit=' + limit);
+    } catch (reason) {
+      if (!(reason instanceof ApiError) || reason.status !== 413 || limit <= 1 || !isCurrent()) throw reason;
+      limit = Math.max(1, Math.floor(limit / 2));
+    }
+  }
+}
+
 function formatKind(kind?: string): string {
   if (!kind) return 'Database';
   const names: Record<string, string> = {
@@ -490,8 +504,17 @@ export function AppBar({
   navigationOpen?: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [accountError, setAccountError] = useState('');
+  const [accountPending, setAccountPending] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+
+  const runAccountAction = async (action: () => Promise<void>) => {
+    setAccountError(''); setAccountPending(true);
+    try { await action(); setMenuOpen(false); }
+    catch (reason) { setAccountError(reason instanceof Error ? reason.message : 'The account action could not be completed. Please try again.'); }
+    finally { setAccountPending(false); }
+  };
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -550,13 +573,14 @@ export function AppBar({
               <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); onNavigate('/settings'); }}>
                 <Settings size={16} /> Settings
               </button>
-              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void onRefresh(); }}>
+              <button type="button" role="menuitem" disabled={accountPending} onClick={() => void runAccountAction(onRefresh)}>
                 <RefreshCw size={16} /> Refresh workspace
               </button>
               <div className="popover-rule" />
-              <button type="button" role="menuitem" className="menu-destructive" onClick={() => { setMenuOpen(false); void onLogout(); }}>
+              <button type="button" role="menuitem" className="menu-destructive" disabled={accountPending} onClick={() => void runAccountAction(onLogout)}>
                 <LogOut size={16} /> Log out
               </button>
+              {accountError && <Alert>{accountError}</Alert>}
             </div>
           )}
         </div>
@@ -736,17 +760,23 @@ function WorkspaceSidebar({
   const [connectionFilter, setConnectionFilter] = useState('');
   const [visibleChats, setVisibleChats] = useState(chats);
   const [searching, setSearching] = useState(false);
-  useEffect(() => { if (!chatSearch && !connectionFilter) setVisibleChats(chats); }, [chats, chatSearch, connectionFilter]);
+  const [connectionError, setConnectionError] = useState('');
+  const [selectingConnection, setSelectingConnection] = useState(false);
+  const visibleConnectionId = route.startsWith('/chat/')
+    ? chats.find((chat) => chat.id === selectedChatId)?.connectionId
+    : bootstrap.activeConnectionId;
+  useEffect(() => { if (!chatSearch.trim() && !connectionFilter) setVisibleChats(chats); }, [chats, chatSearch, connectionFilter]);
   useEffect(() => {
-    if (!chatSearch.trim() && !connectionFilter) return;
+    let cancelled = false;
+    if (!chatSearch.trim() && !connectionFilter) { setSearching(false); return; }
     const timeout = window.setTimeout(() => {
       setSearching(true);
       const params = new URLSearchParams({ limit: '50' });
       if (chatSearch.trim()) params.set('q', chatSearch.trim());
       if (connectionFilter) params.set('connectionId', connectionFilter);
-      void api<{ chats: WebChatSummary[] }>('/api/v1/chats?' + params).then(({ chats: matches }) => setVisibleChats(matches)).catch(() => setVisibleChats([])).finally(() => setSearching(false));
+      void api<{ chats: WebChatSummary[] }>('/api/v1/chats?' + params).then(({ chats: matches }) => { if (!cancelled) setVisibleChats(matches); }).catch(() => { if (!cancelled) setVisibleChats([]); }).finally(() => { if (!cancelled) setSearching(false); });
     }, 220);
-    return () => window.clearTimeout(timeout);
+    return () => { cancelled = true; window.clearTimeout(timeout); };
   }, [chatSearch, connectionFilter]);
   return (
     <aside className="workspace-sidebar" aria-label="Workspace navigation">
@@ -760,13 +790,17 @@ function WorkspaceSidebar({
           <div className="sidebar-section">
             <p className="sidebar-section-label">Connections</p>
             {bootstrap.connections.length > 0 ? bootstrap.connections.map((connection) => {
-              const selected = connection.id === bootstrap.activeConnectionId;
+              const selected = connection.id === visibleConnectionId;
               return (
                 <button
                   type="button"
                   className={'sidebar-row sidebar-connection-row' + (selected ? ' selected' : '')}
                   key={connection.id}
-                  onClick={() => void onSelectConnection(connection.id)}
+                  disabled={selectingConnection}
+                  onClick={() => {
+                    setConnectionError(''); setSelectingConnection(true);
+                    void onSelectConnection(connection.id).catch((reason) => setConnectionError(reason instanceof Error ? reason.message : 'The connection could not be selected.')).finally(() => setSelectingConnection(false));
+                  }}
                   aria-current={selected ? 'true' : undefined}
                 >
                   <Database size={21} strokeWidth={1.7} aria-hidden="true" />
@@ -782,7 +816,7 @@ function WorkspaceSidebar({
               </button>
             )}
           </div>
-
+          {connectionError && <p role="alert">{connectionError}</p>}
           <div className="sidebar-section">
             <p className="sidebar-section-label">Chats</p>
             <label className="sidebar-chat-search"><Search size={14} aria-hidden="true" /><span className="sr-only">Search chats</span><input value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} placeholder="Search chats" /></label>
@@ -1196,6 +1230,7 @@ function EntryStage({
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
+    setPrompts(fallbackPrompts);
     setLoadingPrompts(true);
     void api<{ suggestions: string[] }>('/api/v1/connections/' + encodeURIComponent(active.id) + '/suggestions')
       .then(({ suggestions }) => { if (!cancelled && suggestions.length) setPrompts(suggestions.slice(0, 5)); })
@@ -1294,6 +1329,7 @@ export function DataInspector({
   const [exportFormat, setExportFormat] = useState<'csv' | 'xlsx' | 'json'>('csv');
   const [dataExport, setDataExport] = useState<DataExportState | null>(null);
   const [recentExports, setRecentExports] = useState<DataExportState[]>([]);
+  const exportGenerationRef = useRef(0);
   const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const inspectorRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -1346,6 +1382,13 @@ export function DataInspector({
     setColumnsOpen(false);
     setDataExport(null);
   }, [artifact.queryId, artifact.schema, connectionId]);
+
+  useEffect(() => {
+    exportGenerationRef.current += 1;
+    setRecentExports([]);
+    setDataExport(null);
+    return () => { exportGenerationRef.current += 1; };
+  }, [chatId, artifact.queryId, connectionId]);
 
   useEffect(() => {
     if (!chatId) return;
@@ -1405,32 +1448,37 @@ export function DataInspector({
 
   useEffect(() => {
     if (!dataExport?.id || !['queued', 'running'].includes(dataExport.status)) return;
-    const timer = window.setTimeout(() => void api<{ export: typeof dataExport }>(`/api/v1/exports/${encodeURIComponent(dataExport.id)}`).then((payload) => setDataExport(payload.export)).catch((reason) => setDataExport((current) => current ? { ...current, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be generated.' } : current)), 1200);
-    return () => window.clearTimeout(timer);
+    let disposed = false;
+    const timer = window.setTimeout(() => void api<{ export: typeof dataExport }>(`/api/v1/exports/${encodeURIComponent(dataExport.id)}`).then((payload) => { if (!disposed) setDataExport(payload.export); }).catch((reason) => { if (!disposed) setDataExport((current) => current ? { ...current, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be generated.' } : current); }), 1200);
+    return () => { disposed = true; window.clearTimeout(timer); };
   }, [dataExport]);
 
   const createExport = async () => {
+    const generation = exportGenerationRef.current;
     setDataExport({ id: '', format: exportFormat, status: 'queued' });
     try {
       const payload = await api<{ export: DataExportState }>(`/api/v1/chats/${encodeURIComponent(chatId)}/exports`, { method: 'POST', body: JSON.stringify({ resultId: artifact.queryId, format: exportFormat, scope: exportScope, ...(exportScope === 'visible' ? { columns: visibleColumns, rowIndices: visibleEntries.map(({ index }) => index) } : {}) }) });
-      setDataExport(payload.export);
+      if (generation === exportGenerationRef.current) setDataExport(payload.export);
     } catch (reason) {
-      setDataExport({ id: '', format: exportFormat, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be started.' });
+      if (generation === exportGenerationRef.current) setDataExport({ id: '', format: exportFormat, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be started.' });
     }
   };
   const cancelExport = async () => {
     if (!dataExport?.id) return;
-    try { const payload = await api<{ export: DataExportState }>(`/api/v1/exports/${encodeURIComponent(dataExport.id)}/cancel`, { method: 'POST' }); setDataExport(payload.export); }
-    catch (reason) { setDataExport((current) => current ? { ...current, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be cancelled.' } : current); }
+    const generation = exportGenerationRef.current;
+    try { const payload = await api<{ export: DataExportState }>(`/api/v1/exports/${encodeURIComponent(dataExport.id)}/cancel`, { method: 'POST' }); if (generation === exportGenerationRef.current) setDataExport(payload.export); }
+    catch (reason) { if (generation === exportGenerationRef.current) setDataExport((current) => current ? { ...current, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be cancelled.' } : current); }
   };
   const clearExport = async () => {
     if (!dataExport?.id) { setDataExport(null); return; }
-    try { await api<{ ok: true }>(`/api/v1/exports/${encodeURIComponent(dataExport.id)}`, { method: 'DELETE' }); setRecentExports((current) => current.filter((item) => item.id !== dataExport.id)); setDataExport(null); }
-    catch (reason) { setDataExport((current) => current ? { ...current, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be removed.' } : current); }
+    const generation = exportGenerationRef.current;
+    try { await api<{ ok: true }>(`/api/v1/exports/${encodeURIComponent(dataExport.id)}`, { method: 'DELETE' }); if (generation !== exportGenerationRef.current) return; setRecentExports((current) => current.filter((item) => item.id !== dataExport.id)); setDataExport(null); }
+    catch (reason) { if (generation === exportGenerationRef.current) setDataExport((current) => current ? { ...current, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be removed.' } : current); }
   };
   const removeRecentExport = async (item: DataExportState) => {
-    try { await api<{ ok: true }>(`/api/v1/exports/${encodeURIComponent(item.id)}`, { method: 'DELETE' }); setRecentExports((current) => current.filter((entry) => entry.id !== item.id)); }
-    catch (reason) { setDataExport({ ...item, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be removed.' }); }
+    const generation = exportGenerationRef.current;
+    try { await api<{ ok: true }>(`/api/v1/exports/${encodeURIComponent(item.id)}`, { method: 'DELETE' }); if (generation === exportGenerationRef.current) setRecentExports((current) => current.filter((entry) => entry.id !== item.id)); }
+    catch (reason) { if (generation === exportGenerationRef.current) setDataExport({ ...item, status: 'error', error: reason instanceof Error ? reason.message : 'The export could not be removed.' }); }
   };
 
   const moveTab = (event: KeyboardEvent<HTMLButtonElement>, current: InspectorTab) => {
@@ -1762,6 +1810,7 @@ export function ChatWorkspace({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const [chatSource, setChatSource] = useState<WebChatSession['source']>();
+  const [chatConnectionId, setChatConnectionId] = useState<string>();
   const [sourceAvailable, setSourceAvailable] = useState(true);
   const [feedbackCorrections, setFeedbackCorrections] = useState<Record<string, string>>({});
   const [pendingIntent, setPendingIntent] = useState<FollowUpIntent | undefined>();
@@ -1773,7 +1822,10 @@ export function ChatWorkspace({
   const assistantIdRef = useRef<string | null>(null);
   const retryRequestRef = useRef<{ content: string; connectionId: string; clientRequestId: string; userMessage: ChatMessage; assistantMessageId: string; messages: ChatMessage[]; intent?: FollowUpIntent; attemptOf?: string } | null>(null);
   const startingRef = useRef(false);
+  const cancelledSubmissionsRef = useRef(new Map<string, number>());
   const generationRef = useRef(0);
+  const streamRecoveryRef = useRef<number | null>(null);
+  const streamCursorRef = useRef({ turnId: '', eventId: 0 });
   const workingStatusClearRef = useRef<number | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1781,24 +1833,32 @@ export function ChatWorkspace({
   const suppressAutoScrollRef = useRef(false);
   const inspectorOpenerRef = useRef<HTMLButtonElement | null>(null);
   const lastConnectionRef = useRef<string | undefined>(bootstrap.activeConnectionId);
-  const active = bootstrap.connections.find((connection) => connection.id === bootstrap.activeConnectionId);
+  const active = bootstrap.connections.find((connection) => connection.id === (chatId ? chatConnectionId : bootstrap.activeConnectionId));
   const busy = activeTurnId !== null;
 
-  const detachTurn = (abortServer = false) => {
+  const detachTurn = () => {
     generationRef.current += 1;
-    if (abortServer) retryRequestRef.current = null;
-    const turnId = turnRef.current;
+    if (streamRecoveryRef.current !== null) window.clearTimeout(streamRecoveryRef.current);
+    streamRecoveryRef.current = null;
+    if (workingStatusClearRef.current !== null) window.clearTimeout(workingStatusClearRef.current);
+    workingStatusClearRef.current = null;
+    retryRequestRef.current = null;
     turnRef.current = null;
     startingRef.current = false;
-    if (turnId && abortServer) void api('/api/v1/chat/turns/' + encodeURIComponent(turnId) + '/abort', { method: 'POST' }).catch(() => undefined);
     streamRef.current?.close();
     streamRef.current = null;
     setActiveTurnId(null);
+    setReconnecting(false);
+    setLoadingOlder(false);
+    setFeedbackCorrections({});
+    followingRef.current = true;
+    suppressAutoScrollRef.current = false;
+    setShowJumpLatest(false);
   };
 
   useEffect(() => {
-    if (lastConnectionRef.current && lastConnectionRef.current !== bootstrap.activeConnectionId) {
-      detachTurn(true);
+    if (!chatId && lastConnectionRef.current && lastConnectionRef.current !== bootstrap.activeConnectionId) {
+      detachTurn();
       setMessages([]);
       setArtifacts([]);
       setSelectedArtifactId(null);
@@ -1806,13 +1866,19 @@ export function ChatWorkspace({
       setDraft('');
       setError('');
       setPersistedChatId(null);
+      setChatSource(undefined);
+      setChatConnectionId(undefined);
+      setSourceAvailable(true);
+      setPendingIntent(undefined);
+      setPendingAttemptOf(undefined);
+      setResumeTurn(null);
     }
     lastConnectionRef.current = bootstrap.activeConnectionId;
   }, [bootstrap.activeConnectionId]);
 
   useEffect(() => {
     if (newChatKey === 0) return;
-    detachTurn(true);
+    detachTurn();
     setMessages([]);
     setArtifacts([]);
     setSelectedArtifactId(null);
@@ -1823,18 +1889,49 @@ export function ChatWorkspace({
     setActiveTurnId(null);
     setInspectorOpen(false);
     setPersistedChatId(null);
+    setChatSource(undefined);
+    setChatConnectionId(undefined);
+    setSourceAvailable(true);
+    setHistoryHasMore(false);
+    setHistoryCursor(undefined);
+    setPendingIntent(undefined);
+    setPendingAttemptOf(undefined);
+    setResumeTurn(null);
   }, [newChatKey]);
 
   useEffect(() => {
     if (!chatId) {
+      detachTurn();
       setLoadingChat(false);
       setPersistedChatId(null);
+      setMessages([]);
+      setArtifacts([]);
+      setSelectedArtifactId(null);
+      setInspectorOpen(false);
+      setDraft('');
+      setChatSource(undefined);
+      setChatConnectionId(undefined);
+      setSourceAvailable(true);
+      setHistoryHasMore(false);
+      setHistoryCursor(undefined);
+      setPendingIntent(undefined);
+      setPendingAttemptOf(undefined);
+      setResumeTurn(null);
+      setStatus('');
+      setWorkingStatus(null);
+      setError('');
       return;
     }
     if (chatId === persistedChatIdRef.current && (turnRef.current || startingRef.current)) return;
     let cancelled = false;
     detachTurn();
     setLoadingChat(true);
+    setChatConnectionId(undefined);
+    setChatSource(undefined);
+    setSourceAvailable(false);
+    setPendingIntent(undefined);
+    setPendingAttemptOf(undefined);
+    setResumeTurn(null);
     setMessages([]);
     setArtifacts([]);
     setSelectedArtifactId(null);
@@ -1843,11 +1940,12 @@ export function ChatWorkspace({
     setWorkingStatus(null);
     setError('');
     setInspectorOpen(false);
-    void api<{ chat: WebChatSession }>('/api/v1/chats/' + encodeURIComponent(chatId) + '?limit=50')
+    void fetchChatPage(chatId, { limit: 50 }, () => !cancelled)
       .then(({ chat }) => {
         if (cancelled) return;
         setPersistedChatId(chat.id);
         setChatSource(chat.source);
+        setChatConnectionId(chat.connectionId ?? chat.source?.connectionId);
         setSourceAvailable(chat.sourceAvailable !== false);
         setMessages(chat.messages);
         setHistoryHasMore(Boolean(chat.historyHasMore));
@@ -1880,7 +1978,7 @@ export function ChatWorkspace({
   }, [messages, artifacts, status]);
 
   useEffect(() => () => {
-    detachTurn(false);
+    detachTurn();
     if (workingStatusClearRef.current !== null) window.clearTimeout(workingStatusClearRef.current);
   }, []);
 
@@ -1902,12 +2000,16 @@ export function ChatWorkspace({
     const durableChatId = persistedChatIdRef.current;
     if (!durableChatId) return;
     const generation = generationRef.current;
-    void api<{ chat: WebChatSession }>('/api/v1/chats/' + encodeURIComponent(durableChatId) + '?limit=50').then(({ chat }) => {
-      onChatChanged(chat);
+    void fetchChatPage(durableChatId, { limit: 50 }, () => generation === generationRef.current && !turnRef.current && !startingRef.current).then(({ chat }) => {
       if (generation !== generationRef.current || turnRef.current || startingRef.current) return;
+      onChatChanged(chat);
       setMessages(chat.messages);
       setArtifacts(chat.artifacts);
-    }).catch(() => setError('The answer finished, but saved history could not be refreshed. Reopen this chat to retrieve it.'));
+      setHistoryHasMore(Boolean(chat.historyHasMore));
+      setHistoryCursor(chat.historyCursor);
+    }).catch((reason) => {
+      if (generation === generationRef.current) setError(reason instanceof ApiError && reason.status === 413 ? reason.message : 'The answer finished, but saved history could not be refreshed. Reopen this chat to retrieve it.');
+    });
   };
 
   const handleStreamEvent = (type: string, event: Event) => {
@@ -1978,29 +2080,55 @@ export function ChatWorkspace({
     }
   };
 
-  const connectTurnStream = (turnId: string, resuming = false) => {
+  const connectTurnStream = (turnId: string, resuming = false, recoveryAttempts = 0) => {
     streamRef.current?.close();
+    if (streamCursorRef.current.turnId !== turnId) streamCursorRef.current = { turnId, eventId: 0 };
     turnRef.current = turnId;
     setActiveTurnId(turnId);
     const stream = new EventSource('/api/v1/chat/turns/' + encodeURIComponent(turnId) + '/events');
     streamRef.current = stream;
     let interrupted = false;
-    stream.onopen = () => { setReconnecting(false); if (resuming || interrupted) setStatus(resuming ? 'Active answer restored.' : 'Connected. Resuming this answer…'); };
-    for (const type of streamEventTypes) stream.addEventListener(type, (event) => { if (streamRef.current === stream) handleStreamEvent(type, event); });
+    stream.onopen = () => { if (streamRef.current !== stream) return; setReconnecting(false); if (resuming || interrupted) setStatus(resuming ? 'Active answer restored.' : 'Connected. Resuming this answer…'); };
+    for (const type of streamEventTypes) stream.addEventListener(type, (event) => {
+      if (streamRef.current !== stream) return;
+      // A replacement EventSource replays from the beginning. Do not append text twice.
+      const eventId = Number((event as MessageEvent).lastEventId);
+      if (eventId && eventId <= streamCursorRef.current.eventId) return;
+      if (eventId) streamCursorRef.current.eventId = eventId;
+      recoveryAttempts = 0;
+      handleStreamEvent(type, event);
+    });
     stream.onerror = () => {
-      if (turnRef.current !== turnId) return;
+      if (streamRef.current !== stream || turnRef.current !== turnId) return;
       interrupted = true;
       setReconnecting(true);
       setStatus('Connection interrupted. Reconnecting…');
       setWorkingStatus({ text: 'Connection interrupted. Reconnecting…', complete: false });
       if (stream.readyState === EventSource.CLOSED) {
-        void api<ChatTurnSnapshot>('/api/v1/chat/turns/' + encodeURIComponent(turnId)).then((snapshot) => {
-          if (snapshot.status === 'complete' || snapshot.status === 'error' || snapshot.status === 'aborted') refreshDurableChat();
-          if (snapshot.status === 'error') setError(snapshot.error ?? 'The answer was interrupted.');
-          if (snapshot.status !== 'queued' && snapshot.status !== 'running') {
-            turnRef.current = null; setActiveTurnId(null); setReconnecting(false); setWorkingStatus(null);
-          }
-        }).catch(() => setError('The event stream disconnected. Reopen this chat to recover the saved answer.'));
+        if (streamRecoveryRef.current !== null) return;
+        const generation = generationRef.current;
+        const stillCurrent = () => generation === generationRef.current && streamRef.current === stream && turnRef.current === turnId;
+        const stopRecovery = () => {
+          stream.close(); streamRef.current = null; turnRef.current = null;
+          setActiveTurnId(null); setReconnecting(false); setWorkingStatus(null); setStatus('');
+          setError('The event stream disconnected. Reopen this chat to recover the saved answer.');
+        };
+        streamRecoveryRef.current = window.setTimeout(() => {
+          streamRecoveryRef.current = null;
+          if (!stillCurrent()) return;
+          void api<ChatTurnSnapshot>('/api/v1/chat/turns/' + encodeURIComponent(turnId)).then((snapshot) => {
+            if (!stillCurrent()) return;
+            if (snapshot.status === 'queued' || snapshot.status === 'running') {
+              if (recoveryAttempts >= 3) stopRecovery();
+              else connectTurnStream(turnId, true, recoveryAttempts + 1);
+              return;
+            }
+            stream.close(); streamRef.current = null; turnRef.current = null;
+            setActiveTurnId(null); setReconnecting(false); setWorkingStatus(null); setStatus('');
+            if (snapshot.status === 'error') setError(snapshot.error ?? 'The answer was interrupted.');
+            refreshDurableChat();
+          }).catch(() => { if (stillCurrent()) stopRecovery(); });
+        }, 1000);
       }
     };
   };
@@ -2020,7 +2148,7 @@ export function ChatWorkspace({
     const content = (options?.question ?? draft).trim();
     const intent = options?.intent ?? pendingIntent;
     const attemptOf = options?.attemptOf ?? pendingAttemptOf;
-    if (!content || busy || startingRef.current || !active || active.status !== 'ready') return;
+    if (!content || loadingChat || !sourceAvailable || busy || startingRef.current || !active || active.status !== 'ready') return;
     if (content.length > bootstrap.limits.maxMessageChars) {
       setError('Shorten your question to ' + bootstrap.limits.maxMessageChars + ' characters or fewer.');
       return;
@@ -2060,9 +2188,11 @@ export function ChatWorkspace({
       let chatIdForTurn = persistedChatId;
       if (!chatIdForTurn) {
         const chat = await onCreateChat(active.id);
-        if (generation !== generationRef.current) return;
+        if (generation !== generationRef.current) { cancelledSubmissionsRef.current.delete(attempt.clientRequestId); return; }
         chatIdForTurn = chat.id;
         setPersistedChatId(chat.id);
+        setChatConnectionId(chat.connectionId ?? active.id);
+        setChatSource(chat.source);
         persistedChatIdRef.current = chat.id;
         onChatChanged(chat);
         onNavigate('/chat/' + encodeURIComponent(chat.id));
@@ -2071,6 +2201,14 @@ export function ChatWorkspace({
         method: 'POST',
         body: JSON.stringify({ chatId: chatIdForTurn, assistantMessageId: attempt.assistantMessageId, userMessageId: userMessage.id, clientRequestId: attempt.clientRequestId, connectionId: active.id, question: content, intent, attemptOf, messages: modelMessages(nextMessages, bootstrap.limits.maxHistoryMessages, bootstrap.limits.maxMessageChars) })
       });
+      const cancelledGeneration = cancelledSubmissionsRef.current.get(attempt.clientRequestId);
+      cancelledSubmissionsRef.current.delete(attempt.clientRequestId);
+      if (cancelledGeneration !== undefined) {
+        void api('/api/v1/chat/turns/' + encodeURIComponent(response.turnId) + '/abort', { method: 'POST' }).catch(() => {
+          if (cancelledGeneration === generationRef.current) setError('Cancellation could not be requested. Reopen this chat to check the saved answer.');
+        });
+        return;
+      }
       if (generation !== generationRef.current) {
         return;
       }
@@ -2080,6 +2218,7 @@ export function ChatWorkspace({
       startingRef.current = false;
       connectTurnStream(response.turnId);
     } catch (reason) {
+      cancelledSubmissionsRef.current.delete(attempt.clientRequestId);
       if (generation !== generationRef.current) return;
       startingRef.current = false;
       setActiveTurnId(null);
@@ -2110,22 +2249,27 @@ export function ChatWorkspace({
   const updateFeedback = async (message: ChatMessage, rating: 'helpful' | 'unhelpful', correction?: string) => {
     const chat = persistedChatIdRef.current;
     if (!chat) return;
+    const generation = generationRef.current;
     try {
       const payload = await api<{ chat: WebChatSession }>(`/api/v1/chats/${encodeURIComponent(chat)}/messages/${encodeURIComponent(message.id)}/feedback`, { method: 'POST', body: JSON.stringify({ rating, correction: correction?.trim() || undefined }) });
+      if (generation !== generationRef.current) return;
       const updated = payload.chat.messages.find((item) => item.id === message.id);
       if (updated) setMessages((current) => current.map((item) => item.id === updated.id ? updated : item));
       onChatChanged(payload.chat); setStatus('Feedback saved.');
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Feedback could not be saved.'); }
+    } catch (reason) { if (generation === generationRef.current) setError(reason instanceof Error ? reason.message : 'Feedback could not be saved.'); }
   };
 
   const pinMessage = async (message: ChatMessage) => {
     const chat = persistedChatIdRef.current; if (!chat) return;
-    try { const payload = await api<{ chat: WebChatSession }>(`/api/v1/chats/${encodeURIComponent(chat)}/messages/${encodeURIComponent(message.id)}`, { method: 'PATCH', body: JSON.stringify({ pinned: !message.pinned }) }); const updated = payload.chat.messages.find((item) => item.id === message.id); if (updated) setMessages((current) => current.map((item) => item.id === updated.id ? updated : item)); onChatChanged(payload.chat); setStatus(message.pinned ? 'Answer removed from saved items.' : 'Answer saved for reuse.'); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : 'The answer could not be saved.'); }
+    const generation = generationRef.current;
+    try { const payload = await api<{ chat: WebChatSession }>(`/api/v1/chats/${encodeURIComponent(chat)}/messages/${encodeURIComponent(message.id)}`, { method: 'PATCH', body: JSON.stringify({ pinned: !message.pinned }) }); if (generation !== generationRef.current) return; const updated = payload.chat.messages.find((item) => item.id === message.id); if (updated) setMessages((current) => current.map((item) => item.id === updated.id ? updated : item)); onChatChanged(payload.chat); setStatus(message.pinned ? 'Answer removed from saved items.' : 'Answer saved for reuse.'); }
+    catch (reason) { if (generation === generationRef.current) setError(reason instanceof Error ? reason.message : 'The answer could not be saved.'); }
   };
 
   const exportReport = async (format: 'html' | 'markdown', onlyMessage?: ChatMessage) => {
+    const generation = generationRef.current;
     const report = await import('./reportExport.js');
+    if (generation !== generationRef.current) return;
     const selectedMessages = onlyMessage ? messages.filter((message) => message.id === onlyMessage.id || (message.role === 'user' && messages.indexOf(message) === messages.indexOf(onlyMessage) - 1)) : messages;
     const selectedArtifacts = onlyMessage ? artifacts.filter((artifact) => artifact.messageId === onlyMessage.id) : artifacts;
     const title = (chatSource?.label ?? active?.label ?? 'DB Chat analysis') + (historyHasMore && !onlyMessage ? ' (loaded messages)' : '');
@@ -2138,20 +2282,24 @@ export function ChatWorkspace({
   const loadOlder = async () => {
     const chat = persistedChatIdRef.current;
     if (!chat || !historyHasMore || loadingOlder) return;
+    const generation = generationRef.current;
     setLoadingOlder(true);
     try {
-      const payload = await api<{ chat: WebChatSession }>(`/api/v1/chats/${encodeURIComponent(chat)}?before=${encodeURIComponent(historyCursor ?? '')}&limit=40`);
+      const payload = await fetchChatPage(chat, { before: historyCursor ?? '', limit: 40 }, () => generation === generationRef.current);
+      if (generation !== generationRef.current) return;
       suppressAutoScrollRef.current = true;
       setMessages((current) => [...payload.chat.messages, ...current.filter((message) => !payload.chat.messages.some((older) => older.id === message.id))]);
       setArtifacts((current) => [...payload.chat.artifacts, ...current.filter((artifact) => !payload.chat.artifacts.some((older) => older.queryId === artifact.queryId))]);
       setHistoryHasMore(Boolean(payload.chat.historyHasMore)); setHistoryCursor(payload.chat.historyCursor);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Older messages could not be loaded.'); }
-    finally { setLoadingOlder(false); }
+    } catch (reason) { if (generation === generationRef.current) setError(reason instanceof Error ? reason.message : 'Older messages could not be loaded.'); }
+    finally { if (generation === generationRef.current) setLoadingOlder(false); }
   };
 
   const cancel = () => {
     const turnId = turnRef.current;
+    const generation = generationRef.current;
     if (!turnId) {
+      if (startingRef.current && retryRequestRef.current) cancelledSubmissionsRef.current.set(retryRequestRef.current.clientRequestId, generationRef.current + 1);
       detachTurn();
       updateAssistant((message) => ({ ...message, content: message.content || 'Question cancelled.' }));
       setStatus('Question cancelled.');
@@ -2162,7 +2310,7 @@ export function ChatWorkspace({
     setStatus('Stopping the question…');
     setWorkingStatus({ text: 'Stopping the question…', complete: false });
     void api('/api/v1/chat/turns/' + encodeURIComponent(turnId) + '/abort', { method: 'POST' }).catch(() => {
-      setError('Cancellation could not be requested. Try Stop again or reopen this chat to check its status.');
+      if (generation === generationRef.current) setError('Cancellation could not be requested. Try Stop again or reopen this chat to check its status.');
     });
   };
 
@@ -2189,7 +2337,7 @@ export function ChatWorkspace({
           ) : messages.length === 0 && active?.status !== 'ready' ? (
             <ConnectionAttention connection={active!} onNavigate={onNavigate} />
           ) : messages.length === 0 ? (
-            <EntryStage bootstrap={bootstrap} onPrompt={setDraft} />
+            <EntryStage bootstrap={{ ...bootstrap, activeConnectionId: active?.id }} onPrompt={setDraft} />
           ) : null}
           {messages.length > 0 && (
             <div className="conversation-stage">
@@ -2582,29 +2730,44 @@ function ConnectionsPage({
   );
 }
 
-function KnowledgeEditor({ connections, initialConnectionId }: { connections: WebConnection[]; initialConnectionId?: string }) {
-  const [connectionId, setConnectionId] = useState(initialConnectionId ?? connections[0].id);
+export function KnowledgeEditor({ connections, initialConnectionId }: { connections: WebConnection[]; initialConnectionId?: string }) {
+  const [connectionId, setConnectionId] = useState(connections.find((connection) => connection.id === initialConnectionId)?.id ?? connections[0]?.id ?? '');
   const [knowledge, setKnowledge] = useState<ConnectionKnowledge | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState('');
+  const selectionGenerationRef = useRef(0);
   useEffect(() => {
-    let cancelled = false; setLoading(true); setStatus('');
+    if (!connections.some((connection) => connection.id === connectionId)) setConnectionId(connections[0]?.id ?? '');
+  }, [connections, connectionId]);
+  useEffect(() => {
+    selectionGenerationRef.current += 1;
+    let cancelled = false; setLoading(true); setKnowledge(null); setSaving(false); setStatus('');
     void api<{ knowledge: ConnectionKnowledge }>(`/api/v1/connections/${encodeURIComponent(connectionId)}/knowledge`).then(({ knowledge }) => { if (!cancelled) setKnowledge(knowledge); }).catch((reason) => { if (!cancelled) setStatus(reason instanceof Error ? reason.message : 'Knowledge could not be loaded.'); }).finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; selectionGenerationRef.current += 1; };
   }, [connectionId]);
-  const save = async () => {
-    if (!knowledge) return; setSaving(true); setStatus('');
-    try { const payload = await api<{ knowledge: ConnectionKnowledge }>(`/api/v1/connections/${encodeURIComponent(connectionId)}/knowledge`, { method: 'PUT', body: JSON.stringify({ knowledge }) }); setKnowledge(payload.knowledge); setStatus('Definitions and verified examples saved.'); }
-    catch (reason) { setStatus(reason instanceof Error ? reason.message : 'Knowledge could not be saved.'); }
-    finally { setSaving(false); }
+  const save = async (next = knowledge, reverified = false) => {
+    if (!next || saving || loading) return;
+    const generation = selectionGenerationRef.current;
+    setSaving(true); setStatus('');
+    try {
+      const payload = await api<{ knowledge: ConnectionKnowledge }>(`/api/v1/connections/${encodeURIComponent(connectionId)}/knowledge`, { method: 'PUT', body: JSON.stringify({ knowledge: next }) });
+      if (generation !== selectionGenerationRef.current) return;
+      setKnowledge(payload.knowledge);
+      setStatus(reverified ? 'Verified against the current schema.' : 'Definitions and verified examples saved.');
+    } catch (reason) {
+      if (generation === selectionGenerationRef.current) setStatus(reason instanceof Error ? reason.message : 'Knowledge could not be saved.');
+    } finally {
+      if (generation === selectionGenerationRef.current) setSaving(false);
+    }
   };
   return <section className="settings-section knowledge-editor">
     <div className="section-heading"><p className="overline">Shared context</p><h2>Definitions and verified examples</h2><p>Private knowledge for one connection. DB Chat uses only definitions you save here.</p></div>
-    <label>Connection<select value={connectionId} onChange={(event) => setConnectionId(event.target.value)}>{connections.map((connection) => <option key={connection.id} value={connection.id}>{connection.label}</option>)}</select></label>
+    <label>Connection<select value={connectionId} disabled={saving} onChange={(event) => setConnectionId(event.target.value)}>{connections.map((connection) => <option key={connection.id} value={connection.id}>{connection.label}</option>)}</select></label>
+    {!knowledge && status && <p role="alert">{status}</p>}
     {loading ? <p role="status">Loading saved knowledge…</p> : knowledge && <>
-      <div className="knowledge-list"><h3>Glossary</h3>{knowledge.glossary.map((item, index) => <div className="knowledge-row" key={item.id}><input aria-label={`Term ${index + 1}`} value={item.term} onChange={(event) => setKnowledge({ ...knowledge, glossary: knowledge.glossary.map((entry) => entry.id === item.id ? { ...entry, term: event.target.value } : entry) })} /><textarea aria-label={`Definition for ${item.term || `term ${index + 1}`}`} value={item.definition} onChange={(event) => setKnowledge({ ...knowledge, glossary: knowledge.glossary.map((entry) => entry.id === item.id ? { ...entry, definition: event.target.value } : entry) })} /><button type="button" className="button button-quiet" onClick={() => setKnowledge({ ...knowledge, glossary: knowledge.glossary.filter((entry) => entry.id !== item.id) })}>Remove</button></div>)}<button type="button" className="button button-secondary" onClick={() => setKnowledge({ ...knowledge, glossary: [...knowledge.glossary, { id: crypto.randomUUID(), term: '', definition: '', provenance: 'user', updatedAt: new Date().toISOString() }] })}><Plus size={14} /> Add definition</button></div>
-      <div className="knowledge-list"><h3>Verified question and query examples</h3>{knowledge.examples.map((item, index) => <div className="knowledge-example" key={item.id}><input aria-label={`Verified question ${index + 1}`} value={item.question} onChange={(event) => setKnowledge({ ...knowledge, examples: knowledge.examples.map((entry) => entry.id === item.id ? { ...entry, question: event.target.value } : entry) })} /><textarea aria-label={`Verified query ${index + 1}`} value={item.query} onChange={(event) => setKnowledge({ ...knowledge, examples: knowledge.examples.map((entry) => entry.id === item.id ? { ...entry, query: event.target.value } : entry) })} />{item.invalidatedAt && <><span className="knowledge-stale">Schema changed — verify this query again.</span><button type="button" className="button button-secondary" onClick={async () => { setSaving(true); try { const body = { ...knowledge, examples: knowledge.examples.map((entry) => entry.id === item.id ? { ...entry, reverify: true } : entry) }; const payload = await api<{ knowledge: ConnectionKnowledge }>(`/api/v1/connections/${encodeURIComponent(connectionId)}/knowledge`, { method: 'PUT', body: JSON.stringify({ knowledge: body }) }); setKnowledge(payload.knowledge); setStatus('Verified against the current schema.'); } finally { setSaving(false); } }}>Verify again</button></>}<button type="button" className="button button-quiet" onClick={() => setKnowledge({ ...knowledge, examples: knowledge.examples.filter((entry) => entry.id !== item.id) })}>Remove</button></div>)}<button type="button" className="button button-secondary" onClick={() => setKnowledge({ ...knowledge, examples: [...knowledge.examples, { id: crypto.randomUUID(), question: '', query: '', provenance: 'user', verifiedAt: new Date().toISOString() }] })}><Plus size={14} /> Add verified example</button></div>
+      <div className="knowledge-list"><h3>Glossary</h3>{knowledge.glossary.map((item, index) => <div className="knowledge-row" key={item.id}><input disabled={saving} aria-label={`Term ${index + 1}`} value={item.term} onChange={(event) => setKnowledge({ ...knowledge, glossary: knowledge.glossary.map((entry) => entry.id === item.id ? { ...entry, term: event.target.value } : entry) })} /><textarea disabled={saving} aria-label={`Definition for ${item.term || `term ${index + 1}`}`} value={item.definition} onChange={(event) => setKnowledge({ ...knowledge, glossary: knowledge.glossary.map((entry) => entry.id === item.id ? { ...entry, definition: event.target.value } : entry) })} /><button type="button" disabled={saving} className="button button-quiet" onClick={() => setKnowledge({ ...knowledge, glossary: knowledge.glossary.filter((entry) => entry.id !== item.id) })}>Remove</button></div>)}<button type="button" disabled={saving} className="button button-secondary" onClick={() => setKnowledge({ ...knowledge, glossary: [...knowledge.glossary, { id: crypto.randomUUID(), term: '', definition: '', provenance: 'user', updatedAt: new Date().toISOString() }] })}><Plus size={14} /> Add definition</button></div>
+      <div className="knowledge-list"><h3>Verified question and query examples</h3>{knowledge.examples.map((item, index) => <div className="knowledge-example" key={item.id}><input disabled={saving} aria-label={`Verified question ${index + 1}`} value={item.question} onChange={(event) => setKnowledge({ ...knowledge, examples: knowledge.examples.map((entry) => entry.id === item.id ? { ...entry, question: event.target.value } : entry) })} /><textarea disabled={saving} aria-label={`Verified query ${index + 1}`} value={item.query} onChange={(event) => setKnowledge({ ...knowledge, examples: knowledge.examples.map((entry) => entry.id === item.id ? { ...entry, query: event.target.value } : entry) })} />{item.invalidatedAt && <><span className="knowledge-stale">Schema changed — verify this query again.</span><button type="button" disabled={saving} className="button button-secondary" onClick={() => void save({ ...knowledge, examples: knowledge.examples.map((entry) => entry.id === item.id ? { ...entry, reverify: true } : entry) }, true)}>Verify again</button></>}<button type="button" disabled={saving} className="button button-quiet" onClick={() => setKnowledge({ ...knowledge, examples: knowledge.examples.filter((entry) => entry.id !== item.id) })}>Remove</button></div>)}<button type="button" disabled={saving} className="button button-secondary" onClick={() => setKnowledge({ ...knowledge, examples: [...knowledge.examples, { id: crypto.randomUUID(), question: '', query: '', provenance: 'user', verifiedAt: new Date().toISOString() }] })}><Plus size={14} /> Add verified example</button></div>
       <div className="form-actions"><Button variant="primary" disabled={saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save connection knowledge'}</Button><span role="status">{status}</span></div>
     </>}
   </section>;
@@ -2650,6 +2813,7 @@ export function ConnectionForm({
   const [confirmRemove, setConfirmRemove] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [savedId, setSavedId] = useState(connection?.id);
+  const formGenerationRef = useRef(0);
   const currentId = savedId ?? connection?.id;
   const maxSqliteUploadBytes = bootstrap.limits.maxSqliteUploadBytes ?? 50 * 1024 * 1024;
   const elasticsearchEndpoint = draft.kind === 'elasticsearch' && draft.host.trim()
@@ -2657,8 +2821,11 @@ export function ConnectionForm({
     : '';
 
   useEffect(() => {
+    formGenerationRef.current += 1;
     setDraft(draftForConnection(connection));
     setSavedId(connection?.id);
+    setPending(null); setUploadingFile(false); setError(''); setNotice('');
+    return () => { formGenerationRef.current += 1; };
   }, [connection?.id]);
 
   const update = (key: keyof ConnectionDraft, value: string | boolean) => {
@@ -2666,6 +2833,8 @@ export function ConnectionForm({
   };
 
   const uploadFile = async (file: File) => {
+    if (pending || uploadingFile) return;
+    const generation = formGenerationRef.current;
     setFileDragging(false);
     setError('');
     setNotice('');
@@ -2696,6 +2865,7 @@ export function ConnectionForm({
       if (!response.ok || !payload.uploadId || !payload.fileName) {
         throw new ApiError(payload.error ?? 'The SQLite file could not be uploaded.', response.status);
       }
+      if (generation !== formGenerationRef.current) return;
       setDraft((current) => ({
         ...current,
         databasePath: '',
@@ -2704,10 +2874,12 @@ export function ConnectionForm({
       }));
       setNotice(`${payload.fileName} is ready to test.`);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'The SQLite file could not be uploaded.');
+      if (generation === formGenerationRef.current) setError(reason instanceof Error ? reason.message : 'The SQLite file could not be uploaded.');
     } finally {
-      setUploadingFile(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (generation === formGenerationRef.current) {
+        setUploadingFile(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
     }
   };
 
@@ -2718,6 +2890,8 @@ export function ConnectionForm({
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (pending || uploadingFile) return;
+    const generation = formGenerationRef.current;
     if (draft.kind === 'sqlite' && !draft.sqliteUploadId && !draft.sqliteFileName) {
       setError('Choose a SQLite database file before saving the connection.');
       return;
@@ -2729,33 +2903,40 @@ export function ConnectionForm({
       const response = currentId
         ? await api<{ connection: WebConnection }>('/api/v1/connections/' + currentId, { method: 'PATCH', body: JSON.stringify(buildConnectionPayload(draft)) })
         : await api<{ connection: WebConnection }>('/api/v1/connections', { method: 'POST', body: JSON.stringify(buildConnectionPayload(draft)) });
+      if (generation !== formGenerationRef.current) return;
       const id = response.connection.id;
       setSavedId(id);
       await onRefresh();
+      if (generation !== formGenerationRef.current) return;
       const test = await api<{ connection: WebConnection; health: { status: string } }>('/api/v1/connections/' + id + '/test', { method: 'POST' });
+      if (generation !== formGenerationRef.current) return;
       await onRefresh();
+      if (generation !== formGenerationRef.current) return;
       if (test.health.status !== 'ready') throw new Error(test.connection.lastError ?? 'The connection could not be reached.');
       setNotice('Connection saved and tested.');
       onNavigate('/settings/connections/' + id);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'The connection could not be saved.');
+      if (generation === formGenerationRef.current) setError(reason instanceof Error ? reason.message : 'The connection could not be saved.');
     } finally {
-      setPending(null);
+      if (generation === formGenerationRef.current) setPending(null);
     }
   };
 
   const remove = async () => {
     if (!currentId) return;
+    const generation = formGenerationRef.current;
     setPending('delete');
     setError('');
     try {
       await api('/api/v1/connections/' + currentId, { method: 'DELETE' });
+      if (generation !== formGenerationRef.current) return;
       await onRefresh();
+      if (generation !== formGenerationRef.current) return;
       onNavigate('/settings/connections');
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'The connection could not be removed.');
+      if (generation === formGenerationRef.current) setError(reason instanceof Error ? reason.message : 'The connection could not be removed.');
     } finally {
-      setPending(null);
+      if (generation === formGenerationRef.current) setPending(null);
     }
   };
 
@@ -2835,7 +3016,7 @@ export function ConnectionForm({
               </div>
             ) : draft.kind === 'mongodb' ? (
               <>
-                <Field label="MongoDB connection URI" name="mongodb-uri" value={draft.mongodbUri} onChange={(value) => update('mongodbUri', value)} placeholder="mongodb+srv://host/database" helper="The URI is encrypted after saving and never shown again." />
+                <Field label="MongoDB connection URI" name="mongodb-uri" type="password" value={draft.mongodbUri} onChange={(value) => update('mongodbUri', value)} placeholder="mongodb://host/database" helper="Use one public host. SRV addresses are not supported. The URI is encrypted after saving and never shown again." />
                 <div className="form-grid-two"><Field label="Host" name="mongo-host" value={draft.host} onChange={(value) => update('host', value)} placeholder="db.example.com" /><Field label="Port" name="mongo-port" value={draft.port} onChange={(value) => update('port', value)} placeholder="27017" /></div>
                 <Field label="Database name" name="mongo-database" value={draft.database} onChange={(value) => update('database', value)} placeholder="analytics" />
               </>
@@ -2988,15 +3169,20 @@ function LoadingScreen() {
 
 export function App() {
   const [route, setRoute] = useState(window.location.pathname || '/');
-  const [authState, setAuthState] = useState<'loading' | 'unauthenticated' | 'authenticated'>('loading');
+  const [authState, setAuthState] = useState<'loading' | 'unauthenticated' | 'authenticated' | 'unavailable'>('loading');
+  const [startupAttempt, setStartupAttempt] = useState(0);
+  const [startupError, setStartupError] = useState('');
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
   const [newChatKey, setNewChatKey] = useState(0);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const initialChatId = window.location.pathname.match(/^\/chat\/([^/]+)$/)?.[1] ?? null;
   const [chats, setChats] = useState<WebChatSummary[]>([]);
   const [selectedChatId, setSelectedChatId] = useState<string | null>(initialChatId);
+  const authGenerationRef = useRef(0);
+  const navigationGenerationRef = useRef(0);
 
   const navigate = (path: string) => {
+    navigationGenerationRef.current += 1;
     setNavigationOpen(false);
     if (window.location.pathname !== path) window.history.pushState({}, '', path);
     setRoute(path);
@@ -3005,12 +3191,14 @@ export function App() {
   };
 
   const refreshBootstrap = async () => {
+    const generation = authGenerationRef.current;
     try {
       const next = await api<BootstrapState>('/api/v1/bootstrap');
+      if (generation !== authGenerationRef.current) return;
       setBootstrap(next);
       setAuthState('authenticated');
     } catch (reason) {
-      if (reason instanceof ApiError && reason.status === 401) {
+      if (generation === authGenerationRef.current && reason instanceof ApiError && reason.status === 401) {
         setAuthState('unauthenticated');
         setBootstrap(null);
         setChats([]);
@@ -3021,8 +3209,9 @@ export function App() {
   };
 
   const refreshChats = async () => {
+    const generation = authGenerationRef.current;
     const response = await api<{ chats: WebChatSummary[] }>('/api/v1/chats');
-    setChats(response.chats);
+    if (generation === authGenerationRef.current) setChats(response.chats);
     return response.chats;
   };
 
@@ -3038,14 +3227,19 @@ export function App() {
 
   useEffect(() => {
     document.title = 'DB Chat Web';
+    setStartupError('');
     const onPopState = () => {
+      navigationGenerationRef.current += 1;
       const nextRoute = window.location.pathname || '/';
       setRoute(nextRoute);
       const chatId = nextRoute.match(/^\/chat\/([^/]+)$/)?.[1] ?? null;
       if (chatId || nextRoute === '/') setSelectedChatId(chatId);
     };
     const onAuthRequired = () => {
+      authGenerationRef.current += 1;
       setBootstrap(null);
+      setChats([]);
+      setSelectedChatId(null);
       setAuthState('unauthenticated');
       if (window.location.pathname !== '/login' && window.location.pathname !== '/signup') {
         window.history.replaceState({}, '', '/login');
@@ -3054,10 +3248,12 @@ export function App() {
     };
     window.addEventListener('popstate', onPopState);
     window.addEventListener('dbchat:auth-required', onAuthRequired);
+    const generation = authGenerationRef.current;
     void (async () => {
       try {
         if (window.location.pathname === '/auth/confirm') { setAuthState('unauthenticated'); return; }
         const me = await api<{ authenticated: boolean }>('/api/v1/auth/me');
+        if (generation !== authGenerationRef.current) return;
         if (!me.authenticated) {
           setAuthState('unauthenticated');
           if (window.location.pathname.startsWith('/settings') || window.location.pathname.startsWith('/chat')) {
@@ -3067,16 +3263,21 @@ export function App() {
           return;
         }
         await refreshBootstrap();
+        if (generation !== authGenerationRef.current) return;
         await refreshChats();
-      } catch {
-        setAuthState('unauthenticated');
+      } catch (reason) {
+        if (generation === authGenerationRef.current) {
+          setStartupError(reason instanceof Error ? reason.message : 'The workspace could not be loaded.');
+          setAuthState('unavailable');
+        }
       }
     })();
     return () => {
+      authGenerationRef.current += 1;
       window.removeEventListener('popstate', onPopState);
       window.removeEventListener('dbchat:auth-required', onAuthRequired);
     };
-  }, []);
+  }, [startupAttempt]);
 
   const completeAuth = async (mode: 'signup' | 'login', data: { email: string; password: string; displayName?: string }) => {
     const result = await api<{ confirmationRequired?: boolean }>('/api/v1/auth/' + mode, {
@@ -3084,13 +3285,15 @@ export function App() {
       body: JSON.stringify(data)
     });
     if (result.confirmationRequired) return result;
+    authGenerationRef.current += 1;
     await refreshBootstrap();
     await refreshChats();
     navigate('/');
   };
 
   const logout = async () => {
-    await api('/api/v1/auth/logout', { method: 'POST' }).catch(() => undefined);
+    await api('/api/v1/auth/logout', { method: 'POST' });
+    authGenerationRef.current += 1;
     setBootstrap(null);
     setChats([]);
     setSelectedChatId(null);
@@ -3098,13 +3301,17 @@ export function App() {
     navigate('/login');
   };
 
-  const selectConnection = async (connectionId: string, preserveRoute = false) => {
+  const selectConnection = async (connectionId: string) => {
+    const generation = authGenerationRef.current;
+    const navigation = navigationGenerationRef.current;
     await api('/api/v1/settings', {
       method: 'PATCH',
       body: JSON.stringify({ activeConnectionId: connectionId || null })
     });
+    if (generation !== authGenerationRef.current) return;
     await refreshBootstrap();
-    if (!preserveRoute && route !== '/') {
+    if (generation !== authGenerationRef.current || navigation !== navigationGenerationRef.current) return;
+    if (route !== '/') {
       setSelectedChatId(null);
       navigate('/');
     }
@@ -3117,41 +3324,46 @@ export function App() {
   };
 
   const renameChat = async (chat: WebChatSummary, title: string) => {
+    const generation = authGenerationRef.current;
     const response = await api<{ chat: WebChatSession }>('/api/v1/chats/' + encodeURIComponent(chat.id), {
       method: 'PATCH',
       body: JSON.stringify({ title })
     });
-    onChatChanged(response.chat);
+    if (generation === authGenerationRef.current) onChatChanged(response.chat);
   };
 
   const deleteChat = async (chat: WebChatSummary) => {
+    const generation = authGenerationRef.current;
+    const navigation = navigationGenerationRef.current;
     await api('/api/v1/chats/' + encodeURIComponent(chat.id), { method: 'DELETE' });
+    if (generation !== authGenerationRef.current) return;
     setChats((current) => current.filter((item) => item.id !== chat.id));
-    if (selectedChatId === chat.id || route === '/chat/' + encodeURIComponent(chat.id)) startNewChat();
+    if (navigation === navigationGenerationRef.current && (selectedChatId === chat.id || route === '/chat/' + encodeURIComponent(chat.id))) startNewChat();
   };
 
   const pinChat = async (chat: WebChatSummary) => {
+    const generation = authGenerationRef.current;
     const response = await api<{ chat: WebChatSession }>('/api/v1/chats/' + encodeURIComponent(chat.id), { method: 'PATCH', body: JSON.stringify({ pinned: !chat.pinned }) });
-    onChatChanged(response.chat);
+    if (generation === authGenerationRef.current) onChatChanged(response.chat);
   };
 
-  const selectChat = async (chat: WebChatSummary) => {
-    try {
-      if (chat.connectionId && chat.connectionId !== bootstrap?.activeConnectionId) {
-        await selectConnection(chat.connectionId, true);
-      }
-      setSelectedChatId(chat.id);
-      navigate('/chat/' + encodeURIComponent(chat.id));
-    } catch (reason) {
-      console.error(reason);
-    }
+  const selectChat = (chat: WebChatSummary) => {
+    setSelectedChatId(chat.id);
+    navigate('/chat/' + encodeURIComponent(chat.id));
   };
 
   if (['/forgot-password', '/auth/confirm', '/reset-password'].includes(route)) return <AccountRecoveryScreen key={route} mode={route === '/forgot-password' ? 'forgot' : route === '/auth/confirm' ? 'confirm' : 'reset'} onNavigate={navigate} onVerified={async () => { await refreshBootstrap(); await refreshChats(); }} />;
   if (authState === 'loading') return <LoadingScreen />;
+  if (authState === 'unavailable') return <PublicShell onNavigate={navigate}>
+    <main className="auth-page"><section className="auth-form-stage">
+      <div className="auth-form-heading"><h1>Workspace unavailable</h1><p>Your saved work has not been changed. Check your connection and try again.</p></div>
+      <Alert>{startupError}</Alert>
+      <Button variant="primary" onClick={() => { setAuthState('loading'); setStartupAttempt((attempt) => attempt + 1); }}>Try again</Button>
+    </section></main>
+  </PublicShell>;
   if (authState === 'unauthenticated') {
-    if (route === '/signup') return <AuthScreen mode="signup" onNavigate={navigate} onComplete={(data) => completeAuth('signup', data)} />;
-    if (route === '/login') return <AuthScreen mode="login" onNavigate={navigate} onComplete={(data) => completeAuth('login', data)} />;
+    if (route === '/signup') return <AuthScreen key="signup" mode="signup" onNavigate={navigate} onComplete={(data) => completeAuth('signup', data)} />;
+    if (route === '/login') return <AuthScreen key="login" mode="login" onNavigate={navigate} onComplete={(data) => completeAuth('login', data)} />;
     if (route === '/privacy') return <PublicPolicy onNavigate={navigate} />;
     return <Landing onNavigate={navigate} />;
   }

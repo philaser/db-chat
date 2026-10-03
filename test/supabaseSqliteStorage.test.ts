@@ -19,7 +19,7 @@ describe('private SQLite storage', () => {
   it('uploads with the server key and rejects invalid SQLite contents', async () => {
     const request = vi.fn<typeof fetch>().mockResolvedValue(new Response('{}'));
     const { storage } = await setup(request);
-    const key = await storage.upload('owner', contents);
+    const key = await storage.upload('owner', contents, objectKey);
     expect(key).toMatch(/^owner\/[a-f0-9-]+\.sqlite$/);
     const [url, init] = request.mock.calls[0];
     expect(url).toBe('https://example.supabase.co/storage/v1/object/dbchat-sqlite/' + key);
@@ -27,6 +27,20 @@ describe('private SQLite storage', () => {
     expect(init?.headers).not.toHaveProperty('Authorization');
     await expect(storage.upload('owner', Buffer.from('not a database'))).rejects.toThrow('valid SQLite');
     expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires a preregistered owner-scoped key before writing an object', async () => {
+    const request = vi.fn<typeof fetch>();
+    const { storage } = await setup(request);
+    await expect(storage.upload('owner', contents)).rejects.toThrow('Register');
+    await expect(storage.upload('other', contents, objectKey)).rejects.toThrow('belong');
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('treats an already absent object as successful cleanup', async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(new Response('', { status: 404 }));
+    const { storage } = await setup(request);
+    await expect(storage.remove('owner', objectKey)).resolves.toBeUndefined();
   });
 
   it('downloads a saved object after adapter restart, scopes its temporary file and cleans it up', async () => {

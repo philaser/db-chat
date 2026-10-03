@@ -1,19 +1,14 @@
 # DB Chat Web Style Guide
 
-> **Status:** Target visual system for the hosted web product
-> **Version:** 0.1
-> **Date:** 2026-08-08
-> **Owner:** DB Chat
+> **Status:** Current visual and interaction source of truth for `src/web`.
+> **Last verified against source:** 2 October 2026
 > **System name:** Composed Clarity
-> **Applies to:** src/web/ and web-facing authenticated/public flows
 
-This guide is the visual and interaction source of truth for DB Chat Web. The
-product and architecture decisions live in [SDD-WEB-CHAT.md](SDD-WEB-CHAT.md);
-the screen-level direction is summarized in [WEB-DESIGN.md](WEB-DESIGN.md).
-
-The web product is an internet-hosted, multi-user account product. It is not a
-responsive port of the Electron renderer and must not inherit the desktop
-Scape/macOS layout, chrome, dark utility aesthetic, or token names.
+Product and architecture decisions live in [SDD-WEB-CHAT.md](SDD-WEB-CHAT.md).
+Screen-level behavior is described in [WEB-DESIGN.md](WEB-DESIGN.md).
+**Token values live in `src/web/styles.css`.** If this guide and the
+stylesheet disagree on a value, the stylesheet wins. Fix the guide in the
+same change.
 
 ## 1. The design decision
 
@@ -30,7 +25,7 @@ DB Chat Web should use a calm, expressive, AI-native utility language:
 - **Trustworthy:** connection identity, read-only policy, query lineage,
   loading state, and failure state are visible at the moment they matter.
 - **Responsive:** the same product model works as a focused one-column mobile
-  experience and a spacious desktop workspace.
+  experience and a spacious wide-screen workspace.
 
 This is an original synthesis, not a request to reproduce any referenced
 product. The visual rule is: borrow the principle, not the identity.
@@ -59,60 +54,30 @@ chatbot or an administration console.
 | --- | --- | --- |
 | Liquid Glass / translucent material UI | Dynamic hierarchy, adaptive controls, depth | It is a platform material language. Blur, translucency, and floating chrome can reduce data legibility on the web. Use solid surfaces and restrained depth instead. |
 | Material 3 Expressive | Purposeful color, personality, stronger interaction feedback | The expressive range is useful, but DB Chat needs analytical restraint. Use expressive accents only for intent and state. |
-| Dark developer command center | Dense information, strong technical identity | It would make account setup and connection trust feel more operational than approachable, and would inherit the desktop mood we are explicitly leaving behind. |
+| Dark developer command center | Dense information, strong technical identity | It would make account setup and connection trust feel more operational than approachable. |
 | Maximalist bento dashboard | Fast visual scanning and modularity | A grid of equal cards would make a single question compete with irrelevant modules. Reserve modular artifacts for the answer packet. |
 | Chat-only AI shell | Familiar conversation, low initial complexity | Plain chat hides evidence, connection context, and result inspection. Chat is the input path, not the whole product. |
 
 ### Non-negotiable boundaries
 
-- Do not use the desktop Scape/macOS navigation or inspector patterns.
-- Do not use dark mode as the default web treatment.
+- Light is the only shipped theme. (`styles.css` contains a
+  `[data-theme="dark"]` token set, but nothing applies it.)
 - Do not use glass, backdrop blur, gradients, decorative grain, or animated
   background effects as structural UI.
 - Do not hide the active database connection while a question is running.
-- Do not display raw database credentials or an OpenRouter key after save.
+- Do not display raw database credentials or provider keys after save.
 - Do not represent every state with a colored pill; prefer labels, dots,
   inline descriptions, and clear action text.
 - Do not let AI-generated content invent new component styles at runtime.
   Generated output must render through the approved answer-packet primitives.
 
-## 2. Research frame
+## 2. Composition principles
 
-The research question was: how should a small hosted data assistant combine
-account trust, connection setup, AI interaction, and inspectable results without
-becoming a generic dashboard?
-
-| Reference | Pattern observed | DB Chat adaptation |
-| --- | --- | --- |
-| [Apple Human Interface Guidelines: Materials](https://developer.apple.com/design/human-interface-guidelines/materials) | Recent platform guidance treats materials as a hierarchy tool that should keep controls legible over content. | Keep the hierarchy principle, but use opaque web surfaces for tables, SQL, and form fields. |
-| [Google Material 3 Expressive](https://developer.android.com/design/ui/wear/guides/get-started/design-language) | Newer design guidance expands tonal color, shape, and interaction expression while preserving familiar component roles. | Use a compact expressive accent system for primary actions and semantic data states; keep controls familiar. |
-| [SAP: Evolving design systems for AI-driven UX](https://www.sap.com/uk/design/stories-resources/evolving-design-systems-for-ai-driven-ux) | AI interfaces increasingly compose the relevant parts of a workflow around user intent and context. | Define approved answer-packet compositions and state rules so the agent can adapt content without inventing visual language. |
-| [Vercel AI SDK 7](https://vercel.com/blog/ai-sdk-7) | Current AI application patterns include typed tool context, approvals, rich tool UI, and agent observability. | Show connection context and read-only policy as first-class UI, and expose progress without revealing secrets or internal chain-of-thought. |
-| [Vercel AI Elements](https://vercel.com/changelog/introducing-ai-elements) | AI interfaces are moving beyond a single chat bubble into composable messages, response actions, reasoning/tool states, and custom components. | Build the answer as a bounded packet with evidence, SQL disclosure, table, caveat, and refinement actions. |
-| [Linear account preferences](https://linear.app/docs/account-preferences) | Settings are grouped into understandable preference areas and keep personalization close to the account context. | Use a narrow, predictable settings navigation for the implemented Profile, Security, Connections, and Inference surfaces. |
-| [Linear security and access](https://linear.app/docs/security-and-access) | Sessions, passkeys, applications, and access controls are visible as managed resources. | Give account security its own surface and show session/access state without mixing it into database connection setup. |
-| [Clerk sign-up and sign-in strategies](https://clerk.com/docs/guides/configure/auth-strategies/sign-up-sign-in-options) | Auth flows are explicit about sign-in methods, verification, recovery, passkeys, and profile management. | Keep sign-up/login focused, make verification and recovery first-class states, and leave provider configuration out of the first screen. |
-| [Stripe Dashboard basics](https://docs.stripe.com/dashboard/basics) | Personal, account, product, and team/security settings are separated into a comprehensible hierarchy. | Separate personal/security settings from product connections and inference settings. |
-| [Supabase: connecting to Postgres](https://supabase.com/docs/guides/database/connecting-to-postgres) | Connection setup explains where connection info lives, which mode to choose, SSL, and what common failures mean. | Use guided connection forms, a test action, SSL guidance, and actionable failure copy instead of a bare credential dump. |
-| [Deepnote generative analysis](https://deepnote.com/docs/ai-analysis) | AI can create and execute blocks, but the product makes mode, context, stop, and query-safety boundaries visible. | Show streaming progress, allow cancel, disclose query and source context, and keep DB Chat read-only. |
-| [Hex Explore](https://hex.tech/product/explore/) | Natural-language prompts lead to visual and tabular artifacts that can be refined. | Make the answer artifact the center of the conversation and keep follow-up refinement one action away. |
-| [Metabase questions](https://www.metabase.com/docs/latest/questions/introduction) | Questions can start from natural language or structured exploration and can be saved, inspected, and placed into a broader collection. | Keep the first version lightweight: answer, inspect, refine, export. Defer collections and sharing until the core loop is proven. |
-| [Observable notebooks](https://observablehq.com/documentation/notebooks/) | Text, code, SQL, and visual output are interleaved as inspectable work. | Use progressive disclosure for SQL and result metadata rather than forcing a notebook canvas into the MVP. |
-| [Mode notebooks](https://mode.com/notebooks/) | Query output is central, with paths to reports, exports, and sharing. | Give every answer packet stable export and copy actions, even before full report persistence exists. |
-| [Rill Explore](https://docs.rilldata.com/guide/dashboards/explore) | Measures, dimensions, drilldowns, search, and export form a compact exploration vocabulary. | Use the same vocabulary in answer actions and table controls without turning chat into a dashboard builder. |
-
-### Research conclusion
-
-The strongest common pattern is not a fashionable surface treatment. It is
-structured composition:
-
-1. make the next action obvious;
-2. keep context adjacent to the action;
-3. turn AI output into a typed, inspectable artifact;
-4. preserve user control when the system is connecting, querying, or failing;
-5. reveal advanced detail progressively.
-
-That is the design system DB Chat should own.
+1. Make the next action obvious.
+2. Keep context next to the action.
+3. Turn AI output into a typed, inspectable artifact.
+4. Preserve user control when the system is connecting, querying, or failing.
+5. Reveal advanced detail progressively.
 
 ## 3. Brand and visual vocabulary
 
@@ -165,47 +130,40 @@ shadows, use inner glows, or create floating glass sheets over content.
 
 ## 4. Foundation tokens
 
-The values below are the starting contract. Implement them as web-owned
-variables in src/web/styles.css or the web token module. Do not reuse the
-desktop token names or values.
+All tokens are CSS custom properties on `:root` in `src/web/styles.css`. Use
+them; do not add arbitrary hex values in component styles.
 
 ### Color roles
 
-| Token | Value | Use |
+| Token | Light value | Use |
 | --- | --- | --- |
-| canvas | #FBFAF7 | App background and public-page background |
-| surface | #FFFEFA | Forms, settings panels, answer packets |
-| surface-soft | #F4F0EA | Secondary fields, muted artifact regions |
-| surface-accent | #F7E9E2 | Selected/action context background |
-| ink | #17232D | Headings, primary body text, SQL |
-| ink-secondary | #536170 | Supporting copy, metadata, descriptions |
-| ink-muted | #536170 | Placeholder and nonessential labels when readable text is required |
-| border | #E3DED5 | Default separation and field boundaries |
-| border-strong | #C9C5BD | Focus-adjacent or selected boundaries |
-| primary | #C8491D | Main action, active navigation, focus accent |
-| primary-hover | #A83A16 | Hover and pressed primary |
-| primary-soft | #F7E9E2 | Primary tint, active context background |
-| teal | #1E7B72 | Healthy/ready state and positive data signal |
-| teal-soft | #EDF5F1 | Healthy state background |
-| amber | #B77916 | Attention, pending, caution |
-| amber-soft | #F8EFD9 | Attention state background |
-| coral | #AA3C2B | Error, destructive, unavailable |
-| coral-soft | #F7E5E0 | Error state background |
-| olive | #68714D | Informational state and secondary data signal |
-| olive-soft | #EDF0E6 | Informational state background |
-| ochre | #B77928 | Secondary data signal and quiet proof accent |
-| on-primary | #FFFEFA | Text and icons on primary controls |
+| `--canvas` | #FBFAF7 | App and public-page background |
+| `--surface` | #FFFEFA | Forms, settings panels, answers |
+| `--surface-soft` | #F4F0EA | Secondary fields, muted regions |
+| `--surface-warm` | #F8F4EE | Code blocks, warm inset regions |
+| `--ink` | #17232D | Headings, body text, SQL |
+| `--ink-secondary` | #536170 | Supporting copy and metadata |
+| `--ink-muted` | #65717B | Placeholders and nonessential labels |
+| `--border` | #E3DED5 | Default separation and field boundaries |
+| `--border-strong` | #C9C5BD | Focus-adjacent or selected boundaries |
+| `--rust` | #C8491D | Primary action, active navigation, focus accent |
+| `--rust-hover` | #A83A16 | Hover and pressed primary |
+| `--rust-soft` | #F7E9E2 | Primary tint, selected context |
+| `--on-rust` | #FFFEFA | Text and icons on primary controls |
+| `--green` / `--green-soft` | #1E7B72 / #EDF5F1 | Healthy, ready, read-only, positive signal |
+| `--warning` | #B97716 | Attention, pending, caution |
+| `--danger` | #AA3C2B | Error, destructive, unavailable |
+| `--olive` / `--olive-soft` | #68714D / #EDF0E6 | Informational state, secondary data signal |
+| `--ochre`, `--plum`, `--umber`, `--slate` | — | Secondary data accents |
+| `--chart-1` … `--chart-6` | rust, olive, ochre, plum, umber, slate | Chart series, in order |
 
-Charts use a restrained bookish sequence rather than a default dashboard blue:
-rust, olive, ochre, plum, umber, and slate. The first series is rust so a
-single-series chart remains aligned with the primary action language.
+Charts use this restrained, bookish sequence instead of dashboard blue. The
+first series is rust, so a single-series chart matches the primary action
+color.
 
-Color is never the only state channel. Pair it with text, icon shape, position,
-or an explicit status sentence. Validate all combinations in the browser
-against WCAG 2.2 AA before release; the values above are design inputs, not a
-completed contrast certification. Normal-size muted/supporting text must use a
-foreground/background pair with at least 4.5:1 contrast; do not use the muted
-role to justify faint, low-contrast copy.
+Color is never the only state channel. Pair it with text, icon shape,
+position, or a status sentence. Normal-size text must meet 4.5:1 contrast;
+do not use the muted role to justify faint copy.
 
 ### Typography
 
@@ -213,15 +171,16 @@ Use Georgia for editorial headings and a Helvetica-like stack for interface
 copy and controls:
 
 ~~~css
-font-family: Helvetica, Arial, ui-sans-serif, system-ui, sans-serif;
+--font-display: Georgia, "Times New Roman", Times, serif;
+--font-sans: "Helvetica Neue", Arial, ui-sans-serif, system-ui, sans-serif;
+--font-mono: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
 ~~~
 
-Headings use `Georgia, "Times New Roman", serif`. Do not add a blocking font
-dependency.
+Do not add a blocking font dependency.
 
 | Role | Size / line height | Weight | Use |
 | --- | --- | --- | --- |
-| Display | 44 / 52 | 650 | Public-page promise and first-run welcome, desktop only |
+| Display | 44 / 52 | 650 | Public-page promise on wide screens |
 | Page title | 28 / 36 | 650 | Settings and workspace headings |
 | Section title | 20 / 28 | 650 | Panel headings and answer titles |
 | Body | 15–16 / 24 | 400 | Explanations, prompts, normal copy |
@@ -257,9 +216,8 @@ space-10 64px
 space-11 80px
 ~~~
 
-These are named 4-point scale tokens used by the current web implementation;
-the 20px, 40px, and 80px steps are intentional scale members, not ad hoc
-exceptions. Prefer these tokens over new one-off values.
+Use `var(--space-N)`. The 20px, 40px, and 80px steps are intentional members
+of the scale. Prefer these tokens over new one-off values.
 
 ### Radius
 
@@ -276,10 +234,10 @@ tokens. The app should not look like it is made from pills.
 ### Borders and elevation
 
 ~~~text
-border-default  1px solid #E3DED5
-border-strong   1px solid #C9C5BD
-shadow-popover  0 12px 30px rgba(23, 35, 45, 0.12)
-shadow-focus    0 0 0 3px rgba(169, 71, 43, 0.2)
+border          1px solid var(--border)
+border-strong   1px solid var(--border-strong)
+--shadow-popover  0 12px 30px rgba(23, 35, 45, 0.12)
+--shadow-focus    0 0 0 3px rgba(169, 71, 43, 0.2)
 ~~~
 
 Default surfaces are flat. Apply shadow-popover only to a raised answer packet,
@@ -289,10 +247,12 @@ focus.
 ### Motion
 
 ~~~text
-motion-fast    120ms
-motion-normal  180ms
-motion-slow   240ms
-ease-standard  cubic-bezier(0.2, 0.8, 0.2, 1)
+--motion-instant   80ms
+--motion-fast     120ms
+--motion-standard 180ms
+--motion-panel    220ms
+--ease-standard   cubic-bezier(0.2, 0.8, 0.2, 1)
+--ease-panel      cubic-bezier(0.25, 0.1, 0.25, 1)
 ~~~
 
 Motion should explain:
@@ -309,9 +269,9 @@ to opacity or an immediate state change.
 
 ### Iconography
 
-Use one coherent outline icon set, preferably the existing project icon
-dependency if present. If a new set is introduced, use 16px icons for dense
-controls, 18px for standard controls, and 20px for navigation or empty states.
+Use `lucide-react` outline icons: 14–16px for dense controls, 18px for
+standard controls, and 20px for navigation or empty states. Database-engine
+marks come from `simple-icons` and identify engines only.
 Use a consistent stroke weight and optical alignment.
 
 Icons must support a text label, tooltip, or accessible name. Do not use
@@ -322,46 +282,28 @@ meaning.
 
 ### Breakpoints
 
-Use behavior-based breakpoints:
+Max-width breakpoints in `styles.css`:
 
-~~~text
-compact  0–719px
-standard 720–1099px
-wide    1100px and above
-~~~
+| Width | Behavior |
+| --- | --- |
+| > 1180px | Wide: sidebar 224px, inline resizable inspector, settings side navigation |
+| ≤ 1180px | Sidebar 208px; settings navigation becomes a "Settings section" select |
+| 761–1100px | Inspector becomes a fixed overlay panel (≤ 480px) with a popover shadow; no resize handle |
+| ≤ 940px | Sidebar 200px; account name hidden in the app bar |
+| ≤ 760px | Compact: one column, sidebar becomes a drawer, inspector flows into the page, expand control hidden |
 
-At 1280px and above, cap the main application content at 1180px. At smaller
-widths, use 16px page gutters. At wide widths, use 24px gutters and allow the
-chat answer column to remain narrower than the viewport.
+Layout variables: `--web-header-height` 54px, `--web-sidebar-width` 224px,
+`--web-inspector-width` 400px (resizable 360–480px), `--content-width` 760px.
 
-### Compact behavior
+### Rules at every width
 
-- one-column layout;
-- top bar remains visible and horizontally scroll-safe;
-- settings navigation becomes a select or disclosure menu;
-- connection and inference forms stack;
-- answer packet actions wrap below the title;
-- tables become horizontally scrollable with an explicit overflow label;
-- composer remains reachable without requiring a second panel;
-- dialogs become full-width sheets with a clear close action.
-
-### Standard behavior
-
-- two-column settings layout may appear if the local navigation remains at
-  least 224px wide;
-- connection form may use a form column plus a guidance column;
-- answer artifacts may use a result area plus a narrow metadata rail;
-- keep the active connection and account menu in the top bar.
-
-### Wide behavior
-
-- use generous whitespace around the central chat column;
-- keep the main answer/form column bounded at 760px;
-- when an inspector/result rail is present, default it to about 400px and
-  allow resizing down to 360px;
-- optional conversation history may be a collapsible drawer, not a permanent
-  desktop inspector;
-- never allow side rails to compress the answer below 640px without reason.
+- Keep the main answer/form column bounded at 760px.
+- Tables, query blocks, and wide content scroll inside their bounded artifact,
+  never the page.
+- The composer stays reachable without opening a second panel.
+- Answer actions wrap instead of overflowing.
+- Dialogs fit the viewport and trap focus.
+- Use 44px minimum touch targets and 16px page gutters on compact screens.
 
 ## 6. Page recipes
 
@@ -415,17 +357,12 @@ Required states:
 - rate limited;
 - successful redirect.
 
-### 6.3 First-run onboarding
+### 6.3 No-connection state
 
-Use a short guided sequence, not a setup dashboard:
-
-~~~text
-Account ready → Add a connection → Test it → Ask a question
-~~~
-
-The user may defer a connection only when the next screen clearly explains why
-chat is unavailable until one is configured. Keep the progress indicator
-descriptive and compact; it is not a gamified progress bar.
+There is no separate onboarding wizard. A signed-in user without a usable
+connection sees an entry state that explains why a connection is needed and
+offers one primary action (**Add your first connection** or **Manage
+connection**). Chat without a ready connection is not a valid empty state.
 
 ### 6.4 Settings shell
 
@@ -434,14 +371,13 @@ navigation.
 
 ~~~text
 Settings
-├── Profile
-├── Security
-├── Connections
+├── Profile and security
+├── Database connections
 └── Inference
 ~~~
 
 Desktop settings use a 224px local navigation column and a content column
-limited to 760px. Each page begins with a title, a sentence explaining what
+limited to 760px. At 1180px and below, the navigation becomes a select. Each page begins with a title, a sentence explaining what
 can be changed, and one or more task-oriented sections.
 
 Use explicit save actions for profile, password, and connection forms. Show a
@@ -478,12 +414,9 @@ Connection setup recipe:
 3. host, port, database, username;
 4. password or secret input;
 5. SSL mode and optional advanced fields;
-6. Test connection;
-7. Save connection;
-8. Set active, if more than one exists.
-
-Keep the basic form short. Place SSL certificates, pooler mode, and advanced
-network settings behind an Advanced disclosure with explanatory copy.
+6. Save (tests the connection);
+Saving always runs the test, so there is no separate "set active" step.
+Keep the basic form short.
 
 Test results must distinguish:
 
@@ -499,53 +432,29 @@ Each failure state includes a next action. Never say only Connection failed.
 
 ### 6.6 Inference settings
 
-Default product behavior:
-
-- show that DB Chat inference is managed by the service;
-- do not show an OpenRouter key field or key-management navigation item;
-- do not expose the internal key or provider request details;
-- explain that the service uses its managed inference path unless an enabled
-  account setting says otherwise.
-
-Future feature-flagged behavior:
-
-- reveal an Advanced provider key section under Inference;
-- label the input as an optional user-supplied OpenRouter key;
-- show a security explanation before the field;
-- use a masked input with reveal-on-hold or reveal-on-click;
-- after save, show only Configured, last updated, Replace, and Remove;
-- never prefill or return the raw value;
-- preserve the internal-key fallback when the user key is absent or invalid.
-
-The web visual language must not make provider configuration feel required for
-the first useful question.
+- Show the mode (Managed by DB Chat or Personal provider), provider, and model
+  as a quiet summary, with a Ready/Unavailable status line.
+- Managed inference needs no setup. Never make provider configuration feel
+  required for the first question.
+- When personal keys are enabled, show a provider select (OpenAI or DeepSeek)
+  and a password-style key field. After save, show only the configured state,
+  a model select, and Remove. Never prefill or return the key.
+- Never expose the managed key or provider request details.
 
 ### 6.7 Chat workspace
 
 The chat screen is a focused work surface:
 
 ~~~text
-top bar
-connection context strip
+app bar (brand, read-only badge, account menu)
+workspace sidebar (new chat, search, connection filter, chats, connections)
 conversation column
-answer packets
+data inspector (result, query, source, exports)
 composer
 ~~~
 
-Top bar:
-
-- DB Chat mark;
-- active connection selector;
-- read-only label;
-- account menu.
-
-Connection context strip:
-
-- connection name;
-- type;
-- health state;
-- change connection action;
-- safe note that queries are read-only.
+The chat's connection is shown in the sidebar and the inspector's source
+line. A chat never silently changes connection.
 
 Conversation column:
 
@@ -854,20 +763,15 @@ Trust requirements:
 
 ### Source locations
 
-- Visual tokens and global web styles: src/web/styles.css.
-- Web shell and route composition: src/web/App.tsx.
-- Shared web components: src/web/components/.
-- Authentication screens: src/web/screens/auth/.
-- Onboarding and setup: src/web/screens/onboarding/.
-- Settings and connection screens: src/web/screens/settings/.
-- Chat and answer artifacts: src/web/screens/chat/ and
-  src/web/components/answer/.
-- Web server/API behavior: src/server/.
-- Product and architecture decisions: docs/SDD-WEB-CHAT.md.
+- Tokens and all web styles: `src/web/styles.css`.
+- Screens, shell, and routing: `src/web/App.tsx`.
+- Structured answer blocks: `src/web/contentBlocks.tsx`.
+- Charts: `src/web/chartRenderer.tsx`; chart schema in `src/shared/chart.ts`.
+- Shared components: `src/web/components/`.
+- Server/API behavior: `src/server/`.
 
-If the current prototype does not yet have these directories, create the
-smallest structure that makes the ownership clear. Do not move desktop
-renderer code into src/web/ merely to reuse styling.
+When extracting code out of `App.tsx`, move whole components into
+`src/web/components/` and keep their styles in `styles.css`.
 
 ### CSS rules
 
@@ -878,8 +782,7 @@ renderer code into src/web/ merely to reuse styling.
   boundary;
 - use container queries where a component's layout depends on its own width;
 - avoid global important overrides except for an explicit accessibility need;
-- keep mobile behavior in the same component contract as desktop behavior;
-- do not add a global reset that changes desktop renderer assumptions.
+- keep compact behavior in the same component contract as wide behavior;
 
 ### AI output rules
 
@@ -924,20 +827,15 @@ Before a web visual change is considered complete:
   client, or screenshots;
 - run the repository-required tests, typecheck, and build;
 - capture screenshots or DOM/computed-style evidence for visual claims;
-- compare against this guide and the target screen recipe, not the desktop
-  renderer.
+- compare against this guide and the screen description in WEB-DESIGN.md.
 
 ## 12. Deferred choices
 
-These are intentionally not settled by this guide:
-
 - final logo and wordmark geometry;
-- custom display typeface, if a later performance budget permits it;
-- dark mode;
-- collections beyond saved/pinned conversations and answers;
+- a custom display typeface;
+- dark mode (tokens exist but are not wired up or reviewed);
+- collections beyond saved/pinned chats and answers;
 - collaborative sharing;
-- additional database providers;
-- visible user-supplied OpenRouter key controls;
 - linked multi-chart brushing and advanced statistical visualizations.
 
 Any future change to these choices should update this guide and the SDD

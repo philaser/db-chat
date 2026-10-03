@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 import { MongoClient } from 'mongodb';
+import { createTlsFixture } from './tlsFixture.mjs';
 
 const name = `db-chat-mongodb-${process.pid}-${Date.now()}`;
 const rootUser = `root_${process.pid}`;
@@ -20,6 +21,10 @@ let connector;
 let service;
 let containerStarted = false;
 let cleaned = false;
+const tlsFixture = createTlsFixture();
+const serverPem = join(compilation, 'mongo.pem');
+writeFileSync(serverPem, readFileSync(tlsFixture.certificate, 'utf8') + readFileSync(tlsFixture.key, 'utf8'), { mode: 0o644 });
+chmodSync(serverPem, 0o644);
 
 function docker(...args) {
   return execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -34,6 +39,7 @@ function cleanup() {
     try { docker('rm', '-f', name); } catch {}
   }
   rmSync(compilation, { recursive: true, force: true });
+  tlsFixture.close();
 }
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -83,9 +89,13 @@ try {
 
   const port = await reservePort();
   docker('run', '-d', '--name', name, '-p', `127.0.0.1:${port}:27017`,
+    '--mount', `type=bind,src=${serverPem},dst=/tmp/mongo.pem,readonly`,
+    '--mount', `type=bind,src=${tlsFixture.certificate},dst=/tmp/ca.crt,readonly`,
     '-e', 'GLIBC_TUNABLES=glibc.pthread.rseq=1',
     '-e', `MONGO_INITDB_ROOT_USERNAME=${rootUser}`,
-    '-e', `MONGO_INITDB_ROOT_PASSWORD=${rootPassword}`, 'mongo:8');
+    '-e', `MONGO_INITDB_ROOT_PASSWORD=${rootPassword}`, 'mongo:8',
+    '--tlsMode', 'preferTLS', '--tlsCertificateKeyFile', '/tmp/mongo.pem',
+    '--tlsCAFile', '/tmp/ca.crt', '--tlsAllowConnectionsWithoutCertificates');
   containerStarted = true;
   const rootUri = `mongodb://${encodeURIComponent(rootUser)}:${encodeURIComponent(rootPassword)}@127.0.0.1:${port}/?authSource=admin&directConnection=true`;
   const admin = await eventually(async () => {
@@ -103,9 +113,10 @@ try {
   await db.command({ createUser: readUser, pwd: readPassword, roles: [{ role: 'read', db: database }] });
   await admin.close();
 
-  const readUri = `mongodb://${encodeURIComponent(readUser)}:${encodeURIComponent(readPassword)}@127.0.0.1:${port}/${database}?authSource=${database}&directConnection=true`;
+  const readUri = `mongodb://${encodeURIComponent(readUser)}:${encodeURIComponent(readPassword)}@localhost:${port}/${database}?authSource=${database}&directConnection=true&tls=true`;
+  const connection = { id: 'mongo-live', kind: 'mongodb', label: 'Mongo integration', database, mongodbUri: readUri, mongodbDirectConnection: true, resolvedAddress: '127.0.0.1', createdAt: new Date().toISOString() };
   connector = new MongoDBConnector();
-  await connector.connect({ id: 'mongo-live', kind: 'mongodb', label: 'Mongo integration', database, mongodbUri: readUri, mongodbDirectConnection: true, createdAt: new Date().toISOString() });
+  await connector.connect(connection);
 
   const schema = await connector.introspect();
   assert.equal(schema.inference.partial, true);
@@ -151,7 +162,7 @@ try {
   const serviceConnector = new MongoDBConnector();
   service = new WebAgentService({ ...loadWebServerConfig({ DBCHAT_STORAGE_MODE: 'local' }), database: {
     id: 'mongo-service', kind: 'mongodb', label: 'Mongo integration', database,
-    mongodbUri: readUri, mongodbDirectConnection: true, createdAt: new Date().toISOString()
+    mongodbUri: readUri, mongodbDirectConnection: true, resolvedAddress: '127.0.0.1', createdAt: new Date().toISOString()
   }, maxResultRows: 100 }, {
     connector: serviceConnector,
     modelClient: { async *streamChat() {
@@ -175,6 +186,26 @@ try {
   service.close();
   service = undefined;
 
+  // A valid BSON document can still exceed the application's per-document budget.
+  // Seed it after schema sampling so normal schema assertions remain independent.
+  const largeAdmin = new MongoClient(rootUri);
+  await largeAdmin.connect();
+  await largeAdmin.db(database).collection('large_rows').insertOne({ payload: 'x'.repeat(9 * 1024 * 1024) });
+  await largeAdmin.close();
+  const largeQuery = JSON.stringify({ collection: 'large_rows', method: 'find', body: { filter: {} } });
+  await assert.rejects(connector.executeQuery(largeQuery), /size limit/i);
+  await assert.rejects(async () => { for await (const _batch of connector.exportQuery(largeQuery)) {} }, /size limit/i);
+  await assert.rejects(connector.introspect(), /size limit/i);
+  connector.close();
+  await connector.connect(connection);
+  assert.equal((await connector.executeQuery(JSON.stringify({ collection: 'events', method: 'count', body: { filter: {} } }))).rows[0].count, 121);
+
+  const activeCancellation = new AbortController();
+  const cursor = connector.exportQuery(exportQuery, { signal: activeCancellation.signal, batchSize: 10 })[Symbol.asyncIterator]();
+  assert.equal((await cursor.next()).value.rowCount, 10);
+  activeCancellation.abort(new DOMException('Integration cancellation', 'AbortError'));
+  await assert.rejects(cursor.next(), error => error?.name === 'AbortError');
+
   await assert.rejects(connector.executeQuery(JSON.stringify({ collection: 'events', method: 'insertOne', document: { forbidden: true } })), /not authorized|unauthorized/i);
   await assert.rejects(connector.executeQuery(JSON.stringify({ collection: 'events', method: 'aggregate', body: { pipeline: [{ $out: 'copied' }] } })), /blocked/i);
   await assert.rejects(connector.executeQuery(JSON.stringify({ collection: 'events', method: 'aggregate', body: { pipeline: [{ $merge: 'copied' }] } })), /blocked/i);
@@ -184,7 +215,9 @@ try {
   await assert.rejects(connector.executeQuery(JSON.stringify({ collection: 'events', method: 'count', body: { filter: {} } }), { signal: cancelled.signal }), error => error?.name === 'AbortError');
 
   const bad = new MongoDBConnector();
-  await assert.rejects(bad.connect({ id: 'bad', kind: 'mongodb', label: 'Bad auth', database, mongodbUri: readUri.replace(encodeURIComponent(readPassword), 'incorrect'), mongodbDirectConnection: true, createdAt: new Date().toISOString() }), /authentication failed/i);
+  await assert.rejects(bad.connect({ ...connection, mongodbUri: readUri.replace(encodeURIComponent(readPassword), 'incorrect') }), /authentication failed/i);
+  const wrongHost = new MongoDBConnector();
+  await assert.rejects(wrongHost.connect({ ...connection, mongodbUri: readUri.replace('@localhost:', '@wrong-host.invalid:') }), /certificate|hostname|altnames/i);
 
   docker('stop', '-t', '1', name);
   await assert.rejects(connector.executeQuery(JSON.stringify({ collection: 'events', method: 'count', body: { filter: {} } })));
@@ -207,6 +240,11 @@ try {
     truncated: bounded.truncated,
     reconnect: 'passed',
     cancellation: 'passed',
+    activeExportCancellation: 'passed',
+    verifiedTls: 'passed',
+    tlsHostnameDenial: 'passed',
+    oversizedDocumentQuerySchemaAndExport: '9 MiB rejected',
+    oversizedDocumentReconnect: 'passed',
     fullStreamingExport: exported.length,
     authFailure: 'passed',
     readRoleWriteDenial: 'passed',

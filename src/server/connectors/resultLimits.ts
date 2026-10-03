@@ -23,6 +23,9 @@ export function boundResultBytes(result: QueryResult, maxBytes: number): QueryRe
     byteLimit: Math.floor(maxBytes),
     truncationReason: 'byte-limit'
   };
+  if (Buffer.byteLength(JSON.stringify(base), 'utf8') > maxBytes) {
+    throw new Error('Result column metadata exceeded the byte limit. Select fewer or shorter column names.');
+  }
   let low = 0;
   let high = result.rows.length;
   while (low < high) {

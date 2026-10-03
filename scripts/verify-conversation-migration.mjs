@@ -1,7 +1,7 @@
 // Disposable embedded PostgreSQL verification. Point DBCHAT_PGLITE_MODULE at an
 // installed @electric-sql/pglite module; no remote database or credentials needed.
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 const { PGlite } = await import(process.env.DBCHAT_PGLITE_MODULE ?? '@electric-sql/pglite');
 const db = new PGlite();
 const owner = '11111111-1111-4111-8111-111111111111';
@@ -9,10 +9,17 @@ const other = '22222222-2222-4222-8222-222222222222';
 const query = (sql, args = []) => db.query(sql, args);
 try {
   await db.exec(`create role anon; create role authenticated; create role service_role bypassrls;
-    create schema auth; create table auth.users(id uuid primary key);`);
-  for (const file of ['202609050001_dbchat_accounts.sql', '202609080001_conversation_recovery.sql']) {
+    create schema auth; create table auth.users(id uuid primary key);
+    create schema storage;
+    create table storage.buckets(id text primary key,name text,public boolean,file_size_limit bigint,allowed_mime_types text[]);
+    create table storage.objects(id uuid primary key,bucket_id text references storage.buckets,
+      name text,metadata jsonb,created_at timestamptz default now());
+    alter table storage.objects enable row level security;`);
+  const migrations = new URL('../supabase/migrations/', import.meta.url);
+  for (const file of (await readdir(migrations)).filter(file => file.endsWith('.sql')).sort()) {
     await db.exec(await readFile(new URL('../supabase/migrations/' + file, import.meta.url), 'utf8'));
   }
+  await db.exec(await readFile(new URL('../supabase/tests/account_isolation.sql', import.meta.url), 'utf8'));
   await query('insert into auth.users values ($1),($2)', [owner, other]);
   await query("insert into dbchat_profiles(user_id,email,display_name) values ($1,'one@example.test','One'),($2,'two@example.test','Two')", [owner, other]);
   await query("insert into dbchat_connections(id,user_id,config) values ('source',$1,'{\"label\":\"Original source\",\"kind\":\"sqlite\"}')", [owner]);

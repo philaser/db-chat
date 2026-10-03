@@ -2,7 +2,7 @@ services:
   - type: web
     name: db-chat
     runtime: docker
-    plan: free
+    plan: starter
     region: frankfurt
     branch: main
     dockerfilePath: ./Dockerfile
@@ -19,6 +19,16 @@ services:
         value: app
       - key: DBCHAT_WEB_HOST
         value: 0.0.0.0
+      - key: DBCHAT_WEB_MAX_CONCURRENT_REQUESTS
+        value: '4'
+      - key: DBCHAT_WEB_MAX_ACTIVE_TURNS
+        value: '2'
+      - key: DBCHAT_WEB_MAX_DATABASE_OPERATIONS
+        value: '1'
+      - key: DBCHAT_WEB_MAX_CONCURRENT_UPLOADS
+        value: '1'
+      - key: DBCHAT_WEB_ALLOWED_ORIGIN
+        sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_PUBLISHABLE_KEY

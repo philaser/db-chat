@@ -1,3 +1,4 @@
+import { readProviderJson } from './responseLimits.js';
 import type { ModelInfo, EffortLevel } from '../../shared/types.js';
 import {
   assertSupportedModel,
@@ -56,10 +57,10 @@ export class OpenRouterClient {
   async listModels(): Promise<ModelInfo[]> {
     try {
       const response = await fetch(`${PROVIDER_BASE_URLS[this.provider]}/models`, {
-        headers: this.headers()
+        headers: this.headers(), signal: AbortSignal.timeout(10_000), redirect: 'error'
       });
       if (!response.ok) throw new Error(`${this.provider} API error (${response.status}).`);
-      const json = (await response.json()) as { data?: Array<{ id: string; name?: string }> };
+      const json = (await readProviderJson(response)) as { data?: Array<{ id: string; name?: string }> };
       if (json.data) {
         return json.data.map((model) => ({ id: model.id, name: model.name ?? model.id }));
       }
@@ -76,7 +77,8 @@ export class OpenRouterClient {
       method: 'POST',
       headers: this.headers(),
       body: JSON.stringify(this.requestBody(options)),
-      signal: options.signal
+      signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
+      redirect: 'error'
     });
 
     if (!response.ok) {
@@ -88,6 +90,7 @@ export class OpenRouterClient {
 
     const decoder = new TextDecoder();
     let buffer = '';
+    let receivedBytes = 0;
     let responseReasoning = '';
     const responseToolCallIds = new Map<number, string>();
 
@@ -96,9 +99,12 @@ export class OpenRouterClient {
         const { done, value } = await reader.read();
         if (done) throw new Error('The provider stream ended before completion.');
 
+        receivedBytes += value.byteLength;
+        if (receivedBytes > 2 * 1024 * 1024) throw new Error('The provider stream exceeded the response size limit.');
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
+        if (buffer.length > 512 * 1024 || lines.some(line => line.length > 512 * 1024)) throw new Error('The provider stream exceeded the event size limit.');
 
         for (const line of lines) {
           const trimmed = line.trim();

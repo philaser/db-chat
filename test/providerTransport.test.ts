@@ -12,6 +12,22 @@ async function consume(client: OpenRouterClient, model: string, effortLevel: 'no
 }
 
 describe('provider transport', () => {
+  it('cancels oversized provider events before parsing their contents', async () => {
+    const cancel = vi.fn();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode('data: ' + 'x'.repeat(600_000))); }, cancel
+    }))));
+    await expect(consume(new OpenRouterClient({ apiKey: 'secret' }), 'fixture')).rejects.toThrow(/event size limit/);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('caps model metadata and sets deadlines and redirect policy', async () => {
+    const request = vi.fn(async (_url: string, _init?: RequestInit) => new Response('x'.repeat(1024 * 1024 + 1)));
+    vi.stubGlobal('fetch', request);
+    await expect(new OpenRouterClient({ apiKey: 'secret' }).listModels()).rejects.toThrow(/size limit/);
+    expect(request.mock.calls[0][1]).toMatchObject({ signal: expect.any(AbortSignal), redirect: 'error' });
+  });
+
   it.each([
     ['openrouter', 'https://openrouter.ai/api/v1/chat/completions', 'fixture', 'reasoning'],
     ['openai', 'https://api.openai.com/v1/chat/completions', PERSONAL_PROVIDER_MODELS.openai[0].id, 'reasoning_effort'],

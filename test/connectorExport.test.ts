@@ -57,6 +57,20 @@ describe('connector streaming exports', () => {
     } finally { connector.close(); }
   });
 
+  it('rejects oversized native SQLite allocations and export rows without crashing the host', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'dbchat-export-size-')); dirs.push(dir);
+    const databasePath = path.join(dir, 'rows.db');
+    new Database(databasePath).close();
+    const connector = new SQLiteConnector();
+    connector.setSafetyLevel('safe');
+    await connector.connect({ id: 'sqlite-size', kind: 'sqlite', label: 'sqlite', databasePath, createdAt: '' });
+    try {
+      await expect(connector.executeQuery('select length(randomblob(100000000)) as size')).rejects.toThrow(/memory/i);
+      await expect(allRows(connector.exportQuery("select printf('%09000000d', 1) as oversized"))).rejects.toThrow(/size limit/);
+      expect((await connector.executeQuery('select 1 as healthy')).rows).toEqual([{ healthy: 1 }]);
+    } finally { connector.close(); }
+  });
+
   it('uses and closes a PostgreSQL cursor when a consumer stops early', async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.startsWith('FETCH')) return { rows: [{ id: 1 }, { id: 2 }], fields: [{ name: 'id' }], command: 'FETCH', rowCount: 2 };
