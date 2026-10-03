@@ -84,7 +84,7 @@ Do not use browser build variables for secrets. Retain the encryption key secure
 and separately from database backups; losing it makes saved connection secrets
 unrecoverable. Uploaded SQLite files live in the private Supabase Storage bucket
 `dbchat-sqlite`; the Node service uses temporary files during queries and needs no
-persistent disk in Supabase mode. Apply both SQL migrations before use. Configure
+persistent disk in Supabase mode. Apply every SQL migration in `supabase/migrations` before use. Configure
 outbound network rules, process/resource limits, model spend limits, monitoring,
 backup restore checks and rollback before serving customers. Review the migration
 and operations documentation shipped with the Supabase adapter.
@@ -128,8 +128,8 @@ version label: `major`, `minor` or `patch`.
 
 ## Design
 
-Start with [DESIGN.md](DESIGN.md). The web design and style guide govern the single
-customer experience. The previous Scape desktop specifications are historical.
+Start with [DESIGN.md](DESIGN.md). It links the product/architecture document,
+screen design, and style guide that govern the single customer experience.
 
 ## Data downloads and analytical reports
 
