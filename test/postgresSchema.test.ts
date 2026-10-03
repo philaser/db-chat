@@ -7,6 +7,7 @@ const pgMock = vi.hoisted(() => ({
   end: vi.fn<() => Promise<void>>()
 }));
 vi.mock('pg', () => ({ Client: class {
+  connection = { attachListeners() {} };
   on(event: string, handler: () => void) { if (event === 'error') pgMock.errorHandler = handler; }
   async connect() {}
   query(sql: string) { return pgMock.query(sql); }

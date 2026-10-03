@@ -6,6 +6,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/prepare-sqlite.mjs",
+    "prepare:sqlite": "node scripts/prepare-sqlite.mjs",
     "dev": "node --env-file-if-exists=.env scripts/dev.mjs",
     "build": "npm run web:client:build && npm run web:server:build",
     "start": "node --env-file-if-exists=.env dist-web-server/server/server.js",
@@ -19,15 +21,15 @@
     "desktop:package": "npm run desktop:build && electron-builder --dir",
     "desktop:dist": "npm run desktop:build && electron-builder",
     "pretest": "npm run rebuild:sqlite:node",
-    "rebuild:sqlite:node": "npm rebuild better-sqlite3",
+    "rebuild:sqlite:node": "node scripts/prepare-sqlite.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:databases": "npm run web:server:build && node scripts/integration/run.mjs",
+    "test:persistence": "node scripts/verify-conversation-migration.mjs",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.web-server.json --noEmit && tsc -p tsconfig.desktop.json --noEmit",
     "eval:chat": "npm run web:server:build && node --env-file-if-exists=.env scripts/evaluate-chat.mjs"
   },
   "dependencies": {
-    "@openrouter/sdk": "^1.1.2",
     "archiver": "^8.0.0",
     "better-sqlite3": "^12.4.6",
     "lucide-react": "^0.561.0",
@@ -42,6 +44,7 @@
     "simple-icons": "^16.21.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.1",
     "@types/archiver": "^8.0.0",
@@ -51,13 +54,18 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
-    "electron": "^39.8.10",
+    "electron": "^44.5.1",
     "electron-builder": "^26.8.1",
-    "esbuild": "0.27.7",
+    "esbuild": "^0.28.2",
     "exceljs": "^4.4.0",
     "jsdom": "^27.3.0",
     "typescript": "^5.9.3",
     "vite": "^7.2.7",
     "vitest": "^4.0.15"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    }
   }
 }

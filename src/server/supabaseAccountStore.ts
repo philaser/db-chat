@@ -1,4 +1,7 @@
+import { SAVED_READ_BYTES, CONTEXT_ARTIFACT_BYTES, CONTEXT_MESSAGE_BYTES, CONTEXT_CANDIDATES, DEFINITION_WORDS, LIMITATION_WORDS, SavedDataReadLimitError, boundedContextMessages, spendReadBudget, type SavedReadBudget, type ChatContextSelection, type ContextMessageRow } from './savedDataLimits.js';
+import { WorkerLeaseError, TurnCapacityError, type WorkerHeartbeat } from './workerCoordinator.js';
 import { referencedResultIds } from './conversationContext.js';
+import { ManagedTurnQuotaError, UploadQuotaError, type TurnClaimOptions, type UploadAllowance } from './turnQuota.js';
 import { defaultEffortForModel } from './config.js';
 import { DEFAULT_PERSONAL_PROVIDER_MODELS } from './model/providers.js';
 import { createHash, randomBytes } from 'node:crypto';
@@ -6,7 +9,7 @@ import { SecretVault, splitSecrets, displayConnection, customChatTitle, type Acc
 import { publicConnectionUri } from '../shared/connectionSecrets.js';
 import type { ConnectionKnowledge, SourceSnapshot, ChatMessage, ConnectionConfig, QueryResultArtifact, WebChatSession, WebChatSummary } from '../shared/types.js';
 import type { PersonalInferenceProvider, Principal, ResolvedProviderKey, WebAccountSettings, WebUser, WebTurnSnapshot } from './types.js';
-import type { AccountRepository } from './accountRepository.js';
+import { RetainedDataQuotaError, SessionCapacityError, type AccountRepository } from './accountRepository.js';
 interface AuthUser { id: string; email?: string; email_confirmed_at?: string; created_at: string; user_metadata?: { display_name?: string } }
 interface AuthTokens { access_token: string; refresh_token: string; expires_in: number; user: AuthUser }
 interface Profile { user_id: string; email: string; display_name: string; email_verified: boolean; created_at: string; settings: WebAccountSettings; encrypted_provider_key?: string | null }
@@ -33,7 +36,7 @@ export class SupabaseAccountStore implements AccountRepository {
     this.vault = new SecretVault(options.secretKey);
     this.fetcher = options.fetch ?? fetch;
   }
-  private async request<T>(path: string, method = 'GET', body?: unknown, token?: string, prefer?: string): Promise<T> {
+  private async request<T>(path: string, method = 'GET', body?: unknown, token?: string, prefer?: string, budget?: SavedReadBudget): Promise<T> {
     const isRest = path.startsWith('/rest/');
     const key = isRest || path.startsWith('/auth/v1/admin/') ? this.options.serviceRoleKey : this.options.publishableKey;
     const response = await this.fetcher(this.options.url.replace(/\/$/, '') + path, {
@@ -41,14 +44,56 @@ export class SupabaseAccountStore implements AccountRepository {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(15_000)
     });
     // Provider response bodies can contain credentials/query contents. Never surface them.
+    if (!response.ok && isRest) {
+      const data = await this.readResponse(response, undefined, 8192).then(text => JSON.parse(text) as { message?: string }).catch(() => null);
+      if (data?.message === 'DBCHAT_WORKER_FENCED') throw new WorkerLeaseError();
+      if (data?.message === 'DBCHAT_RETENTION_LIMIT') throw new RetainedDataQuotaError();
+      if (data?.message === 'DBCHAT_SESSION_LIMIT') throw new SessionCapacityError();
+      if (data?.message === 'DBCHAT_SAVED_READ_LIMIT') throw new SavedDataReadLimitError();
+    }
     if (!response.ok) throw new SupabaseRequestError(path.startsWith('/auth/') ? 'Authentication could not be completed. Check your details or try again.' : 'Saved data is temporarily unavailable. Please try again.', response.status);
-    const text = await response.text();
+    const text = await this.readResponse(response, budget);
     return (text ? JSON.parse(text) : undefined) as T;
   }
-  private async rows<T>(table: string, owner: string, filter = ''): Promise<T[]> {
+  private async readResponse(response: Response, budget?: SavedReadBudget, maximum = SAVED_READ_BYTES): Promise<string> {
+    for (let current=budget; current; current=current.parent) maximum=Math.min(maximum,current.remaining);
+    const announced = Number(response.headers.get('content-length'));
+    if (Number.isFinite(announced) && announced > maximum) { await response.body?.cancel(); throw new SavedDataReadLimitError(); }
+    const reader=response.body?.getReader(); if (!reader) return '';
+    const chunks: Uint8Array[]=[]; let bytes=0;
+    try {
+      for (;;) {
+        const part=await reader.read(); if (part.done) break;
+        bytes+=part.value.length;
+        if (bytes>maximum) throw new SavedDataReadLimitError();
+        spendReadBudget(budget,part.value.length); chunks.push(part.value);
+      }
+      return Buffer.concat(chunks,bytes).toString('utf8');
+    } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+  }
+  async assertStorageReady(): Promise<void> {
+    try {
+      await this.request('/rest/v1/dbchat_managed_usage?select=scope&limit=0');
+      await this.request('/rest/v1/dbchat_upload_usage?select=scope&limit=0');
+      await this.request('/rest/v1/dbchat_workers?select=id&limit=0');
+      await this.request('/rest/v1/dbchat_turn_executions?select=turn_id&limit=0');
+      await this.request('/rest/v1/dbchat_account_deletions?select=owner&limit=0');
+      await this.request('/rest/v1/dbchat_retained_usage?select=user_id&limit=0');
+      await this.request('/rest/v1/dbchat_retention_reservations?select=user_id&limit=0');
+      const policies = await this.request<unknown[]>('/rest/v1/dbchat_retention_policy?select=max_sessions&scope=eq.project&limit=1');
+      if (policies.length !== 1) throw new Error('Default retention policy is missing.');
+    } catch { throw new Error('Supabase storage is not ready. Apply all DB Chat migrations and verify the backend storage credentials before starting the server.'); }
+  }
+  private async rows<T>(table: string, owner: string, filter = '', budget?: SavedReadBudget): Promise<T[]> {
+    budget ??= { remaining: SAVED_READ_BYTES };
+    const query = new URLSearchParams('user_id=eq.' + encodeURIComponent(owner) + filter);
+    // Explicit limits describe one bounded page (history/cursor/latest-turn reads).
+    // Only unbounded callers use the repository's pagination loop.
+    if (query.has('limit')) return this.request<T[]>(`/rest/v1/${table}?${query}`, 'GET', undefined, undefined, undefined, budget);
     const rows: T[] = [];
     for (let offset = 0; ; offset += 500) {
-      const page = await this.request<T[]>(`/rest/v1/${table}?user_id=eq.${encodeURIComponent(owner)}${filter}&limit=500&offset=${offset}`);
+      query.set('limit', '500'); query.set('offset', String(offset));
+      const page = await this.request<T[]>(`/rest/v1/${table}?${query}`, 'GET', undefined, undefined, undefined, budget);
       rows.push(...page);
       if (page.length < 500) return rows;
     }
@@ -83,13 +128,27 @@ export class SupabaseAccountStore implements AccountRepository {
     return this.acceptTokens(result as AuthTokens);
   }
   async login(email: string, password: string) { return this.acceptTokens(await this.request<AuthTokens>('/auth/v1/token?grant_type=password', 'POST', { email: email.trim().toLowerCase(), password })); }
+  async verifyAccountPassword(userId: string, password: string): Promise<void> {
+    const profile = await this.profile(userId);
+    const tokens = await this.request<AuthTokens>('/auth/v1/token?grant_type=password', 'POST', { email: profile.email, password });
+    if (!tokens.access_token) throw new Error('Account confirmation could not be completed.');
+    // This password proof must not consume an application session slot or sign
+    // out the user's other devices. Discard only the new provider session.
+    await this.request('/auth/v1/logout?scope=local', 'POST', undefined, tokens.access_token);
+    if (tokens.user?.id !== userId) throw new Error('Account confirmation could not be completed.');
+  }
   private hash(token: string): string { return createHash('sha256').update(token).digest('base64url'); }
   private async acceptTokens(tokens: AuthTokens, purpose: 'login' | 'recovery' = 'login') {
     if (!tokens.access_token || !tokens.refresh_token || !tokens.user?.id) throw new Error('Authentication did not return a session.');
     const user = await this.syncUser(tokens.user);
     const sessionId = randomBytes(32).toString('base64url');
     const now = Date.now(); const absolute = now + (purpose === 'recovery' ? 15 * 60_000 : (this.options.sessionAbsoluteTtlMs ?? 30 * 86400_000));
-    await this.request('/rest/v1/dbchat_sessions', 'POST', { id_hash: this.hash(sessionId), user_id: user.id, encrypted_tokens: this.vault.encrypt(JSON.stringify(tokens)), access_expires_at: now + tokens.expires_in * 1000, expires_at: Math.min(now + this.options.sessionTtlMs, absolute), absolute_expires_at: absolute, refreshed_at: now, purpose });
+    try {
+      await this.request('/rest/v1/dbchat_sessions', 'POST', { id_hash: this.hash(sessionId), user_id: user.id, encrypted_tokens: this.vault.encrypt(JSON.stringify(tokens)), access_expires_at: now + tokens.expires_in * 1000, expires_at: Math.min(now + this.options.sessionTtlMs, absolute), absolute_expires_at: absolute, refreshed_at: now, purpose });
+    } catch (error) {
+      await this.request('/auth/v1/logout?scope=local', 'POST', undefined, tokens.access_token).catch(() => undefined);
+      throw error;
+    }
     return { user, sessionId };
   }
   private async session(token: string): Promise<Session | null> {
@@ -209,43 +268,115 @@ export class SupabaseAccountStore implements AccountRepository {
     const result = await this.request<{ chats: ChatRow[]; total: number }>('/rest/v1/rpc/dbchat_search_chats', 'POST', { owner: userId, query_text: options.q ?? '', source_id: options.connectionId ?? null, pinned_only: options.pinned ?? false, page_offset: options.offset, page_limit: options.limit });
     return { chats: result.chats.map(row => this.summary(row)), total: result.total, nextOffset: options.offset + options.limit < result.total ? options.offset + options.limit : undefined };
   }
-  private async allChatRows<T>(table: string, userId: string, chatId: string): Promise<T[]> {
-    const result: T[] = [];
-    for (let offset = 0; ; offset += 500) {
-      const page = await this.rows<T>(table, userId, '&chat_id=eq.' + encodeURIComponent(chatId) + '&order=position.asc&limit=500&offset=' + offset);
-      result.push(...page);
-      if (page.length < 500) return result;
-    }
+  private async allChatRows<T>(table: string, userId: string, chatId: string, budget: SavedReadBudget): Promise<T[]> {
+    return this.rows<T>(table, userId, '&chat_id=eq.' + encodeURIComponent(chatId) + '&order=position.asc', budget);
   }
+  async getChatSummary(userId: string, id: string): Promise<WebChatSummary | null> { const row = await this.chatRow(userId, id); return row ? this.summary(row) : null; }
+  async hasChat(userId: string, id: string): Promise<boolean> { return (await this.rows<{id:string}>('dbchat_chats',userId,this.idFilter(id)+'&select=id&limit=1')).length>0; }
+  private async chatRow(userId:string,id:string,budget?:SavedReadBudget):Promise<ChatRow|undefined> { return (await this.rows<ChatRow>('dbchat_chats',userId,this.idFilter(id)+'&limit=1',budget))[0]; }
+  async getChatArtifact(userId:string,chatId:string,artifactId:string):Promise<QueryResultArtifact|null> {
+    if (!await this.hasChat(userId,chatId)) return null;
+    const budget = { remaining: CONTEXT_ARTIFACT_BYTES };
+    const filter = '&chat_id=eq.' + encodeURIComponent(chatId);
+    const artifact = (await this.rows<{body:QueryResultArtifact}>('dbchat_artifacts',userId,filter+'&body->>queryId=eq.'+encodeURIComponent(artifactId)+'&select=body&limit=1',budget))[0]?.body;
+    if (artifact) return artifact;
+    const latest = (await this.rows<{artifacts?: QueryResultArtifact[]}>('dbchat_turns', userId, filter + '&select=artifacts:snapshot->artifacts&order=created_at.desc&limit=1', budget))[0];
+    return latest?.artifacts?.find(item => item.queryId === artifactId) ?? null;
+  }
+
   async getChat(userId: string, id: string): Promise<WebChatSession | null> {
-    const row = (await this.rows<ChatRow>('dbchat_chats', userId, this.idFilter(id)))[0]; if (!row) return null;
-    const [messages, artifacts] = await Promise.all([this.allChatRows<{ body: ChatMessage }>('dbchat_messages', userId, id), this.allChatRows<{ body: QueryResultArtifact }>('dbchat_artifacts', userId, id)]);
-    const latestTurn = (await this.rows<{ snapshot: WebTurnSnapshot }>('dbchat_turns', userId, '&chat_id=eq.' + encodeURIComponent(id) + '&order=created_at.desc&limit=1'))[0]?.snapshot;
-    return { ...this.summary(row), latestTurn, messages: messages.map(item => item.body), artifacts: artifacts.map(item => item.body) };
+    const budget={remaining:SAVED_READ_BYTES};
+    const row=await this.chatRow(userId,id,budget); if (!row) return null;
+    const messages=await this.allChatRows<{body:ChatMessage}>('dbchat_messages',userId,id,budget);
+    const artifacts=await this.allChatRows<{body:QueryResultArtifact}>('dbchat_artifacts',userId,id,budget);
+    const latestTurn=(await this.rows<{snapshot:WebTurnSnapshot}>('dbchat_turns',userId,'&chat_id=eq.'+encodeURIComponent(id)+'&order=created_at.desc&limit=1',budget))[0]?.snapshot;
+    return {...this.summary(row),latestTurn,messages:messages.map(item=>item.body),artifacts:artifacts.map(item=>item.body)};
+  }
+  private async latestTurn(userId: string, chatFilter: string, budget: SavedReadBudget): Promise<WebTurnSnapshot | undefined> {
+    // Recovery needs only turn identity/status; event replay and result snapshots have their own endpoint.
+    const turn = (await this.rows<{ id: string; chat_id: string; assistant_message_id: string; created_at: string; status: WebTurnSnapshot['status']; question?: string; attemptOf?: string; connectionId?: string; error?: string; intent?: WebTurnSnapshot['intent'] }>('dbchat_turns', userId, chatFilter + '&order=created_at.desc&limit=1&select=' + encodeURIComponent('id,chat_id,assistant_message_id,created_at,status:snapshot->>status,question:snapshot->>question,attemptOf:snapshot->>attemptOf,connectionId:snapshot->>connectionId,error:snapshot->>error,intent:snapshot->intent'), budget))[0];
+    const latestTurn: WebTurnSnapshot | undefined = turn ? { id: turn.id, chatId: turn.chat_id, assistantMessageId: turn.assistant_message_id, createdAt: turn.created_at, status: turn.status, question: turn.question, attemptOf: turn.attemptOf, connectionId: turn.connectionId, error: turn.error, intent: turn.intent, events: [] } : undefined;
+    return latestTurn;
+  }
+  private async contextMessageRows(userId:string,chatFilter:string,filter:string,budget:SavedReadBudget):Promise<ContextMessageRow[]> {
+    const select='position,id:body->>id,role:body->>role,content:body->>content,createdAt:body->>createdAt,pinned:body->pinned,turnId:body->turn->>id,turnStatus:body->turn->>status,turnQuestion:body->turn->>question';
+    const rows=await this.rows<ChatMessage & {position:number;turnId?:string;turnStatus?:NonNullable<ChatMessage['turn']>['status'];turnQuestion?:string}>('dbchat_messages',userId,chatFilter+filter+'&select='+encodeURIComponent(select),budget);
+    return rows.map(({position,turnId,turnStatus,turnQuestion,...body})=>({position,body:{...body,...(turnId?{turn:{id:turnId,status:turnStatus!,question:(turnQuestion??undefined)!}}:{})}}));
+  }
+  private async relatedArtifacts(userId:string,chatFilter:string,messages:ChatMessage[],extraIds:string[],budget:SavedReadBudget,includeUnlinked=false):Promise<QueryResultArtifact[]> {
+    const result=new Map<string,QueryResultArtifact>();
+    const messageIds=messages.filter(message=>message.role==='assistant').map(message=>message.id);
+    const fetchIds=async(field:string,ids:string[])=>{
+      for(let offset=0;offset<ids.length;offset+=20) {
+        const filter='&body->>'+field+'=in.'+encodeURIComponent('('+ids.slice(offset,offset+20).map(id=>JSON.stringify(id)).join(',')+')');
+        const rows=await this.rows<{body:QueryResultArtifact}>('dbchat_artifacts',userId,chatFilter+filter+'&select=body&order=position.asc',budget);
+        for(const row of rows) result.set(row.body.queryId,row.body);
+      }
+    };
+    await fetchIds('messageId',messageIds);
+    await fetchIds('queryId',[...new Set([...referencedResultIds(messages),...extraIds])].filter(id=>!result.has(id)));
+    if (includeUnlinked) {
+      // Older saved results predate message linkage and remain available to tools.
+      const rows = await this.rows<{body:QueryResultArtifact}>('dbchat_artifacts', userId, chatFilter + '&body->>messageId=is.null&select=body&order=position.asc', budget);
+      for (const row of rows) result.set(row.body.queryId, row.body);
+    }
+    return [...result.values()];
+  }
+  async getChatContext(userId:string,id:string,selection:ChatContextSelection={}):Promise<WebChatSession|null> {
+    const budget:SavedReadBudget={remaining:SAVED_READ_BYTES};
+    const messageBudget:SavedReadBudget={remaining:CONTEXT_MESSAGE_BYTES,parent:budget};
+    const artifactBudget:SavedReadBudget={remaining:CONTEXT_ARTIFACT_BYTES,parent:budget};
+    const row=await this.chatRow(userId,id,budget); if(!row) return null;
+    const filter='&chat_id=eq.'+encodeURIComponent(id);
+    const eligible='or(body->>role.eq.user,and(body->>role.eq.assistant,or(body->turn.is.null,body->turn->>status.eq.complete)))';
+    const retained='or(body->>pinned.eq.true,and(body->>role.eq.user,body->>content.imatch.'+JSON.stringify('\\y('+DEFINITION_WORDS+')\\y')+'),and(body->>role.eq.assistant,body->>content.imatch.'+JSON.stringify('\\y('+LIMITATION_WORDS+')\\y')+'))';
+    const recent=await this.contextMessageRows(userId,filter,'&and='+encodeURIComponent('('+eligible+')')+'&order=position.desc&limit=30',messageBudget);
+    const older=await this.contextMessageRows(userId,filter,'&and='+encodeURIComponent('('+eligible+','+retained+')')+'&order=position.desc&limit='+(CONTEXT_CANDIDATES+1),messageBudget);
+    const candidates=older.slice(0,CONTEXT_CANDIDATES);
+    if(older.length>CONTEXT_CANDIDATES) {
+      const horizon=candidates.at(-1)!.position;
+      const contributing=[...new Map([...recent,...candidates].filter(item=>item.position>=horizon).map(item=>[item.body.id,item])).values()];
+      if(contributing.reduce((sum,item)=>sum+Math.min(8000,item.body.content.length),0)<64000) throw new SavedDataReadLimitError();
+    }
+    const selectedIds=new Set<string>(selection.messageId?[selection.messageId]:[]);
+    if(selection.artifactId) {
+      const artifact=(await this.rows<{messageId?:string}>('dbchat_artifacts',userId,filter+'&body->>queryId=eq.'+encodeURIComponent(selection.artifactId)+'&select=messageId:body->>messageId&limit=1',budget))[0];
+      if(artifact?.messageId) selectedIds.add(artifact.messageId);
+    }
+    const selected:ContextMessageRow[]=[];
+    for(const messageId of [...selectedIds]) {
+      const message=(await this.contextMessageRows(userId,filter,'&body->>id=eq.'+encodeURIComponent(messageId)+'&limit=1',messageBudget))[0];
+      if(!message) continue;
+      selected.push(message);
+      if(!message.body.turn?.question) {
+        const question=(await this.contextMessageRows(userId,filter,'&body->>role=eq.user&position=lte.'+message.position+'&order=position.desc&limit=1',messageBudget))[0];
+        if(question) { selected.push(question); selectedIds.add(question.body.id); }
+      }
+    }
+    const messages=boundedContextMessages([...recent,...candidates,...selected]);
+    const artifacts=await this.relatedArtifacts(userId,filter,messages,selection.artifactId?[selection.artifactId]:[],artifactBudget,true);
+    return {...this.summary(row),messages,artifacts,latestTurn:await this.latestTurn(userId,filter,budget)};
   }
   async getChatPage(userId: string, id: string, options: { before?: string; limit: number }): Promise<WebChatSession | null> {
-    const row = (await this.rows<ChatRow>('dbchat_chats', userId, this.idFilter(id)))[0];
+    if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 100) throw new Error('History page size must be between 1 and 100.');
+    const budget:SavedReadBudget={remaining:SAVED_READ_BYTES};
+    const artifactBudget:SavedReadBudget={remaining:CONTEXT_ARTIFACT_BYTES,parent:budget};
+    const row=await this.chatRow(userId,id,budget);
     if (!row) return null;
     const chatFilter = '&chat_id=eq.' + encodeURIComponent(id);
     let positionFilter = '';
     if (options.before) {
-      const cursor = (await this.rows<{ position: number }>('dbchat_messages', userId, chatFilter + '&body->>id=eq.' + encodeURIComponent(options.before) + '&select=position&limit=1'))[0];
+      const cursor = (await this.rows<{ position: number }>('dbchat_messages', userId, chatFilter + '&body->>id=eq.' + encodeURIComponent(options.before) + '&select=position&limit=1',budget))[0];
       if (!cursor) throw new Error('Invalid history cursor.');
       positionFilter = '&position=lt.' + cursor.position;
     }
-    const page = await this.rows<{ body: ChatMessage }>('dbchat_messages', userId, chatFilter + positionFilter + '&order=position.desc&limit=' + (options.limit + 1));
+    const page = await this.rows<{ body: ChatMessage }>('dbchat_messages', userId, chatFilter + positionFilter + '&order=position.desc&limit=' + (options.limit + 1),budget);
     const historyHasMore = page.length > options.limit;
     const messages = page.slice(0, options.limit).reverse().map(item => item.body);
     const ids = messages.map(message => message.id);
-    let artifacts = ids.length ? await this.rows<{ body: QueryResultArtifact }>('dbchat_artifacts', userId, chatFilter + '&body->>messageId=in.' + encodeURIComponent('(' + ids.map(id => JSON.stringify(id)).join(',') + ')') + '&order=position.asc') : [];
-    // Recovery needs only turn identity/status; event replay and result snapshots have their own endpoint.
-    const turn = (await this.rows<{ id: string; chat_id: string; assistant_message_id: string; created_at: string; status: WebTurnSnapshot['status']; question?: string; attemptOf?: string; connectionId?: string; error?: string; intent?: WebTurnSnapshot['intent'] }>('dbchat_turns', userId, chatFilter + '&order=created_at.desc&limit=1&select=' + encodeURIComponent('id,chat_id,assistant_message_id,created_at,status:snapshot->>status,question:snapshot->>question,attemptOf:snapshot->>attemptOf,connectionId:snapshot->>connectionId,error:snapshot->>error,intent:snapshot->intent')))[0];
-    const latestTurn: WebTurnSnapshot | undefined = turn ? { id: turn.id, chatId: turn.chat_id, assistantMessageId: turn.assistant_message_id, createdAt: turn.created_at, status: turn.status, question: turn.question, attemptOf: turn.attemptOf, connectionId: turn.connectionId, error: turn.error, intent: turn.intent, events: [] } : undefined;
-    const referenced = new Set(referencedResultIds(messages));
-    if (latestTurn?.intent?.artifactId && ids.includes(latestTurn.assistantMessageId ?? '')) referenced.add(latestTurn.intent.artifactId);
-    const missing = [...referenced].filter(id => !artifacts.some(artifact => artifact.body.queryId === id));
-    if (missing.length) artifacts = [...artifacts, ...await this.rows<{ body: QueryResultArtifact }>('dbchat_artifacts', userId, chatFilter + '&body->>queryId=in.' + encodeURIComponent('(' + missing.map(id => JSON.stringify(id)).join(',') + ')'))];
-    return { ...this.summary(row), messages, artifacts: artifacts.map(item => item.body), latestTurn, historyHasMore, historyCursor: historyHasMore ? messages[0]?.id : undefined };
+    const latestTurn = await this.latestTurn(userId, chatFilter, budget);
+    const artifacts=await this.relatedArtifacts(userId,chatFilter,messages,latestTurn?.intent?.artifactId && ids.includes(latestTurn.assistantMessageId ?? '')?[latestTurn.intent.artifactId]:[],artifactBudget);
+    return { ...this.summary(row), messages, artifacts, latestTurn, historyHasMore, historyCursor: historyHasMore ? messages[0]?.id : undefined };
   }
   async createChat(userId: string, connectionId?: string, source?: SourceSnapshot) {
     if (connectionId && !await this.getConnectionSummary(userId, connectionId)) throw new Error('Connection not found.');
@@ -258,7 +389,7 @@ export class SupabaseAccountStore implements AccountRepository {
     if (patch.title !== undefined) customChatTitle(patch.title);
     if (patch.connectionId && !await this.getConnectionSummary(userId, patch.connectionId)) throw new Error('Connection not found.');
     await this.request('/rest/v1/rpc/dbchat_update_chat', 'POST', { owner: userId, chat: id, changes: patch });
-    const result = await this.getChat(userId, id); if (!result) throw new Error('Chat not found.'); return result;
+    const result = await this.chatRow(userId, id); if (!result) throw new Error('Chat not found.'); return { ...this.summary(result), messages: [], artifacts: [] };
   }
   async getConnectionKnowledge(userId: string, connectionId: string): Promise<ConnectionKnowledge> {
     return (await this.rows<{ body: ConnectionKnowledge }>('dbchat_connection_knowledge', userId, '&connection_id=eq.' + encodeURIComponent(connectionId)))[0]?.body ?? { version: 1, glossary: [], examples: [], updatedAt: new Date().toISOString() };
@@ -270,9 +401,12 @@ export class SupabaseAccountStore implements AccountRepository {
   }
   async updateMessageMetadata(userId: string, chatId: string, messageId: string, patch: Pick<ChatMessage, 'pinned' | 'feedback'>): Promise<WebChatSession> {
     await this.request('/rest/v1/rpc/dbchat_update_message_metadata', 'POST', { owner: userId, chat: chatId, message_id: messageId, changes: patch });
-    const chat = await this.getChat(userId, chatId); if (!chat) throw new Error('Chat not found.'); return chat;
+    const budget={remaining:SAVED_READ_BYTES};
+    const chat=await this.chatRow(userId,chatId,budget); if(!chat) throw new Error('Chat not found.');
+    const messages=await this.rows<{body:ChatMessage}>('dbchat_messages',userId,'&chat_id=eq.'+encodeURIComponent(chatId)+'&body->>id=eq.'+encodeURIComponent(messageId)+'&select=body&limit=1',budget);
+    return {...this.summary(chat),messages:messages.map(row=>row.body),artifacts:[]};
   }
-  async deleteChat(userId: string, id: string) { return this.remove('dbchat_chats', userId, this.idFilter(id)); }
+  async deleteChat(userId: string, id: string): Promise<boolean> { return this.request('/rest/v1/rpc/dbchat_delete_chat', 'POST', { owner: userId, chat: id }); }
   async hasUserKey(userId: string) { const value = (await this.profile(userId)).encrypted_provider_key; return value ? this.personalProviderKey(value) !== null : false; }
   /** @deprecated Retained for pre-provider OpenRouter credential compatibility. */
   async setUserKey(userId: string, key: string) { if (key.trim().length < 10) throw new Error('Enter a valid provider key.'); await this.patch('dbchat_profiles', userId, { encrypted_provider_key: this.vault.encrypt(key.trim()) }); }
@@ -294,13 +428,49 @@ export class SupabaseAccountStore implements AccountRepository {
     return { provider: envelope.provider, apiKey: envelope.apiKey };
   }
   async interruptPendingTurns(): Promise<void> { await this.request('/rest/v1/rpc/dbchat_interrupt_pending_turns', 'POST', {}); }
-  async saveTurn(userId: string, snapshot: WebTurnSnapshot): Promise<void> { await this.request('/rest/v1/rpc/dbchat_save_turn', 'POST', { owner: userId, turn: snapshot }); }
+  async saveTurn(userId: string, snapshot: WebTurnSnapshot, workerId?: string): Promise<void> {
+    if (!workerId) throw new WorkerLeaseError();
+    await this.request('/rest/v1/rpc/dbchat_save_turn_fenced', 'POST', { owner: userId, turn: snapshot, worker: workerId });
+  }
   async getTurnByRequestId(userId: string, requestId: string): Promise<WebTurnSnapshot | null> {
     return (await this.rows<{ snapshot: WebTurnSnapshot }>('dbchat_turns', userId, '&request_id=eq.' + encodeURIComponent(requestId)))[0]?.snapshot ?? null;
   }
   async getTurn(userId: string, id: string): Promise<WebTurnSnapshot | null> { return (await this.rows<{ snapshot: WebTurnSnapshot }>('dbchat_turns', userId, this.idFilter(id)))[0]?.snapshot ?? null; }
-  async claimTurn(userId: string, turnId: string, chatId: string, requestId: string, userMessage: ChatMessage, assistantMessageId: string): Promise<{ turnId: string; created: boolean }> {
-    return this.request('/rest/v1/rpc/dbchat_claim_turn', 'POST', { owner: userId, turn_id: turnId, chat: chatId, request_id: requestId, user_message: userMessage, assistant_message_id: assistantMessageId });
+  async claimTurn(userId: string, turnId: string, chatId: string, requestId: string, userMessage: ChatMessage, assistantMessageId: string, options: TurnClaimOptions = {}): Promise<{ turnId: string; created: boolean }> {
+    if (!options.workerId) throw new WorkerLeaseError();
+    const result = await this.request<{ turnId: string; created: boolean; quotaExceeded?: 'account' | 'global'; leaseLost?: boolean; capacityExceeded?: boolean }>('/rest/v1/rpc/dbchat_claim_turn_coordinated', 'POST', {
+      owner: userId, turn_id: turnId, chat: chatId, request_id: requestId, user_message: userMessage, assistant_message_id: assistantMessageId,
+      managed: options.managed ?? false, account_daily_limit: options.accountDailyLimit ?? 100, global_daily_limit: options.globalDailyLimit ?? 1000,
+      turn_context: { attemptOf: options.attemptOf, intent: options.intent },
+      worker: options.workerId, account_active_limit: options.accountActiveLimit ?? 2, global_active_limit: options.globalActiveLimit ?? 8
+    });
+    if (result.leaseLost) throw new WorkerLeaseError();
+    if (result.capacityExceeded) throw new TurnCapacityError();
+    if (result.quotaExceeded) throw new ManagedTurnQuotaError(result.quotaExceeded);
+    return result;
   }
-  async finalizeTurn(userId: string, snapshot: WebTurnSnapshot, message?: ChatMessage, artifacts?: QueryResultArtifact[]): Promise<void> { await this.request('/rest/v1/rpc/dbchat_finalize_turn', 'POST', { owner: userId, turn: snapshot, assistant_message: message ?? null, result_artifacts: artifacts ?? [] }); }
+  async finalizeTurn(userId: string, snapshot: WebTurnSnapshot, message?: ChatMessage, artifacts?: QueryResultArtifact[], workerId?: string): Promise<WebTurnSnapshot> {
+    if (!workerId) throw new WorkerLeaseError();
+    return this.request('/rest/v1/rpc/dbchat_finalize_turn_fenced', 'POST', { owner: userId, turn: snapshot, assistant_message: message ?? null, result_artifacts: artifacts ?? [], worker: workerId });
+  }
+  async isAccountDeleting(owner: string): Promise<boolean> { return (await this.request<unknown[]>('/rest/v1/dbchat_account_deletions?select=owner&owner=eq.' + encodeURIComponent(owner) + '&limit=1')).length > 0; }
+  registerWorker(worker: string, lease_ms: number): Promise<WorkerHeartbeat> { return this.request('/rest/v1/rpc/dbchat_register_worker', 'POST', { worker, lease_ms }); }
+  heartbeatWorker(worker: string, lease_ms: number): Promise<WorkerHeartbeat> { return this.request('/rest/v1/rpc/dbchat_heartbeat_worker', 'POST', { worker, lease_ms }); }
+  async releaseWorker(worker: string): Promise<void> { await this.request('/rest/v1/rpc/dbchat_release_worker', 'POST', { worker }); }
+  async finishTurnExecution(owner: string, turn_id: string, worker: string): Promise<void> { await this.request('/rest/v1/rpc/dbchat_finish_turn_execution', 'POST', { owner, turn_id, worker }); }
+  cancelTurn(owner: string, turn_id: string): Promise<boolean> { return this.request('/rest/v1/rpc/dbchat_cancel_turn', 'POST', { owner, turn_id }); }
+  cancelOwnerTurns(owner: string): Promise<number> { return this.request('/rest/v1/rpc/dbchat_cancel_owner_turns', 'POST', { owner }); }
+  async recoverExpiredTurns(): Promise<void> {
+    const pending = await this.request<{ owner: string; turn_id: string }[]>('/rest/v1/rpc/dbchat_recoverable_turns', 'POST', {});
+    // Each recovery takes exactly one owner lock, before the coordination lock.
+    for (const turn of pending) await this.request('/rest/v1/rpc/dbchat_recover_turn', 'POST', turn);
+  }
+  async reserveSqliteUpload(userId: string, bytes: number, limits: UploadAllowance): Promise<void> {
+    const result = await this.request<{ accepted: boolean }>('/rest/v1/rpc/dbchat_reserve_upload', 'POST', {
+      owner: userId, upload_bytes: bytes, account_count_limit: limits.accountCount, global_count_limit: limits.globalCount,
+      account_bytes_limit: limits.accountBytes, global_bytes_limit: limits.globalBytes
+    });
+    if (!result.accepted) throw new UploadQuotaError();
+  }
+  async pruneUsage(): Promise<void> { await this.request('/rest/v1/rpc/dbchat_prune_usage', 'POST', {}); }
 }

@@ -1,7 +1,7 @@
 # DB Chat: Product and Architecture
 
-> **Status:** Current. Describes the product as built on `main`.
-> **Last verified against source:** 2 October 2026
+> **Status:** Describes current repository source; deployment state is separate.
+> **Last verified against source:** 3 October 2026
 > **Design references:** [WEB-DESIGN.md](WEB-DESIGN.md) (screens) and
 > [WEB-STYLE-GUIDE.md](WEB-STYLE-GUIDE.md) (visual system)
 
@@ -58,10 +58,15 @@ Browser (src/web) ──HTTP/JSON + SSE──▶ Node service (src/server)
 - `GET /api/v1/health` is the deployment health check.
 - The server uses plain `node:http` with no framework. Routing is a sequence of
   path matches in `WebServer.handleApi`.
-- **Single instance only.** Active turns, SSE subscribers, export jobs, upload
-  handles, and rate-limit windows live in process memory. On startup,
-  `interruptPendingTurns` marks unfinished turns as interrupted. Running more
-  than one replica requires worker leases first.
+- In Supabase mode, worker leases (30 seconds, renewed every 5 seconds) own
+  accepted turns. Progress and terminal events are durable; any worker can serve
+  a saved snapshot or SSE stream and request cancellation. Expired workers are
+  recovered; stale writes are fenced. Health is 503 after lease loss.
+- Upload registration, cleanup, account deletion and export metadata live in
+  Postgres; files live in private Storage. Short request budgets and SSE viewers
+  remain process-local. Daily allowances and active turn/export limits are shared.
+- The first upgrade from the old non-coordinated binary requires a maintenance
+  cutover. New coordinated workers can overlap afterward.
 
 ### Configuration
 
@@ -86,15 +91,24 @@ in `.env.example`). Key rules:
   server stores only its SHA-256 hash plus an encrypted Supabase token bundle.
   The idle timeout is 30 minutes and the absolute timeout is 30 days. Recovery
   sessions last 15 minutes and cannot call normal APIs.
-- Requests from a foreign `Origin` are rejected. Non-GET requests are rate
-  limited per IP (120/min), with tighter budgets for sign-up, recovery,
-  verification, and failed logins.
-- Account deletion cascades to all of the user's application rows and stored
-  SQLite objects.
+- Requests from a foreign `Origin` are rejected. Authenticated mutations are
+  limited per account (120/min), with separate IP budgets for sign-up, recovery,
+  verification, and failed logins. Forwarded client addresses are used only when
+  the operator configures the exact trusted proxy hop count; direct deployments
+  use the socket address. Database checks, including suggestions, have account
+  and instance budgets.
+- Password-confirmed account deletion commits a durable gate before destructive
+  work and returns HTTP 202. New activity is denied on all workers. Cleanup waits
+  for admitted uploads and leased turn/export execution, removes private objects,
+  then deletes the Auth user and cascades saved records. Failed steps retry;
+  a lost successful Auth response is checked before retry. Completion is durable.
+- Login sessions are bounded (20 per account by default), with a separate bounded
+  recovery allowance (2). Expired rows are pruned; live sessions are not evicted.
+  Password confirmation for deletion does not require another saved session.
 
-Outstanding: production email delivery (SMTP provider and verified sending
-domain) is not configured yet, so sign-up confirmation and recovery emails
-are not production-ready.
+Production email delivery requires SMTP/sending-domain configuration and real
+confirmation/recovery tests on the selected project. Local checks do not verify
+those deployment settings or successful delivery.
 
 ## 5. Connections
 
@@ -118,7 +132,17 @@ Supported engines: **PostgreSQL, MySQL, MongoDB, Elasticsearch, SQLite
 - **SQLite:** files (`.db`, `.sqlite`, `.sqlite3`, up to 50 MiB) are uploaded to
   `POST /sqlite-files` and stored in the private Supabase Storage bucket
   `dbchat-sqlite` under the owner's ID. Each test, schema request, or chat turn
-  downloads a temporary copy.
+  downloads a temporary copy. Admission permits one active upload per account
+  and two per instance by default. Daily defaults are 10 attempts / 250 MiB per
+  account and 100 attempts / 1 GiB globally. Count and bytes are reserved before
+  reading the body; chunked requests reserve the per-file maximum, and failed
+  accepted uploads remain charged. Exhaustion returns HTTP 429.
+- Upload registration precedes the Storage write. Pending upload tokens survive
+  restarts and can attach once through a transactional connection trigger. Pending
+  uploads expire after one hour. Cleanup claims are leased and retryable; attached
+  files are retained until their connection is removed. Orphan reconciliation
+  checks durable references and uses a grace period. Retained SQLite capacity is
+  reserved before a Storage write (1 GiB per account by default).
 - **Connection knowledge:** each connection has a private glossary and
   user-verified query examples. Examples are bound to a schema fingerprint and
   invalidated when the schema changes.
@@ -145,10 +169,27 @@ The layers, from outermost to innermost:
    statements that aren't read-only. Statement timeouts apply. Users should
    still connect with a read-only role.
 
+Result display limits are separate from transport and execution bounds:
+
+| Engine | Bound before exposing a result |
+| --- | --- |
+| PostgreSQL / MySQL | 8 MiB wire messages/packets and 16 MiB buffered responses; exports retain frame/batch bounds while streaming under the export limits. |
+| MongoDB | 20 MiB wire messages, compressed messages rejected, and 8 MiB decoded document/result or export-batch bounds. |
+| Elasticsearch | 8 MiB HTTP response before JSON parsing. |
+| SQLite | Killable child processes for queries, schema reads and exports; 64 MiB native SQLite heap, 96 MiB V8 old-space, and 8 MiB result/export batches. |
+
+These limits do not guarantee a total process-memory ceiling. Driver stream
+guards fail closed if an incompatible driver removes the required integration.
+SQLite requires a native build with memory accounting: `npm ci` runs
+`scripts/prepare-sqlite.mjs`, verifies allocation rejection and rebuilds
+`better-sqlite3` when needed. Native compilation needs Python, make and a C++
+compiler; the Docker build installs them. Do not skip install scripts. After
+replacing the native module, run `npm run prepare:sqlite` again.
+
 ## 7. Chat turns
 
 ~~~text
-POST /chat/turns ─▶ claimTurn (atomic: user message + request-id dedupe)
+POST /chat/turns ─▶ claimTurn (atomic: quota + message + retry context + dedupe)
                  ─▶ WebAgentService.run (fresh connector, introspect)
                  ─▶ runAgentLoop ─▶ events ─▶ WebSessionStore ─▶ SSE
                  ─▶ finalizeTurn (atomic: assistant message + artifacts, once)
@@ -164,6 +205,13 @@ POST /chat/turns ─▶ claimTurn (atomic: user message + request-id dedupe)
   turn. `POST /chat/turns/:id/abort` cancels it. Turns time out after 120 s
   (`DBCHAT_WEB_TURN_TIMEOUT_MS`).
 - Concurrency limits: 2 active turns per user and 16 per instance.
+- Managed inference also has durable UTC-day allowances: 100 accepted turns per
+  account and 1,000 globally by default. The allowance and question are claimed
+  in one database transaction. Failed/cancelled attempts count; idempotent
+  retries and personal-provider turns do not. The selected credentials/model
+  are captured at admission and reused for execution. Exhaustion returns HTTP 429.
+  These are request limits, not a guarantee about provider spending; configure
+  provider-side monetary limits separately.
 - Failed, aborted, and interrupted attempts persist with their partial
   evidence and offer Retry/Edit. Follow-up intents (`compare`, `filter`,
   `explain`, `inspect-exceptions`, `change-chart`, `rerun`) carry the target
@@ -225,7 +273,9 @@ provider-reported tokens and cost, and terminal reason.
   query on a separate connection and stream CSV, `.xlsx`, or JSON.
   Defaults: 1,000,000 rows, 100 MiB, 5 minutes (`DBCHAT_EXPORT_*`). Two jobs
   run concurrently (one per account). Each account keeps 5 retained files
-  and each instance 10. Files expire after one hour or on restart. CSV
+  and the hosted service 10. Files expire after one hour; completed files survive
+  worker replacement in private Storage. Leased jobs publish only after upload
+  succeeds, and cancellation holds capacity until execution stops. CSV
   neutralizes spreadsheet formulas.
 - Elasticsearch full exports require a document search. Aggregates need an
   explicit record-level follow-up.
@@ -236,7 +286,9 @@ provider-reported tokens and cost, and terminal reason.
 
 Supabase Postgres tables (`supabase/migrations`): `dbchat_profiles`,
 `dbchat_sessions`, `dbchat_connections`, `dbchat_chats`, `dbchat_messages`,
-`dbchat_artifacts`, `dbchat_turns`, `dbchat_connection_knowledge`.
+`dbchat_artifacts`, `dbchat_turns`, `dbchat_connection_knowledge`,
+`dbchat_managed_usage`, `dbchat_upload_usage`, worker/execution leases, retained
+usage/policy/reservations, SQLite assets, account deletions and exports.
 
 - Row-level security is enabled and all browser-role access is revoked. Only
   the Node service, using the service role, touches these tables, and every
@@ -244,39 +296,87 @@ Supabase Postgres tables (`supabase/migrations`): `dbchat_profiles`,
 - Transactional RPCs: `dbchat_claim_turn`, `dbchat_save_turn`,
   `dbchat_finalize_turn`, `dbchat_update_chat`,
   `dbchat_update_message_metadata`, `dbchat_search_chats`,
-  `dbchat_interrupt_pending_turns`.
+  `dbchat_interrupt_pending_turns`, `dbchat_claim_turn_with_limits`,
+  `dbchat_reserve_upload`, `dbchat_prune_usage`.
+- The `202610030001_managed_turn_limits.sql` and
+  `202610030002_upload_limits.sql` migrations add the usage tables and quota
+  RPCs. Each allowance uses a daily advisory transaction lock across accounts.
+  Counters store the UTC day, account UUID/global scope, counts and reserved
+  bytes without question/file contents. They survive account/chat deletion.
+  Pruning runs at startup and hourly, retaining today and yesterday; it resumes
+  at startup after downtime. Separate retained-data triggers enforce configurable
+  connection/chat/message/artifact counts and logical JSON bytes. Defaults are
+  100/1,000/100,000/100,000 and 100 MiB. Existing over-limit data is preserved;
+  growth is denied, while deletion and shrinking remain available. Accepted turns
+  reserve 16 MiB, one message and eight artifacts, with a bounded terminal
+  allowance of 64 MiB added bytes and 128 artifacts. Actual retained growth is
+  counted afterward and can block later admission. No saved-history age deletion
+  is scheduled. See the exact policy in `supabase/README.md`.
 - Chats record a source snapshot, so history stays readable after its
-  connection is deleted.
-- Apply new migrations before deploying a build that needs them.
+  connection is deleted. Saved reads are streamed with a 16 MiB response/aggregate
+  history budget and an 8 MiB artifact budget. Context loads compact recent,
+  pinned/definition and explicitly selected earlier evidence; it does not load the
+  whole chat. Oversized reads fail clearly without deleting saved data. New turn
+  progress is capped at 14 MiB and terminal snapshots at 15 MiB, independently of
+  the retained-row completion allowance. Existing larger legacy records are kept.
+- API handlers and buffered responses have a per-process allowance (default 8,
+  Render template 4); health/static delivery bypass it. SSE has separate lifetime
+  limits of 16 viewers per process and 2 per account. Completed durable turns are
+  removed from memory and remain available through database-backed replay.
+- Apply all migrations in filename order before deploying. Before listening,
+  startup probes required tables through PostgREST, initializes export cleanup,
+  registers a worker, prunes usage/expired sessions and recovers only expired
+  execution. Missing schema or unusable credentials prevent startup. Database
+  readiness does not establish external SMTP, backup restore or customer reachability.
 
 ## 12. Deployment
 
 - `Dockerfile` (Node 22, non-root, port 8787) builds the web and server bundles.
-  `render.yaml` targets one Render Free web service in Frankfurt with
+  `render.yaml` proposes one Render Starter web service in Frankfurt with
   `/api/v1/health`. Auto-deploy is off.
-- Because of the single-instance assumption, suspend the old service before
-  deploying a replacement.
+- Stop the old non-coordinated binary before the first migration cutover. Later
+  deployments can overlap coordinated workers. Do not roll back to legacy
+  recovery while new workers serve traffic.
+- Database operation admission bounds driver/child allocations per process
+  (`DBCHAT_WEB_MAX_DATABASE_OPERATIONS`, default 2; Render template 1), with a
+  bounded queue. Container memory/CPU limits and measured capacity remain required.
 - CI (`.github/workflows/checks.yml`) runs `npm test`, `npm run typecheck`,
-  `npm run build`, and `npm run desktop:build`. PRs into `main` need exactly
-  one `major`/`minor`/`patch` label. Merges are tagged automatically.
+  `npm run build`, and `npm run desktop:build` on Node 22 and 24, plus disposable
+  migration verification, scripted analytical evaluation, a hosted dependency
+  advisory gate, real PostgreSQL/MySQL/MongoDB/Elasticsearch integration and concurrent
+  account quota checks on PostgreSQL. This describes the configured workflow,
+  not a completed hosted CI run. PRs into `main` need exactly one
+  `major`/`minor`/`patch` label. Merges are tagged automatically.
   Desktop installers come from the release workflow and require
   `DBCHAT_DESKTOP_URL`.
 
 ## 13. Testing and evaluation
 
-- `npm test` runs the Vitest suites. `test:databases` runs the live-engine
-  integration scripts. `supabase/tests/account_isolation.sql` verifies tenant
-  isolation against a disposable Postgres.
+- `npm test` runs the Vitest suites, including real SQL quota checks using
+  embedded Postgres. `test:persistence` applies all migrations to a disposable
+  embedded Postgres with Auth/Storage schema shims and verifies persistence
+  contracts. Its single connection does not demonstrate backend contention.
+- `npm run test:databases` runs PostgreSQL/MySQL/MongoDB/Elasticsearch integrations and the
+  account suite in owned disposable localhost Docker containers. Select the
+  account suite with `npm run test:databases -- accounts`: it applies all
+  migrations, observes twelve independent service-role sessions waiting on
+  advisory locks and verifies concurrent quotas, retry deduplication, rollback,
+  deletion accounting, browser privileges, Storage policy and
+  `supabase/tests/account_isolation.sql`. Fixtures are synthetic and containers
+  are removed. Minimal Auth/Storage schema shims do not verify hosted Supabase
+  Auth, PostgREST, Storage HTTP, email or deployment behavior.
 - `npm run eval:chat` runs deterministic contract checks, and `-- --live`
   runs the model against a synthetic fixture. Output goes to `audit-output/`
   (local only).
 
 ## 14. Known limits and open decisions
 
-- Horizontal scaling requires distributed turn/export ownership.
+- Short Auth/request rate windows are per-process; use edge limits when scaling.
 - No OAuth, sharing, or collaboration.
 - Hosted connections cannot reach private networks. There is no agent or
   tunnel option yet.
 - MongoDB SRV URIs are not supported.
 - One encryption key, with no rotation tooling.
-- Production email delivery is not yet configured.
+- Production email delivery requires deployment verification.
+- Daily usage limits do not provide a provider spending ceiling. Backups must
+  include private objects and the separately retained encryption key.

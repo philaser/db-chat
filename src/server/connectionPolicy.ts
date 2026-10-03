@@ -23,7 +23,13 @@ export async function prepareConnectionDestination(connection: ConnectionConfig,
   assertConnectionDestination(connection, allowedHosts);
   if (connection.kind === 'sqlite') return;
   const host = destinationHost(connection);
-  const addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await resolve(host, { all: true, verbatim: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await Promise.race([
+    resolve(host, { all: true, verbatim: true }),
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('Database hostname resolution exceeded its 10-second deadline.')), 10_000);
+    })
+  ]).finally(() => clearTimeout(timer));
   if (!addresses.length || addresses.some(({ address }) => !isPublicAddress(address))) {
     throw new Error('This hostname resolves to a private or reserved network. Use a publicly reachable database.');
   }

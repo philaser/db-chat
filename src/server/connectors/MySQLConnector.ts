@@ -1,3 +1,4 @@
+import { MAX_DATABASE_RESPONSE_BYTES, MAX_DATABASE_FRAME_BYTES, WireFrameGuard, WireResponseBudget } from './wireLimits.js';
 import { connect as connectSocket } from 'node:net';
 import { boundResult, resultLimit } from './resultLimits.js';
 import { classifyQuery, QueryValidator, type SafetyLevel } from './QueryValidator.js';
@@ -15,6 +16,7 @@ export class MySQLConnector implements DatabaseConnector {
   private config: ConnectionConfig | null = null;
   private safetyLevel: SafetyLevel = 'standard';
   private maxRows = 1000;
+  private readonly wireBudget = new WireResponseBudget();
 
   setResultLimit(maxRows: number): void { this.maxRows = resultLimit(maxRows); }
 
@@ -28,23 +30,56 @@ export class MySQLConnector implements DatabaseConnector {
     }
 
     this.close();
+    const handshakeSockets = new Map<ReturnType<typeof connectSocket>, (chunk: Buffer) => void>();
     const pool = createPool({
       host,
-      stream: config.resolvedAddress ? () => connectSocket({ host: config.resolvedAddress!, port }) : undefined,
+      stream: () => {
+        const socket = connectSocket({ host: config.resolvedAddress ?? host, port });
+        let handshakeBytes = 0;
+        const checkHandshake = (chunk: Buffer) => {
+          handshakeBytes += chunk.length;
+          if (handshakeBytes > MAX_DATABASE_RESPONSE_BYTES) socket.destroy(new Error('MySQL handshake exceeded the transport size limit.'));
+        };
+        socket.on('data', checkHandshake);
+        handshakeSockets.set(socket, checkHandshake);
+        return socket;
+      },
       port,
       database,
       user: config.username,
       password: config.password,
       ssl: config.ssl ? { rejectUnauthorized: true, verifyIdentity: true } : undefined,
-      connectionLimit: 1
+      connectionLimit: 1,
+      connectTimeout: 10_000,
+      compress: false
     });
     try {
       const connection = await pool.getConnection();
+      // mysql2 sends TCP and decrypted TLS bytes through this same parser.
+      // Keep its state machine intact; reject headers before it allocates rows.
+      const raw = connection.connection as unknown as { packetParser: { execute: (chunk: Buffer) => void }; stream: { destroy: (error: Error) => void } };
+      if (!raw?.packetParser || typeof raw.packetParser.execute !== 'function' || !raw.stream?.destroy) {
+        connection.destroy();
+        throw new Error('This MySQL driver cannot enforce database transport limits.');
+      }
+      const parser = raw.packetParser;
+      const guard = new WireFrameGuard('mysql', this.wireBudget);
+      let failed = false;
+      raw.packetParser = { execute: (chunk: Buffer) => {
+        if (failed) return;
+        try { guard.accept(chunk); }
+        catch (error) { failed = true; raw.stream.destroy(error as Error); return; }
+        parser.execute(chunk);
+      } };
+      for (const [socket, listener] of handshakeSockets) socket.off('data', listener);
+      handshakeSockets.clear();
+      this.wireBudget.reset();
       await connection.ping();
       this.pool = pool;
       this.connection = connection;
       this.config = config;
     } catch (error) {
+      for (const [socket, listener] of handshakeSockets) { socket.off('data', listener); socket.destroy(); }
       await pool.end().catch(() => undefined);
       throw error;
     }
@@ -52,6 +87,7 @@ export class MySQLConnector implements DatabaseConnector {
 
   async introspect(): Promise<DatabaseSchema> {
     const conn = this.requireConnection();
+    this.wireBudget.reset();
     const dbName = this.config?.database ?? await currentDatabase(conn);
 
     const [[columnRows], [relationshipRows]] = await Promise.all([
@@ -135,10 +171,11 @@ export class MySQLConnector implements DatabaseConnector {
     const isWrite = validation.isWrite || validation.isDDL;
     if (options?.signal?.aborted) throw abortError(options.signal);
 
+    this.wireBudget.reset();
     const start = performance.now();
     let response: unknown;
     if (this.safetyLevel === 'safe') {
-      await conn.query('START TRANSACTION READ ONLY');
+      await this.queryWithSignal(conn, { sql: 'START TRANSACTION READ ONLY', timeout: 30_000 }, options?.signal);
       let queryError: unknown;
       try {
         response = await this.queryWithSignal(conn, { sql: effectiveQuery, timeout: 30_000 }, options?.signal);
@@ -187,9 +224,12 @@ export class MySQLConnector implements DatabaseConnector {
     const signal = options?.signal;
     const batchSize = exportBatchSize(options?.batchSize);
     signal?.throwIfAborted();
+    this.wireBudget.reset();
     await this.queryWithSignal(conn, { sql: 'START TRANSACTION READ ONLY', timeout: 30_000 }, signal);
-    const stream = conn.connection?.query({ sql: query, timeout: 30_000 }).stream({ highWaterMark: batchSize });
+    this.wireBudget.reset(true);
+    const stream = conn.connection?.query({ sql: query, timeout: 30_000 }).stream({ highWaterMark: 1 });
     if (!stream) {
+      this.wireBudget.reset();
       await conn.query('ROLLBACK').catch(() => undefined);
       throw new Error('This MySQL connection does not support streaming exports.');
     }
@@ -210,21 +250,30 @@ export class MySQLConnector implements DatabaseConnector {
     stream.on('fields', fields);
     signal?.addEventListener('abort', abort, { once: true });
     let rows: Record<string, unknown>[] = [];
+    let batchBytes = 0;
     let completed = false;
     try {
       for await (const row of stream) {
         if (signal?.aborted) throw abortError(signal);
         const record = row as Record<string, unknown>;
         if (!columns.length) columns = Object.keys(record);
+        const rowBytes = Buffer.byteLength(JSON.stringify(record));
+        if (rowBytes > MAX_DATABASE_FRAME_BYTES) throw new Error('MySQL export row exceeded the size limit. Select fewer or smaller columns.');
+        if (rows.length && batchBytes + rowBytes > MAX_DATABASE_FRAME_BYTES) {
+          yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
+          rows = []; batchBytes = 0;
+        }
         rows.push(record);
+        batchBytes += rowBytes;
         if (rows.length === batchSize) {
           yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
-          rows = [];
+          rows = []; batchBytes = 0;
         }
       }
       completed = true;
       if (rows.length || columns.length) yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
     } finally {
+      this.wireBudget.reset();
       signal?.removeEventListener('abort', abort);
       stream.off('fields', fields);
       if (!stream.destroyed) stream.destroy();
@@ -248,7 +297,7 @@ export class MySQLConnector implements DatabaseConnector {
   }
 
   close(): void {
-    (this.connection as { release?: () => void })?.release?.();
+    (this.connection as { destroy?: () => void })?.destroy?.();
     (this.pool as { end?: () => Promise<void> })?.end?.().catch(() => {});
     this.connection = null;
     this.pool = null;
@@ -263,22 +312,28 @@ export class MySQLConnector implements DatabaseConnector {
   }
 
   private async queryWithSignal(conn: MySQLConnection, sql: { sql: string; timeout: number }, signal?: AbortSignal): Promise<unknown> {
-    if (!signal) return conn.query(sql);
+    const invalidate = () => {
+      conn.destroy?.();
+      if (this.connection !== conn) return;
+      const pool = this.pool as MySQLPool | null;
+      this.connection = null; this.pool = null; this.config = null;
+      pool?.end?.().catch(() => undefined);
+    };
+    const query = () => conn.query(sql).catch(error => {
+      // mysql2's timeout only rejects its callback. Without destroying the
+      // socket, ROLLBACK waits behind the still-running query indefinitely.
+      if (error?.code === 'PROTOCOL_SEQUENCE_TIMEOUT') invalidate();
+      throw error;
+    });
+    if (!signal) return query();
     if (signal.aborted) throw abortError(signal);
     return new Promise((resolve, reject) => {
       const abort = () => {
-        conn.destroy?.();
-        if (this.connection === conn) {
-          const pool = this.pool as MySQLPool | null;
-          this.connection = null;
-          this.pool = null;
-          this.config = null;
-          pool?.end?.().catch(() => undefined);
-        }
+        invalidate();
         reject(abortError(signal));
       };
       signal.addEventListener('abort', abort, { once: true });
-      conn.query(sql).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+      query().then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
     });
   }
 }

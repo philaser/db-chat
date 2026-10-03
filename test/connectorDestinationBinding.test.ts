@@ -4,10 +4,10 @@ import { PostgresConnector } from '../src/server/connectors/PostgresConnector';
 import { MySQLConnector } from '../src/server/connectors/MySQLConnector';
 import { MongoDBConnector } from '../src/server/connectors/MongoDBConnector';
 import type { ConnectionConfig } from '../src/shared/types';
-const mocks = vi.hoisted(() => ({ postgres: vi.fn(), mysql: vi.fn(), mongo: vi.fn(), socket: vi.fn() }));
-vi.mock('pg', () => ({ Client: class { constructor(options: unknown) { mocks.postgres(options); } async connect() {} async end() {} } }));
-vi.mock('mysql2/promise', () => ({ createPool: (options: unknown) => { mocks.mysql(options); return { getConnection: async () => ({ ping: async () => {}, release() {} }), end: async () => {} }; } }));
-vi.mock('mongodb', () => ({ MongoClient: class { constructor(uri: string, options: unknown) { mocks.mongo(uri, options); } async connect() {} db() { return {}; } async close() {} } }));
+const mocks = vi.hoisted(() => ({ postgres: vi.fn(), mysql: vi.fn(), mongo: vi.fn(), socket: vi.fn(() => ({ on() {}, off() {}, destroy() {} })) }));
+vi.mock('pg', () => ({ Client: class { connection = { attachListeners() {} }; constructor(options: unknown) { mocks.postgres(options); } async connect() {} async end() {} } }));
+vi.mock('mysql2/promise', () => ({ createPool: (options: unknown) => { mocks.mysql(options); return { getConnection: async () => ({ ping: async () => {}, release() {}, connection: { packetParser: { execute() {} }, stream: { destroy() {} } } }), end: async () => {} }; } }));
+vi.mock('mongodb', () => ({ MongoClient: class { connection = { attachListeners() {} }; constructor(uri: string, options: unknown) { mocks.mongo(uri, options); } async connect() {} db() { return {}; } async close() {} } }));
 vi.mock('node:net', async original => ({ ...await original<typeof import('node:net')>(), connect: mocks.socket }));
 const config = (kind: ConnectionConfig['kind']): ConnectionConfig => ({ id: 'test', kind, host: 'customer.example', resolvedAddress: '1.1.1.1', port: 1234, database: 'analytics', ssl: true, label: 'Customer data', createdAt: '2026-09-05' });
 

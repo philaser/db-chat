@@ -16,7 +16,7 @@ if (!process.env.DBCHAT_WEB_OPENROUTER_API_KEY) throw new Error('The configured 
 const { WebAgentService } = await import(pathToFileURL(path.join(root, 'server/webAgentService.js')));
 const { loadWebServerConfig } = await import(pathToFileURL(path.join(root, 'server/config.js')));
 const model = requestedModel || loadWebServerConfig({}).model;
-const { SQLiteConnector } = await import(pathToFileURL(path.join(root, 'server/connectors/SqliteConnector.js')));
+const { SQLiteConnector } = await import(pathToFileURL(path.join(root, 'server/connectors/SQLiteConnector.js')));
 const { conversationContext } = await import(pathToFileURL(path.join(root, 'server/conversationContext.js')));
 const work = await mkdtemp(path.join(tmpdir(), 'dbchat-conversation-eval-'));
 const dbPath = path.join(work, 'synthetic.sqlite');

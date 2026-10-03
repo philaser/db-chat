@@ -14,7 +14,7 @@ if (effort && !['none', 'low', 'medium', 'high', 'max'].includes(effort)) throw 
 const root = path.resolve(option('--server-root', 'dist-web-server'));
 const { WebAgentService } = await import(pathToFileURL(path.join(root, 'server/webAgentService.js')));
 const { loadWebServerConfig } = await import(pathToFileURL(path.join(root, 'server/config.js')));
-const { SQLiteConnector } = await import(pathToFileURL(path.join(root, 'server/connectors/SqliteConnector.js')));
+const { SQLiteConnector } = await import(pathToFileURL(path.join(root, 'server/connectors/SQLiteConnector.js')));
 const cases = JSON.parse(await readFile(new URL('../evals/chat/cases.json', import.meta.url), 'utf8'));
 const filter = option('--cases', '').split(',').filter(Boolean);
 const limit = Number(option('--limit', live ? '6' : String(cases.length)));

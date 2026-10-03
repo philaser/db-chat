@@ -41,6 +41,7 @@ function sse(event: WebTurnEvent): string {
 }
 
 export class WebSessionStore {
+  private readonly durableSubscribers = new Map<ServerResponse, { owner: string; turn: string; refresh: () => Promise<void> }>();
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly turns = new Map<string, WebTurnRecord>();
   private cleanupTimer: ReturnType<typeof setInterval>;
@@ -52,16 +53,17 @@ export class WebSessionStore {
 
   getOrCreateSession(principal: Principal, existingId?: string): { id: string; isNew: boolean } {
     const now = Date.now();
-    if (existingId) {
-      const existing = this.sessions.get(existingId);
-      if (existing && existing.principalId === principal.id && existing.expiresAt > now) {
-        existing.expiresAt = now + this.ttlMs;
-        return { id: existing.id, isNew: false };
-      }
+    const existing = this.sessions.get(principal.id);
+    if (existing && existing.expiresAt > now) {
+      existing.expiresAt = now + this.ttlMs;
+      // Refresh insertion order so the bounded cache evicts the least recent viewer.
+      this.sessions.delete(principal.id);
+      this.sessions.set(principal.id, existing);
+      return { id: existing.id, isNew: existingId !== existing.id };
     }
-
     const id = crypto.randomUUID();
-    this.sessions.set(id, { id, principalId: principal.id, expiresAt: now + this.ttlMs });
+    if (this.sessions.size >= 10_000) this.sessions.delete(this.sessions.keys().next().value!);
+    this.sessions.set(principal.id, { id, principalId: principal.id, expiresAt: now + this.ttlMs });
     return { id, isNew: true };
   }
 
@@ -131,7 +133,10 @@ export class WebSessionStore {
         turn.subscribers.delete(subscriber);
         continue;
       }
+      // A slow client can reconnect using Last-Event-ID. Do not let a stalled
+      // socket grow an unbounded queue while the model keeps producing events.
       subscriber.write(encoded);
+      if (subscriber.writableLength > 4 * 1024 * 1024) { subscriber.destroy(); turn.subscribers.delete(subscriber); }
     }
   }
 
@@ -168,6 +173,7 @@ export class WebSessionStore {
     response.write(': connected\n\n');
     for (const event of turn.events) {
       if (event.id > lastEventId) response.write(sse(event));
+      if (response.writableLength > 4 * 1024 * 1024) { response.destroy(); return; }
     }
     if (turn.status === 'complete' || turn.status === 'error' || turn.status === 'aborted') {
       response.end();
@@ -182,6 +188,7 @@ export class WebSessionStore {
         return;
       }
       response.write(': heartbeat\n\n');
+      if (response.writableLength > 4 * 1024 * 1024) { response.destroy(); clearInterval(heartbeat); turn.subscribers.delete(response); }
     }, 15_000);
     heartbeat.unref?.();
     response.on('close', () => {
@@ -189,6 +196,40 @@ export class WebSessionStore {
       turn.subscribers.delete(response);
     });
   }
+
+  /** Streams only committed snapshots, so any worker can replay the same event IDs. */
+  subscribeDurable(owner: string, initial: WebTurnSnapshot, response: ServerResponse, lastEventId: number,
+    read: () => Promise<WebTurnSnapshot | null>): void {
+    if ([...this.durableSubscribers.values()].filter(s => s.owner === owner).length >= 8) { response.end(); return; }
+    let busy = false;
+    const write = (snapshot: WebTurnSnapshot | null) => {
+      if (!snapshot || response.destroyed) { response.end(); return; }
+      for (const event of snapshot.events) if (event.id > lastEventId) {
+        response.write(sse(event)); lastEventId = event.id;
+        if (response.writableLength > 4 * 1024 * 1024) { response.destroy(); return; }
+      }
+      if (!['queued', 'running'].includes(snapshot.status)) response.end();
+    };
+    const refresh = async () => {
+      if (busy || response.destroyed || response.writableEnded) return;
+      busy = true;
+      try { write(await read()); } catch { response.destroy(); } finally { busy = false; }
+    };
+    response.write(': connected\n\n');
+    write(initial);
+    if (response.writableEnded || response.destroyed) return;
+    const poll = setInterval(() => { void refresh(); }, 500); poll.unref?.();
+    const heartbeat = setInterval(() => { if (!response.destroyed) response.write(': heartbeat\n\n'); }, 15_000); heartbeat.unref?.();
+    this.durableSubscribers.set(response, { owner, turn: initial.id, refresh });
+    response.on('close', () => { clearInterval(poll); clearInterval(heartbeat); this.durableSubscribers.delete(response); });
+  }
+
+  acceptPersisted(turn: WebTurnRecord, snapshot: WebTurnSnapshot): void {
+    Object.assign(turn, snapshot);
+    for (const subscriber of this.durableSubscribers.values()) if (subscriber.turn === turn.id) void subscriber.refresh();
+  }
+
+  async flushDurable(): Promise<void> { await Promise.all([...this.durableSubscribers.values()].map(s => s.refresh())); }
 
   snapshot(turn: WebTurnRecord): WebTurnSnapshot {
     return {
@@ -214,6 +255,15 @@ export class WebSessionStore {
       if (!subscriber.destroyed) subscriber.end();
     }
     turn.subscribers.clear();
+  }
+
+  close(): void {
+    clearInterval(this.cleanupTimer);
+    for (const turn of this.turns.values()) this.closeSubscribers(turn);
+    for (const response of this.durableSubscribers.keys()) response.end();
+    this.durableSubscribers.clear();
+    this.sessions.clear();
+    this.turns.clear();
   }
 
   private cleanup(): void {

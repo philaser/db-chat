@@ -1,7 +1,7 @@
 # DB Chat Web Design
 
 > **Status:** Current. Describes the screens as built in `src/web`.
-> **Last verified against source:** 2 October 2026
+> **Last verified against source:** 3 October 2026
 > **Product and architecture:** [SDD-WEB-CHAT.md](SDD-WEB-CHAT.md)
 > **Visual system:** [WEB-STYLE-GUIDE.md](WEB-STYLE-GUIDE.md)
 
@@ -79,7 +79,9 @@ link, and a sign-up link. Failures never reveal whether an email exists.
   Destructive account actions live in Profile and security.
 - **Sidebar:** becomes a toggleable drawer on narrow screens. Choosing a
   connection starts a new chat on it. Each chat is bound to one connection
-  for life.
+  for life. Opening saved history uses that chat's source and does not change
+  the default connection for new chats. Navigation detaches the viewer; only
+  Stop cancels an accepted answer.
 - **Data inspector:** holds results, query, and source details for the
   selected answer, plus export controls and recent downloads. Between 761px
   and 1100px it becomes an overlay panel. At 760px and below it flows into
@@ -111,8 +113,11 @@ link, and a sign-up link. Failures never reveal whether an email exists.
   answer or conversation export (HTML/Markdown).
 - Failed, stopped, and interrupted answers keep their verified evidence and
   offer Retry/Edit.
-- Long chats load 50 messages at a time, with "load earlier" and a Jump to
-  latest control. Reloading reconnects to an in-flight answer.
+- Long chats load up to 50 messages at a time, with "load earlier" and a Jump to
+  latest control. Oversized pages automatically retry smaller sizes down to one
+  message, preserving the history cursor. Other failures are shown without retries. Reloading reconnects to an in-flight answer. Closed streams
+  recover from a saved snapshot with bounded reconnection attempts; a startup
+  service failure shows a retry action while preserving the requested chat.
 - If a chat's connection was deleted, its history stays readable and
   identifies the original source, but it cannot be used with another
   connection.
@@ -122,10 +127,13 @@ link, and a sign-up link. Failures never reveal whether an email exists.
 - Previews show up to 100 rows. Tables support search, numeric sort, column
   visibility, and copy. Nulls show an em dash. Numbers are tabular and
   right-aligned. Headers stay sticky inside the bounded, scrollable artifact.
+- Comparison charts initially retain every original metric. The Metric control
+  can select one measure or restore **All original metrics**.
 - Export offers **Visible rows** (the current filter, sort, and columns) or
   **All matching rows** (reruns the original query, labelled as refreshed
   data) in CSV, Excel, or JSON. Progress, cancellation, failure, download,
-  and removal stay in the inspector.
+  and removal stay in the inspector. Hosted completed downloads survive service
+  restarts until their one-hour expiry.
 - Requests for the records beneath an aggregate go back to chat as an
   explicit row-level question.
 
@@ -136,7 +144,9 @@ and below. Each page has an overline, a title, and one sentence of purpose.
 
 **Profile and security:** display name, email and verification status,
 change password, **Log out all sessions** (confirmed), and delete account
-(password-confirmed).
+(password-confirmed). Hosted deletion signs out immediately after accepting a
+durable deletion job; failed cleanup steps retry automatically. Saved data has
+capacity limits and is otherwise kept until explicitly deleted.
 
 **Database connections:** scan-friendly rows showing name, type, safe host,
 status dot and label, and last tested. Below the list, the connection
@@ -150,6 +160,9 @@ file is used"), transport (Use TLS/SSL, Verify the server certificate), and
 Connection safety (a read-only access recommendation). Saving always tests
 the connection. Failures stay in the form with a specific next action.
 Deleting asks for confirmation and explains that history remains readable.
+MongoDB URI input is masked because it can contain credentials. Its helper text
+requires one public host using `mongodb://`; SRV and private destinations are
+not supported.
 
 **Inference:** a status line (Ready/Unavailable) and a summary of Mode
 (Managed by DB Chat or Personal provider), Provider, and Model. Managed users

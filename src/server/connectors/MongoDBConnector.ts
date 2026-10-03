@@ -1,3 +1,5 @@
+import { boundedMongoConnectionType } from './mongoWireLimits.js';
+import { MAX_DATABASE_FRAME_BYTES } from './wireLimits.js';
 import { pinnedLookup } from './pinnedLookup.js';
 import { boundResult, resultLimit } from './resultLimits.js';
 import type {
@@ -43,8 +45,10 @@ export class MongoDBConnector implements DatabaseConnector {
     }
 
     this.close();
-    const client = new MongoClient(uri, { serverSelectionTimeoutMS: 10_000, socketTimeoutMS: 35_000, directConnection: config.mongodbDirectConnection, ...(config.resolvedAddress ? { lookup: pinnedLookup(config.resolvedAddress) } : {}) });
-    await client.connect();
+    const mongoOptions = { serverSelectionTimeoutMS: 10_000, connectTimeoutMS: 10_000, socketTimeoutMS: 35_000, maxPoolSize: 1, compressors: [], connectionType: boundedMongoConnectionType(), directConnection: config.mongodbDirectConnection, ...(config.resolvedAddress ? { lookup: pinnedLookup(config.resolvedAddress) } : {}) };
+    const client = new MongoClient(uri, mongoOptions);
+    try { await client.connect(); }
+    catch (error) { await client.close().catch(() => undefined); throw error; }
     const database = config.database;
     if (!database) {
       (client as { close: () => Promise<void> }).close().catch(() => {});
@@ -57,21 +61,25 @@ export class MongoDBConnector implements DatabaseConnector {
 
   async introspect(): Promise<DatabaseSchema> {
     const db = this.requireDb();
-    const collections = await db.listCollections().toArray();
+    const collections = await readDocuments(db.listCollections());
     const visible = collections
       .filter((c: { name: string }) => !c.name.startsWith('system.') && !c.name.startsWith('_'));
 
     const tables: TableInfo[] = [];
     let sampledDocuments = 0;
+    let schemaBytes = 0;
     for (const coll of visible) {
-      const samples = await db.collection(coll.name).find({}, { projection: {}, maxTimeMS: 30_000 }).limit(SCHEMA_SAMPLE_DOCUMENTS).toArray();
+      const samples = await readDocuments(db.collection(coll.name).find({}, { projection: {}, maxTimeMS: 30_000, batchSize: 1 }).limit(SCHEMA_SAMPLE_DOCUMENTS));
       sampledDocuments += samples.length;
       const columns = samplesToColumns(samples);
-      tables.push({
+      const table: TableInfo = {
         name: coll.name,
         inference: { partial: true, sampledDocuments: samples.length, maxDocuments: SCHEMA_SAMPLE_DOCUMENTS, note: 'Sampled field names and types; absence is not proof a field does not exist.' },
         columns
-      });
+      };
+      schemaBytes += Buffer.byteLength(JSON.stringify(table));
+      if (schemaBytes > MAX_DATABASE_FRAME_BYTES) throw new Error('MongoDB schema exceeded the size limit. Reduce the collections or fields visible to this account.');
+      tables.push(table);
     }
 
     return {
@@ -125,24 +133,31 @@ export class MongoDBConnector implements DatabaseConnector {
       const pipeline = (read.body.pipeline ?? []) as unknown[];
       const blockedStage = findBlockedAggregationStage(pipeline);
       if (blockedStage) throw new Error(`MongoDB aggregation stage "${blockedStage}" is blocked.`);
-      cursor = collection.aggregate(pipeline, { maxTimeMS: 30_000, signal, batchSize }) as MongoCursor;
+      cursor = collection.aggregate(pipeline, { maxTimeMS: 30_000, signal, batchSize: 1 }) as MongoCursor;
     } else {
       cursor = collection.find((read.body.filter ?? {}) as Record<string, unknown>, {
-        ...(read.body.options as Record<string, unknown> | undefined), maxTimeMS: 30_000, signal, batchSize
+        ...(read.body.options as Record<string, unknown> | undefined), maxTimeMS: 30_000, signal, batchSize: 1
       }) as unknown as MongoCursor;
       if (typeof read.body.limit === 'number' && read.body.limit > 0) cursor.limit(Math.floor(read.body.limit));
     }
     let rows: Record<string, unknown>[] = [];
+    let batchBytes = 0;
     let columns: string[] = [];
     try {
       for await (const doc of cursor) {
         signal?.throwIfAborted();
         const row = normalizeDocument(doc);
         columns = Array.from(new Set([...columns, ...Object.keys(row)]));
+        const rowBytes = documentBytes(row);
+        if (rows.length && batchBytes + rowBytes > MAX_DATABASE_FRAME_BYTES) {
+          yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
+          rows = []; batchBytes = 0;
+        }
         rows.push(row);
+        batchBytes += rowBytes;
         if (rows.length === batchSize) {
           yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
-          rows = [];
+          rows = []; batchBytes = 0;
         }
       }
       if (rows.length) yield { columns, rows, rowCount: rows.length, elapsedMs: Math.round(performance.now() - started) };
@@ -176,7 +191,7 @@ export class MongoDBConnector implements DatabaseConnector {
       }
       // Always append a terminal cap: an earlier limit can be expanded by unwind.
       const cappedPipeline = [...pipeline, { $limit: this.maxRows + 1 }];
-      const rows = await collection.aggregate(cappedPipeline, { maxTimeMS: 30_000, signal }).toArray();
+      const rows = await readDocuments(collection.aggregate(cappedPipeline, { maxTimeMS: 30_000, signal, batchSize: 1 }));
       const elapsedMs = Math.round(performance.now() - start);
       const resultRows = rows.map((doc: Record<string, unknown>) => normalizeDocument(doc));
       const columns = collectColumns(resultRows);
@@ -191,9 +206,9 @@ export class MongoDBConnector implements DatabaseConnector {
       : DEFAULT_LIMIT;
     const limit = resultLimit(userLimit, this.maxRows);
 
-    const cursor = collection.find(filter, { ...options, maxTimeMS: 30_000, signal });
+    const cursor = collection.find(filter, { ...options, maxTimeMS: 30_000, signal, batchSize: 1 });
     cursor.limit(parsed.body.limit === undefined || userLimit > this.maxRows ? limit + 1 : limit);
-    const docs = await cursor.toArray();
+    const docs = await readDocuments(cursor);
     const elapsedMs = Math.round(performance.now() - start);
     const resultRows = docs.map((doc: Record<string, unknown>) => normalizeDocument(doc));
     const columns = collectColumns(resultRows);
@@ -269,11 +284,11 @@ export class MongoDBConnector implements DatabaseConnector {
       throw new Error('No database is connected.');
     }
     return this.db as {
-      listCollections: () => { toArray: () => Promise<Array<{ name: string }>> };
+      listCollections: () => MongoCursor<{ name: string }>;
       collection: (name: string) => {
         findOne: (filter: Record<string, unknown>, options: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
-        find: (filter: Record<string, unknown>, options?: Record<string, unknown>) => { limit: (n: number) => { toArray: () => Promise<Record<string, unknown>[]> } & Record<string, unknown> } & { toArray: () => Promise<Record<string, unknown>[]> };
-        aggregate: (pipeline: unknown[], options?: { maxTimeMS: number; signal?: AbortSignal; batchSize?: number }) => { toArray: () => Promise<Record<string, unknown>[]> } | MongoCursor;
+        find: (filter: Record<string, unknown>, options?: Record<string, unknown>) => MongoCursor;
+        aggregate: (pipeline: unknown[], options?: { maxTimeMS: number; signal?: AbortSignal; batchSize?: number }) => MongoCursor;
         countDocuments: (filter?: Record<string, unknown>, options?: { maxTimeMS: number; signal?: AbortSignal }) => Promise<number>;
         insertOne: (doc: Record<string, unknown>) => Promise<{ insertedId: unknown; acknowledged: boolean }>;
         updateOne: (filter: Record<string, unknown>, update: Record<string, unknown>) => Promise<{ matchedCount: number; modifiedCount: number; acknowledged: boolean }>;
@@ -283,10 +298,28 @@ export class MongoDBConnector implements DatabaseConnector {
   }
 }
 
-interface MongoCursor extends AsyncIterable<Record<string, unknown>> {
-  limit: (value: number) => MongoCursor;
-  toArray: () => Promise<Record<string, unknown>[]>;
+interface MongoCursor<T extends Record<string, unknown> = Record<string, unknown>> extends AsyncIterable<T> {
+  limit: (value: number) => MongoCursor<T>;
   close?: () => Promise<void>;
+}
+
+function documentBytes(document: Record<string, unknown>): number {
+  const bytes = Buffer.byteLength(JSON.stringify(document));
+  if (bytes > MAX_DATABASE_FRAME_BYTES) throw new Error('MongoDB document exceeded the size limit. Project fewer or smaller fields.');
+  return bytes;
+}
+
+async function readDocuments<T extends Record<string, unknown>>(cursor: MongoCursor<T>): Promise<T[]> {
+  const documents: T[] = [];
+  let bytes = 0;
+  try {
+    for await (const document of cursor) {
+      bytes += documentBytes(document);
+      if (bytes > MAX_DATABASE_FRAME_BYTES) throw new Error('MongoDB response exceeded the size limit. Select fewer or smaller fields.');
+      documents.push(document);
+    }
+    return documents;
+  } finally { await cursor.close?.().catch(() => undefined); }
 }
 
 function exportBatchSize(value = 500): number {

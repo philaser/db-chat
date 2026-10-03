@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,7 +5,7 @@ import type { ConnectionConfig } from '../shared/types.js';
 
 export const SQLITE_BUCKET = 'dbchat-sqlite';
 export interface SqliteObjectStorage {
-  upload(owner: string, contents: Buffer): Promise<string>;
+  upload(owner: string, contents: Buffer, registeredKey?: string): Promise<string>;
   withConnection<T>(owner: string, config: ConnectionConfig, run: (local: ConnectionConfig) => Promise<T>, signal?: AbortSignal): Promise<T>;
   remove(owner: string, key: string): Promise<void>;
   removeOwner(owner: string): Promise<void>;
@@ -28,21 +27,22 @@ export class SupabaseSqliteStorage implements SqliteObjectStorage {
     return key.split('/').map(encodeURIComponent).join('/');
   }
 
-  private async request(route: string, init: RequestInit = {}): Promise<Response> {
+  private async request(route: string, init: RequestInit = {}, missingIsSuccess = false): Promise<Response> {
     const key = this.options.key;
     const response = await (this.options.fetch ?? fetch)(this.options.url.replace(/\/$/, '') + '/storage/v1/' + route, {
       ...init, redirect: 'error', signal: init.signal
         ? AbortSignal.any([init.signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000),
       headers: { apikey: key, ...(key.startsWith('sb_') ? {} : { Authorization: 'Bearer ' + key }), ...init.headers }
     });
-    if (!response.ok) throw new Error('SQLite file storage is unavailable. Please try again.');
+    if (!response.ok && !(missingIsSuccess && response.status === 404)) throw new Error('SQLite file storage is unavailable. Please try again.');
     return response;
   }
 
-  async upload(owner: string, contents: Buffer): Promise<string> {
+  async upload(owner: string, contents: Buffer, registeredKey?: string): Promise<string> {
     if (contents.length > this.options.maxBytes) throw new Error('SQLite file is too large.');
     if (contents.subarray(0, 16).toString('binary') !== 'SQLite format 3\0') throw new Error('Choose a valid SQLite database file.');
-    const key = this.ownerPrefix(owner) + randomUUID() + '.sqlite';
+    if (!registeredKey) throw new Error('Register the SQLite upload before writing its object.');
+    const key = registeredKey;
     await this.request('object/' + SQLITE_BUCKET + '/' + this.objectPath(owner, key), {
       method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'x-upsert': 'false' }, body: new Uint8Array(contents)
     });
@@ -84,7 +84,7 @@ export class SupabaseSqliteStorage implements SqliteObjectStorage {
     this.objectPath(owner, key);
     await this.request('object/' + SQLITE_BUCKET, {
       method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prefixes: [key] })
-    });
+    }, true);
   }
 
   async removeOwner(owner: string): Promise<void> {
