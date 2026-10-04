@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,6 +21,7 @@ export class ExportError extends Error {}
 /** Ephemeral, owner-scoped downloads. Partial files are never downloadable. */
 export class ExportJobs {
   private jobs = new Map<string, Job>();
+  private executing = new Set<Job>();
   private directory?: Promise<string>;
   private sweep = setInterval(() => { void this.prune(); }, 60_000).unref();
   private closed = false;
@@ -39,12 +41,15 @@ export class ExportJobs {
   }
   private pump() {
     if (this.closed) return;
-    const active = [...this.jobs.values()].filter(job => job.snapshot.status === 'running');
     for (const job of this.jobs.values()) {
-      if (active.length >= 2) break;
-      if (job.snapshot.status !== 'queued' || active.some(other => other.owner === job.owner)) continue;
-      job.snapshot.status = 'running'; active.push(job);
-      job.done = this.execute(job, job.run!).finally(() => { delete job.run; this.pump(); });
+      if (this.executing.size >= 2) break;
+      if (job.snapshot.status !== 'queued' || [...this.executing].some(other => other.owner === job.owner)) continue;
+      // Cancellation changes the public status immediately, but the database
+      // operation still occupies its slot until its cleanup has completed.
+      job.snapshot.status = 'running'; this.executing.add(job);
+      job.done = this.execute(job, job.run!).finally(() => {
+        this.executing.delete(job); delete job.run; this.pump();
+      });
     }
   }
   private async execute(job: Job, run: (context: ExportRun) => Promise<void>) {
@@ -84,6 +89,7 @@ export class ExportJobs {
   }
   chatId(owner: string, id: string): string | undefined { return this.get(owner, id) ? this.jobs.get(id)!.chatId : undefined; }
   file(owner: string, id: string): string | undefined { return this.get(owner, id)?.status === 'ready' ? this.jobs.get(id)!.filename : undefined; }
+  read(owner: string, id: string) { const filename = this.file(owner, id); return filename ? createReadStream(filename) : undefined; }
   async cancel(owner: string, id: string): Promise<ExportSnapshot | undefined> {
     if (!this.get(owner, id)) return undefined;
     const job = this.jobs.get(id)!;
@@ -95,6 +101,19 @@ export class ExportJobs {
     return this.snapshot(job);
   }
   async remove(owner: string, id: string): Promise<void> { await this.cancel(owner, id); const job = this.jobs.get(id); if (job?.owner === owner) this.jobs.delete(id); }
+  async cancelOwner(owner: string): Promise<void> {
+    const owned = [...this.jobs.values()].filter(job => job.owner === owner);
+    for (const job of owned) {
+      job.snapshot.status = 'cancelled';
+      delete job.snapshot.error;
+      job.controller.abort();
+    }
+    await Promise.all(owned.map(job => job.done));
+    for (const job of owned) {
+      if (job.filename) await fs.rm(job.filename, { force: true });
+      this.jobs.delete(job.snapshot.id);
+    }
+  }
   private async prune() {
     for (const [id, job] of this.jobs) {
       if (Date.parse(job.snapshot.expiresAt) > Date.now()) continue;

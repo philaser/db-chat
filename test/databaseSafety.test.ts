@@ -126,6 +126,19 @@ describe('database safety policy', () => {
     expect(Buffer.byteLength(JSON.stringify(result), 'utf8')).toBeLessThanOrEqual(130);
   });
 
+  it('refuses a result whose column metadata alone exceeds the byte limit', async () => {
+    const inner: DatabaseConnector = {
+      connect: async () => {}, introspect: async () => ({ kind: 'sqlite', label: 'test', tables: [] }),
+      executeQuery: async () => ({ columns: ['x'.repeat(1000)], rows: [], rowCount: 0, elapsedMs: 0 }),
+      getContextForPrompt: async () => '', setSafetyLevel() {}, close() {}
+    };
+    await expect(new WebPolicyConnector(inner, 100, 200).executeQuery('select 1')).rejects.toThrow(/column metadata exceeded/);
+  });
+
+  it('rejects oversized SQL before the conservative lexer processes it', () => {
+    expect(classifyQuery('SELECT 1 ' + ' '.repeat(64 * 1024))).toBe('unknown');
+  });
+
   it.each([
     { collection: 'items', method: 'deleteOne', filter: { id: 1 } },
     { collection: 'items', method: 'insertOne', document: { id: 1 } },
@@ -151,11 +164,11 @@ describe('database safety policy', () => {
   });
 
   it('adds a terminal Mongo limit after expanding stages and reports truncation', async () => {
-    const aggregate = vi.fn(() => ({ toArray: async () => [{ a: 1 }, { a: 2 }, { a: 3 }] }));
+    const aggregate = vi.fn(() => ({ async *[Symbol.asyncIterator]() { yield* [{ a: 1 }, { a: 2 }, { a: 3 }]; } }));
     const connector = new MongoDBConnector(); connector.setResultLimit(2);
     Reflect.set(connector, 'db', { collection: () => ({ aggregate }) });
     const result = await connector.executeQuery(JSON.stringify({ collection: 'items', method: 'aggregate', body: { pipeline: [{ $limit: 99999 }, { $unwind: '$items' }] } }));
-    expect(aggregate.mock.calls[0]).toEqual([[{ $limit: 99999 }, { $unwind: '$items' }, { $limit: 3 }], { maxTimeMS: 30000 }]);
+    expect(aggregate.mock.calls[0]).toEqual([[{ $limit: 99999 }, { $unwind: '$items' }, { $limit: 3 }], { maxTimeMS: 30000, batchSize: 1 }]);
     expect(result).toMatchObject({ rowCount: 2, truncated: true, rowLimit: 2 });
   });
 

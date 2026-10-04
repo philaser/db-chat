@@ -2,6 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ElasticsearchConnector } from '../src/server/connectors/ElasticsearchConnector';
 
 describe('ElasticsearchConnector', () => {
+  it.each([
+    [{ timed_out: true }, /timed out/],
+    [{ terminated_early: true }, /terminated early/],
+    [{ _shards: { failed: 2 } }, /failed on 2 shard/]
+  ])('rejects partial search aggregates instead of presenting them as evidence', async (partial, expected) => {
+    const connector = new ElasticsearchConnector();
+    Object.assign(connector, { request: async () => ({ ...partial, aggregations: { total: { value: 42 } } }) });
+    await expect(connector.executeQuery(JSON.stringify({ index: 'sales', body: { size: 0, aggs: { total: { sum: { field: 'amount' } } } } }))).rejects.toThrow(expected);
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });

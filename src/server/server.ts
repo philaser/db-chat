@@ -1,4 +1,8 @@
+import { OperationLimiter, OperationCapacityError } from './operationLimiter.js';
+import { WorkerCoordinator, WorkerLeaseError, TurnCapacityError, type WorkerCoordinatorOptions } from './workerCoordinator.js';
 import { DEFAULT_PERSONAL_PROVIDER_MODELS, PERSONAL_PROVIDER_MODELS, validatePersonalProviderKey } from './model/providers.js';
+import { ManagedTurnQuotaError, UploadQuotaError } from './turnQuota.js';
+import { isIP } from 'node:net';
 import { conversationContext, invalidateKnowledge, parseKnowledge, schemaFingerprint, schemaSuggestions } from './conversationContext.js';
 import { SupabaseSqliteStorage, type SqliteObjectStorage } from './supabaseSqliteStorage.js';
 import { prepareConnectionDestination } from './connectionPolicy.js';
@@ -6,18 +10,21 @@ import { createConfiguredConnector } from './connectorFactory.js';
 import { classifyQuery } from './connectors/QueryValidator.js';
 import { parseElasticsearchQuery } from './connectors/elasticsearchValidation.js';
 import { ExportJobs, ExportError, DEFAULT_EXPORT_LIMITS, EXPORT_MIME, type DataFormat, type ExportSnapshot } from './exports/exportJobs.js';
+import { SupabaseAssetLifecycle, RetainedSqliteQuotaError, deleteSupabaseAuthUser } from './assetLifecycle.js';
+import { SupabaseExportJobs } from './exports/supabaseExportJobs.js';
+import type { ExportRepository } from './exports/exportRepository.js';
 import { writeDataExport } from './exports/dataExport.js';
 import { buildReportDownload, type ReportRequest } from './exports/reportExport.js';
 import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import http, { type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultEffortForModel, loadWebServerConfig, type WebServerConfig } from './config.js';
 import { AccountStore } from './accountStore.js';
-import type { AccountRepository } from './accountRepository.js';
+import { RetainedDataQuotaError, SessionCapacityError, SavedDataReadLimitError, type AccountRepository } from './accountRepository.js';
 import { SupabaseAccountStore } from './supabaseAccountStore.js';
 import { WebSessionStore, type WebTurnRecord } from './sessionStore.js';
 import { WebAgentService } from './webAgentService.js';
@@ -35,6 +42,8 @@ import type { Principal, WebAccountSettings, WebConnectionSummary, WebUser } fro
 
 const AUTH_COOKIE_NAME = 'dbchat_auth_session';
 const LEGACY_COOKIE_NAME = 'dbchat_web_session';
+const MAX_EVENT_STREAMS = 16;
+const MAX_EVENT_STREAMS_PER_ACCOUNT = 2;
 
 function jsonHeaders(): Record<string, string | string[]> {
   return {
@@ -64,13 +73,17 @@ function safeClientError(error: unknown, fallback = 'The request could not be co
   return message;
 }
 
+class RequestBodyLimitError extends Error {
+  constructor() { super('Request body is too large.'); }
+}
+
 async function readJson(request: IncomingMessage, maxBytes: number): Promise<unknown> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += buffer.length;
-    if (total > maxBytes) throw new Error('Request body is too large.');
+    if (total > maxBytes) throw new RequestBodyLimitError();
     chunks.push(buffer);
   }
   if (total === 0) return {};
@@ -80,14 +93,14 @@ async function readJson(request: IncomingMessage, maxBytes: number): Promise<unk
 async function readBuffer(request: IncomingMessage, maxBytes: number): Promise<Buffer> {
   const contentLength = Number(request.headers['content-length']);
   if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    throw new Error('Request body is too large.');
+    throw new RequestBodyLimitError();
   }
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += buffer.length;
-    if (total > maxBytes) throw new Error('Request body is too large.');
+    if (total > maxBytes) throw new RequestBodyLimitError();
     chunks.push(buffer);
   }
   return Buffer.concat(chunks);
@@ -191,6 +204,7 @@ function publicConfiguredConnection(config: ConnectionConfig, ready: boolean): W
 }
 
 export interface WebServerOptions {
+  worker?: WorkerCoordinatorOptions;
   validateProviderKey?: typeof validatePersonalProviderKey;
   modelClient?: import('./agent/types.js').AgentModelClient;
   accounts?: AccountRepository;
@@ -205,6 +219,8 @@ interface UploadedSqliteFile {
   filePath?: string;
   objectKey?: string;
   bytes: number;
+  createdAt: number;
+  claimed?: boolean;
 }
 
 interface LoginAttemptWindow {
@@ -218,18 +234,39 @@ export class WebServer {
   readonly service: WebAgentService;
   private readonly validateProviderKey: typeof validatePersonalProviderKey;
   private readonly sqliteStorage?: SqliteObjectStorage;
-  private readonly submittedTurns = new Map<string, string>();
+  private readonly worker: WorkerCoordinator;
+  private readonly assets?: SupabaseAssetLifecycle;
+  private readonly databaseOperations: OperationLimiter;
+  private readonly maxConcurrentRequests: number;
+  private activeApiRequests = 0;
+  private activeEventStreams = 0;
+  private readonly ownerEventStreams = new Map<string, number>();
+  private readonly eventStreamResponses = new WeakSet<ServerResponse>();
+  private readonly runningTurns = new Map<string, { turn: WebTurnRecord; done: Promise<void> }>();
+  private readonly requests = new Set<Promise<void>>();
+  private readonly requestCompletion = new WeakMap<IncomingMessage, Promise<void>>();
+  private readonly ownerRequests = new Map<string, Set<Promise<void>>>();
+  private readonly deletingAccounts = new Set<string>();
+  private closing?: Promise<void>;
+  private draining = false;
   private readonly sqliteUploads = new Map<string, UploadedSqliteFile>();
+  private readonly activeUploads = new Set<string>();
+  private maintenanceTimer?: ReturnType<typeof setInterval>;
+  private maintenance?: Promise<void>;
+  private lastUsagePrune = 0;
   private readonly requestBudgets = new Map<string, { count: number; resetAt: number }>();
   private readonly loginAttempts = new Map<string, LoginAttemptWindow>();
   private server: Server | null = null;
-  readonly exports: ExportJobs;
+  readonly exports: ExportRepository;
   private readonly exportConnectorFactory: typeof createConfiguredConnector;
 
   constructor(
     readonly config: WebServerConfig,
     options: WebServerOptions = {}
   ) {
+    this.maxConcurrentRequests = config.maxConcurrentRequests ?? 8;
+    if (!Number.isInteger(this.maxConcurrentRequests) || this.maxConcurrentRequests < 1 || this.maxConcurrentRequests > 128) throw new Error('Invalid concurrent request limit. Choose an integer from 1 to 128.');
+    this.databaseOperations = new OperationLimiter(config.maxDatabaseOperations ?? 2);
     this.accounts = options.accounts ?? (config.storageMode === 'supabase'
       ? new SupabaseAccountStore({ ...config.supabase!, secretKey: config.secretKey!, defaultModel: config.model,
         sessionTtlMs: config.sessionTtlMs, sessionAbsoluteTtlMs: config.sessionAbsoluteTtlMs })
@@ -244,17 +281,29 @@ export class WebServer {
     this.validateProviderKey = options.validateProviderKey ?? validatePersonalProviderKey;
     this.sqliteStorage = options.sqliteStorage ?? (config.storageMode === 'supabase'
       ? new SupabaseSqliteStorage({ url: config.supabase!.url, key: config.supabase!.serviceRoleKey, maxBytes: config.maxSqliteUploadBytes ?? 50 * 1024 * 1024 }) : undefined);
+    this.assets = config.storageMode === 'supabase' ? new SupabaseAssetLifecycle(config.supabase!) : undefined;
     this.sessions = new WebSessionStore(config.sessionTtlMs);
+    this.worker = new WorkerCoordinator(this.accounts, ids => {
+      for (const id of ids) this.runningTurns.get(id)?.turn.abortController.abort();
+    }, () => {
+      for (const { turn } of this.runningTurns.values()) turn.abortController.abort();
+    }, options.worker);
     this.service = new WebAgentService(config, options);
     this.exportConnectorFactory = options.exportConnectorFactory ?? createConfiguredConnector;
-    this.exports = new ExportJobs({ ...DEFAULT_EXPORT_LIMITS,
+    const exportLimits = { ...DEFAULT_EXPORT_LIMITS,
       maxRows: config.exportMaxRows ?? DEFAULT_EXPORT_LIMITS.maxRows,
       maxBytes: config.exportMaxBytes ?? DEFAULT_EXPORT_LIMITS.maxBytes,
-      timeoutMs: config.exportTimeoutMs ?? DEFAULT_EXPORT_LIMITS.timeoutMs });
+      timeoutMs: config.exportTimeoutMs ?? DEFAULT_EXPORT_LIMITS.timeoutMs };
+    this.exports = config.storageMode === 'supabase' ? new SupabaseExportJobs(exportLimits, config.supabase!) : new ExportJobs(exportLimits);
   }
 
   async initialize(): Promise<void> {
-    await this.accounts.interruptPendingTurns?.();
+    await this.accounts.assertStorageReady?.();
+    await this.assets?.assertReady();
+    await this.exports.initialize?.();
+    await this.accounts.pruneUsage();
+    this.lastUsagePrune = Date.now();
+    await this.worker.start();
     await this.service.initialize();
     if (!this.sqliteStorage && this.config.sqliteUploadDir) {
       await fs.mkdir(this.config.sqliteUploadDir, { recursive: true });
@@ -262,13 +311,23 @@ export class WebServer {
     if (this.config.authMode === 'dev') {
       await this.accounts.ensureDevelopmentUser();
     }
+    this.maintenanceTimer = setInterval(() => {
+      if (this.maintenance) return;
+      this.maintenance = this.maintainUploadsAndUsage().catch(() => {
+        console.error('[dbchat:web] upload cleanup or usage pruning failed');
+      }).finally(() => { this.maintenance = undefined; });
+    }, 10_000);
+    this.maintenanceTimer.unref?.();
   }
 
   async listen(): Promise<Server> {
     if (this.server) return this.server;
     await this.initialize();
     this.server = http.createServer((request, response) => {
-      void this.handle(request, response);
+      const done = this.handle(request, response);
+      this.requestCompletion.set(request, done);
+      this.requests.add(done);
+      void done.finally(() => this.requests.delete(done));
     });
     await new Promise<void>((resolve, reject) => {
       this.server!.once('error', reject);
@@ -283,25 +342,76 @@ export class WebServer {
   }
 
   async close(): Promise<void> {
-    await this.exports.close();
-    this.service.close();
-    // Uploaded SQLite files are durable workspace assets. They are removed only
-    // when the owning connection is deleted, not when the server restarts.
-    this.sqliteUploads.clear();
-    if (!this.server) return;
-    await new Promise<void>((resolve) => this.server!.close(() => resolve()));
-    this.server = null;
+    if (this.closing) return this.closing;
+    this.draining = true;
+    if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
+    this.closing = this.drain();
+    return this.closing;
+  }
+
+  private async drain(): Promise<void> {
+    const server = this.server;
+    const stopped = server ? new Promise<void>(resolve => server.close(() => resolve())) : Promise.resolve();
+    for (const { turn } of this.runningTurns.values()) if (!turn.committing) turn.abortController.abort();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const work = (async () => {
+      await Promise.allSettled([...this.requests]);
+      // Requests admitted before shutdown may have claimed a turn while draining.
+      await Promise.allSettled([...this.runningTurns.values()].map(task => task.done));
+      await this.exports.close();
+      await this.maintenance;
+      await this.maintainUploadsAndUsage(true);
+    })();
+    let timedOut = false;
+    try {
+      await Promise.race([work, new Promise<void>(resolve => { deadline = setTimeout(() => { timedOut = true; resolve(); }, this.config.shutdownGraceMs ?? 25_000); })]);
+    } finally {
+      if (deadline) clearTimeout(deadline);
+      await this.sessions.flushDurable();
+      await this.worker.stop().catch(() => undefined);
+      this.sessions.close();
+      this.service.close();
+      this.sqliteUploads.clear();
+      server?.closeAllConnections();
+      await stopped;
+      this.server = null;
+    }
+    if (timedOut) throw new Error('Shutdown timed out before active work finished.');
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    let settleRequest: (() => void) | undefined;
     try {
       const url = new URL(request.url ?? '/', 'http://' + (request.headers.host ?? 'localhost'));
       if (url.pathname === '/api/health' || url.pathname === '/api/v1/health') {
-        sendJson(response, 200, { ok: true, ready: true });
+        const ready = !this.draining && this.worker.ready;
+        sendJson(response, ready ? 200 : 503, { ok: ready, ready });
         return;
       }
 
+      if (this.draining) { sendJson(response, 503, { error: 'The server is restarting. Please try again shortly.' }); return; }
+
       if (url.pathname.startsWith('/api/')) {
+        if (this.activeApiRequests >= this.maxConcurrentRequests) {
+          response.setHeader('Retry-After', '1');
+          sendJson(response, 503, { error: 'The server is busy. Please try again shortly.' });
+          return;
+        }
+        this.activeApiRequests++;
+        let handlerSettled = false;
+        let responseEnded = response.destroyed || response.writableFinished;
+        let released = false;
+        const release = () => {
+          if (released || !handlerSettled || (!responseEnded && !this.eventStreamResponses.has(response))) return;
+          released = true;
+          this.activeApiRequests--;
+          response.off('finish', ended); response.off('close', ended); response.off('error', ended);
+        };
+        const ended = () => { responseEnded = true; release(); };
+        response.once('finish', ended); response.once('close', ended); response.once('error', ended);
+        // Keep the slot while a normal response is buffered for a slow reader.
+        // Established SSE responses use their separate lifetime allowance.
+        settleRequest = () => { handlerSettled = true; release(); };
         await this.handleApi(request, response, url);
         return;
       }
@@ -309,9 +419,28 @@ export class WebServer {
       await this.serveStatic(response, url.pathname);
     } catch (error) {
       if (response.headersSent || response.destroyed) return;
-      const status = error instanceof SyntaxError ? 400 : 500;
+      const status = error instanceof SavedDataReadLimitError || error instanceof RequestBodyLimitError ? 413 : error instanceof RetainedDataQuotaError || error instanceof OperationCapacityError ? 429 : error instanceof WorkerLeaseError ? 503 : error instanceof SyntaxError ? 400 : 500;
       sendJson(response, status, { error: safeClientError(error) });
-    }
+    } finally { settleRequest?.(); }
+  }
+
+  private reserveEventStream(owner: string, response: ServerResponse): (() => void) | undefined {
+    const owned = this.ownerEventStreams.get(owner) ?? 0;
+    if (this.activeEventStreams >= MAX_EVENT_STREAMS || owned >= MAX_EVENT_STREAMS_PER_ACCOUNT) return undefined;
+    this.activeEventStreams++;
+    this.ownerEventStreams.set(owner, owned + 1);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.activeEventStreams--;
+      const remaining = (this.ownerEventStreams.get(owner) ?? 1) - 1;
+      if (remaining) this.ownerEventStreams.set(owner, remaining);
+      else this.ownerEventStreams.delete(owner);
+      response.off('finish', release); response.off('close', release); response.off('error', release);
+    };
+    response.once('finish', release); response.once('close', release); response.once('error', release);
+    return release;
   }
 
   private async handleApi(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
@@ -320,18 +449,18 @@ export class WebServer {
       return;
     }
 
-    if (request.method !== 'GET' && !this.takeBudget('request:' + request.socket.remoteAddress, 120, 60_000)) {
+    const route = this.apiRoute(url.pathname);
+    if (route.startsWith('/auth/') && request.method !== 'GET' && !this.takeBudget('auth-request:' + this.clientAddress(request), 120, 60_000)) {
       sendJson(response, 429, { error: 'Too many requests. Try again shortly.' });
       return;
     }
 
     const legacy = !url.pathname.startsWith('/api/v1/');
-    const route = this.apiRoute(url.pathname);
     const cookies = parseCookies(request.headers.cookie);
     const secure = this.config.allowedOrigin?.startsWith('https://') === true || secureRequest(request);
 
     if (route === '/auth/signup' && request.method === 'POST') {
-      if (!this.takeBudget('signup:' + request.socket.remoteAddress, 5, 60_000)) {
+      if (!this.takeBudget('signup:' + this.clientAddress(request), 5, 60_000)) {
         sendJson(response, 429, { error: 'Too many account requests. Try again later.' });
         return;
       }
@@ -369,7 +498,8 @@ export class WebServer {
         const result = await this.accounts.login(email, password);
         this.loginAttempts.delete(attemptKey);
         sendJson(response, 200, { user: result.user, session: { authenticated: true } }, authCookie(result.sessionId, secure, this.config.sessionAbsoluteTtlMs));
-      } catch {
+      } catch (error) {
+        if (error instanceof SessionCapacityError) { sendJson(response, 429, { error: error.message }); return; }
         this.recordLoginFailure(attemptKey);
         sendJson(response, 401, { error: 'The email or password is incorrect.' });
       }
@@ -380,7 +510,7 @@ export class WebServer {
       if (!this.accounts.requestPasswordReset || !this.config.allowedOrigin) {
         sendJson(response, 503, { error: 'Password recovery is not configured.' }); return;
       }
-      if (!this.takeBudget('recovery:' + request.socket.remoteAddress, 5, 60_000)) {
+      if (!this.takeBudget('recovery:' + this.clientAddress(request), 5, 60_000)) {
         sendJson(response, 429, { error: 'Too many recovery requests. Try again later.' }); return;
       }
       try {
@@ -393,14 +523,14 @@ export class WebServer {
 
     if (route === '/auth/verify' && request.method === 'POST') {
       if (!this.accounts.verifyEmail) { sendJson(response, 503, { error: 'Email verification is not configured.' }); return; }
-      if (!this.takeBudget('verify:' + request.socket.remoteAddress, 10, 60_000)) { sendJson(response, 429, { error: 'Too many verification attempts. Try again later.' }); return; }
+      if (!this.takeBudget('verify:' + this.clientAddress(request), 10, 60_000)) { sendJson(response, 429, { error: 'Too many verification attempts. Try again later.' }); return; }
       try {
         const body = this.requireRecord(await readJson(request, this.config.maxBodyBytes));
         const type = stringField(body, 'type', true);
         if (type !== 'signup' && type !== 'recovery' && type !== 'email') throw new Error('Invalid verification type.');
         const result = await this.accounts.verifyEmail(stringField(body, 'tokenHash') ?? stringField(body, 'token_hash', true)!, type);
         sendJson(response, 200, { user: result.user, recovery: type === 'recovery', session: { authenticated: type !== 'recovery' } }, authCookie(result.sessionId, secure, this.config.sessionAbsoluteTtlMs));
-      } catch { sendJson(response, 400, { error: 'This email link is invalid or expired. Request another email.' }); }
+      } catch (error) { sendJson(response, error instanceof SessionCapacityError ? 429 : 400, { error: error instanceof SessionCapacityError ? error.message : 'This email link is invalid or expired. Request another email.' }); }
       return;
     }
 
@@ -418,14 +548,23 @@ export class WebServer {
 
     if (route === '/account' && request.method === 'DELETE') {
       if (!this.accounts.deleteAccount) { sendJson(response, 503, { error: 'Account deletion is not configured.' }); return; }
-      if (!this.takeBudget('delete-account:' + request.socket.remoteAddress, 5, 60_000)) { sendJson(response, 429, { error: 'Too many account attempts. Try again later.' }); return; }
       const principal = await this.authenticate(request, cookies);
       if (!principal?.email) { sendJson(response, 401, { error: 'Authentication required.' }); return; }
+      if (!this.takeBudget('delete-account:' + principal.id, 5, 60_000)) { sendJson(response, 429, { error: 'Too many account attempts. Try again later.' }); return; }
+      if (this.deletingAccounts.has(principal.id)) { sendJson(response, 409, { error: 'Account deletion is already in progress.' }); return; }
+      this.deletingAccounts.add(principal.id);
       try {
         const body = this.requireRecord(await readJson(request, this.config.maxBodyBytes));
-        const confirmation = await this.accounts.login(principal.email, stringField(body, 'password', true)!);
-        if (confirmation.user.id !== principal.id) throw new Error('Account verification failed.');
-        await this.accounts.revokeSession(confirmation.sessionId);
+        await this.accounts.verifyAccountPassword(principal.id, stringField(body, 'password', true)!);
+        if (this.assets) {
+          // The durable gate must commit before any destructive side effect.
+          await this.assets.beginAccountDeletion(principal.id);
+          await Promise.resolve(this.accounts.cancelOwnerTurns(principal.id)).catch(() => undefined);
+          this.startMaintenance();
+          sendJson(response, 202, { ok: true, pending: true, message: 'Account deletion has started and will continue automatically.' }, clearAuthCookie(secure));
+          return;
+        }
+        await this.drainAccount(principal.id);
         const connections = await this.accounts.listConnections(principal.id);
         const files = await Promise.all(connections.map(c => this.accounts.getConnectionConfig(principal.id, c.id)));
         await this.sqliteStorage?.removeOwner(principal.id);
@@ -433,7 +572,8 @@ export class WebServer {
         for (const file of files) if (file?.kind === 'sqlite' && file.databasePath) await this.removeManagedSqliteFile(file.databasePath);
         for (const [id, upload] of this.sqliteUploads) if (upload.principalId === principal.id) { if (upload.filePath) await this.removeManagedSqliteFile(upload.filePath); this.sqliteUploads.delete(id); }
         sendJson(response, 200, { ok: true }, clearAuthCookie(secure));
-      } catch { sendJson(response, 400, { error: 'Account could not be deleted. Check your password and try again.' }); }
+      } catch { sendJson(response, 400, { error: 'Account could not be deleted. Check your password and wait for active work to finish, then try again.' }); }
+      finally { this.deletingAccounts.delete(principal.id); }
       return;
     }
 
@@ -466,26 +606,40 @@ export class WebServer {
       sendJson(response, 401, { error: 'Authentication required.' });
       return;
     }
+    if (this.deletingAccounts.has(principal.id)) {
+      sendJson(response, 409, { error: 'Account deletion is in progress. Please wait.' }); return;
+    }
+    if (await this.accounts.isAccountDeleting(principal.id)) { sendJson(response, 409, { error: 'Account deletion is in progress.' }); return; }
+    const completion = this.requestCompletion.get(request);
+    if (completion) {
+      const pending = this.ownerRequests.get(principal.id) ?? new Set<Promise<void>>();
+      pending.add(completion);
+      this.ownerRequests.set(principal.id, pending);
+      void completion.finally(() => { pending.delete(completion); if (!pending.size) this.ownerRequests.delete(principal.id); });
+    }
+    if (request.method !== 'GET' && !this.takeBudget('request:' + principal.id, 120, 60_000)) {
+      sendJson(response, 429, { error: 'Too many requests. Try again shortly.' }); return;
+    }
 
-    const legacySession = this.sessions.getOrCreateSession(principal, cookies[LEGACY_COOKIE_NAME]);
-    const legacyCookie = legacySession.isNew
+    const legacySession = legacy ? this.sessions.getOrCreateSession(principal, cookies[LEGACY_COOKIE_NAME]) : undefined;
+    const legacyCookie = legacySession?.isNew
       ? LEGACY_COOKIE_NAME + '=' + encodeURIComponent(legacySession.id) + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=1800'
       : undefined;
 
     const exportMatch = route.match(/^\/exports\/([a-f0-9-]+)(?:\/(download|cancel))?$/);
     if (exportMatch) {
       const id = exportMatch[1];
-      const job = this.exports.get(principal.id, id);
-      const chatId = this.exports.chatId(principal.id, id);
-      if (!job || !chatId || !await this.accounts.getChat(principal.id, chatId)) {
+      const job = await this.exports.get(principal.id, id);
+      const chatId = await this.exports.chatId(principal.id, id);
+      if (!job || !chatId || !await this.accounts.hasChat(principal.id, chatId)) {
         sendJson(response, 404, { error: 'Download expired or unavailable. Generate it again from the chat.' }); return;
       }
       if (request.method === 'GET' && exportMatch[2] === 'download') {
-        const filename = this.exports.file(principal.id, id);
-        if (!filename) { sendJson(response, 409, { error: 'This download is not ready.', export: job }); return; }
+        const stream = await this.exports.read(principal.id, id);
+        if (!stream) { sendJson(response, 409, { error: 'This download is not ready.', export: job }); return; }
         const downloadName = job.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'db-chat';
         response.writeHead(200, { 'Content-Type': EXPORT_MIME[job.format], 'Content-Disposition': `attachment; filename="${downloadName}-${id.slice(0, 8)}.${job.format === 'markdown' ? 'md' : job.format}"`, 'Content-Length': String(job.byteCount), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:" });
-        await pipeline(createReadStream(filename), response); return;
+        await pipeline(stream, response); return;
       }
       if (request.method === 'GET' && !exportMatch[2]) { sendJson(response, 200, { export: job }); return; }
       if (request.method === 'POST' && exportMatch[2] === 'cancel') { sendJson(response, 200, { export: await this.exports.cancel(principal.id, id) }); return; }
@@ -495,17 +649,15 @@ export class WebServer {
 
     const createExportMatch = route.match(/^\/chats\/([^/]+)\/exports$/);
     if (request.method === 'GET' && createExportMatch) {
-      if (!await this.accounts.getChat(principal.id, createExportMatch[1])) { sendJson(response, 404, { error: 'Chat not found.' }); return; }
-      sendJson(response, 200, { exports: this.exports.list(principal.id, createExportMatch[1]) }); return;
+      if (!await this.accounts.hasChat(principal.id, createExportMatch[1])) { sendJson(response, 404, { error: 'Chat not found.' }); return; }
+      sendJson(response, 200, { exports: await this.exports.list(principal.id, createExportMatch[1]) }); return;
     }
     if (request.method === 'POST' && createExportMatch) {
-      const chat = await this.accounts.getChat(principal.id, createExportMatch[1]);
+      const chat = await this.accounts.getChatSummary(principal.id, createExportMatch[1]);
       if (!chat) { sendJson(response, 404, { error: 'Chat not found.' }); return; }
       try {
         const body = this.requireRecord(await readJson(request, 64 * 1024));
-        const currentTurn = chat.latestTurn ? await this.findTurn(chat.latestTurn.id, principal) : undefined;
-        const liveArtifacts = currentTurn?.chatId === chat.id ? currentTurn.artifacts ?? [] : [];
-        const artifact = [...chat.artifacts, ...liveArtifacts].find(item => item.queryId === body.resultId);
+        const artifact = typeof body.resultId === 'string' ? await this.accounts.getChatArtifact(principal.id, chat.id, body.resultId) : null;
         if (!artifact) { sendJson(response, 404, { error: 'Result not found in this chat.' }); return; }
         if (!['csv', 'xlsx', 'json'].includes(String(body.format)) || !['visible', 'all'].includes(String(body.scope))) throw new ExportError('Choose an export format and scope.');
         const format = body.format as DataFormat;
@@ -516,13 +668,13 @@ export class WebServer {
           if (!Array.isArray(columns) || !columns.length || columns.some(column => typeof column !== 'string' || !artifact.result.columns.includes(column)) || new Set(columns).size !== columns.length) throw new ExportError('Choose existing, distinct result columns.');
           if (!Array.isArray(indices) || indices.length > artifact.result.rows.length || indices.some(index => !Number.isInteger(index) || index < 0 || index >= artifact.result.rows.length) || new Set(indices).size !== indices.length) throw new ExportError('Choose existing result rows.');
           const result = { ...artifact.result, columns: columns as string[], rows: indices.map(index => Object.fromEntries((columns as string[]).map(column => [column, artifact.result.rows[index][column] ?? null]))), rowCount: indices.length };
-          job = this.exports.start(principal.id, chat.id, { title: artifact.purpose ?? 'Visible results', format, scope: 'visible' }, context => writeDataExport(format, (async function* () { yield result; })(), context));
+          job = await this.exports.start(principal.id, chat.id, { title: artifact.purpose ?? 'Visible results', format, scope: 'visible' }, context => writeDataExport(format, (async function* () { yield result; })(), context));
         } else {
           if (body.columns !== undefined || body.rowIndices !== undefined) throw new ExportError('All matching results reruns the saved query; local table filters apply only to visible-row exports.');
           job = await this.startQueryExport(principal, chat.id, chat.connectionId, artifact.query, format, artifact.purpose ?? 'All matching results', artifact);
         }
         sendJson(response, 202, { export: job });
-      } catch (error) { sendJson(response, 400, { error: error instanceof ExportError ? error.message : 'The export request could not be created.' }); }
+      } catch (error) { sendJson(response, error instanceof SavedDataReadLimitError ? 413 : 400, { error: error instanceof ExportError || error instanceof SavedDataReadLimitError ? error.message : 'The export request could not be created.' }); }
       return;
     }
 
@@ -633,23 +785,39 @@ export class WebServer {
         sendJson(response, 503, { error: 'SQLite uploads are not configured on this server.' }, legacyCookie);
         return;
       }
+      if (this.activeUploads.has(principal.id) || this.activeUploads.size >= (this.config.maxConcurrentUploads ?? 2)) {
+        sendJson(response, 429, { error: 'Wait for an active file upload to finish before trying again.' }, legacyCookie); return;
+      }
+      this.activeUploads.add(principal.id);
       try {
         const fileName = uploadedFileName(request.headers['x-dbchat-filename']);
+        const declaredBytes = request.headers['content-length'] === undefined ? undefined : Number(request.headers['content-length']);
+        if (declaredBytes !== undefined && (!Number.isSafeInteger(declaredBytes) || declaredBytes < 1 || declaredBytes > this.config.maxSqliteUploadBytes)) throw new RequestBodyLimitError();
+        await this.accounts.reserveSqliteUpload(principal.id, declaredBytes ?? this.config.maxSqliteUploadBytes, {
+          accountCount: this.config.sqliteUploadsPerAccountPerDay ?? 10, globalCount: this.config.sqliteUploadsPerDay ?? 100,
+          accountBytes: this.config.sqliteUploadBytesPerAccountPerDay ?? 250 * 1024 * 1024,
+          globalBytes: this.config.sqliteUploadBytesPerDay ?? 1024 * 1024 * 1024
+        });
         const contents = await readBuffer(request, this.config.maxSqliteUploadBytes);
-        const uploadId = 'upload_' + randomBytes(18).toString('base64url');
+        if (contents.subarray(0, 16).toString('binary') !== 'SQLite format 3\0') throw new Error('Choose a valid SQLite database file.');
+        const asset = await this.assets?.beginUpload(principal.id, fileName, contents.length);
+        const uploadId = asset?.id ?? 'upload_' + randomBytes(18).toString('base64url');
         if (this.sqliteStorage) {
-          const objectKey = await this.sqliteStorage.upload(principal.id, contents);
-          this.sqliteUploads.set(uploadId, { principalId: principal.id, fileName, objectKey, bytes: contents.length });
+          const objectKey = await this.sqliteStorage.upload(principal.id, contents, asset?.objectKey ?? principal.id + '/' + randomUUID() + '.sqlite');
+          if (asset) await this.assets!.completeUpload(principal.id, asset.id);
+          else this.sqliteUploads.set(uploadId, { principalId: principal.id, fileName, objectKey, bytes: contents.length, createdAt: Date.now() });
         } else {
           const uploadDirectory = await fs.mkdtemp(path.join(this.config.sqliteUploadDir!, uploadId + '-'));
           const filePath = path.join(uploadDirectory, fileName);
           await fs.writeFile(filePath, contents, { flag: 'wx', mode: 0o600 });
-          this.sqliteUploads.set(uploadId, { principalId: principal.id, fileName, filePath, bytes: contents.length });
+          this.sqliteUploads.set(uploadId, { principalId: principal.id, fileName, filePath, bytes: contents.length, createdAt: Date.now() });
         }
         sendJson(response, 201, { uploadId, fileName, bytes: contents.length }, legacyCookie);
       } catch (error) {
         const message = safeClientError(error, 'The SQLite file could not be uploaded.');
-        sendJson(response, message === 'Request body is too large.' ? 413 : 400, { error: message }, legacyCookie);
+        sendJson(response, error instanceof UploadQuotaError || error instanceof RetainedSqliteQuotaError ? 429 : message === 'Request body is too large.' ? 413 : 400, { error: message }, legacyCookie);
+      } finally {
+        this.activeUploads.delete(principal.id);
       }
       return;
     }
@@ -669,7 +837,7 @@ export class WebServer {
     }
 
     if (request.method === 'POST' && route === '/chats') {
-      const body = this.requireRecord(await readJson(request, this.config.maxChatBodyBytes ?? 16 * 1024 * 1024));
+      const body = this.requireRecord(await readJson(request, Math.min(this.config.maxBodyBytes, this.config.maxChatBodyBytes ?? this.config.maxBodyBytes)));
       const connectionId = stringField(body, 'connectionId');
       if (connectionId && !await this.connectionSummaryForPrincipal(principal, connectionId)) {
         sendJson(response, 404, { error: 'Connection not found.' }, legacyCookie);
@@ -697,7 +865,7 @@ export class WebServer {
         }
         const chat = await this.accounts.updateMessageMetadata(principal.id, messageMetadataMatch[1], messageMetadataMatch[2], patch);
         sendJson(response, 200, { chat }, legacyCookie);
-      } catch (error) { sendJson(response, 400, { error: safeClientError(error) }); }
+      } catch (error) { sendJson(response, error instanceof SavedDataReadLimitError ? 413 : error instanceof RetainedDataQuotaError || error instanceof SessionCapacityError ? 429 : 400, { error: safeClientError(error) }); }
       return;
     }
 
@@ -709,7 +877,7 @@ export class WebServer {
         try {
           const body = this.requireRecord(await readJson(request, 128 * 1024));
           knowledge = await this.accounts.saveConnectionKnowledge(principal.id, knowledgeMatch[1], parseKnowledge(body.knowledge ?? body, knowledge));
-        } catch (error) { sendJson(response, 400, { error: safeClientError(error) }); return; }
+        } catch (error) { sendJson(response, error instanceof SavedDataReadLimitError ? 413 : error instanceof RetainedDataQuotaError || error instanceof SessionCapacityError ? 429 : 400, { error: safeClientError(error) }); return; }
       }
       sendJson(response, 200, { knowledge }, legacyCookie); return;
     }
@@ -732,7 +900,7 @@ export class WebServer {
     }
 
     if (chatMatch && request.method === 'PATCH') {
-      const body = this.requireRecord(await readJson(request, this.config.maxChatBodyBytes ?? 16 * 1024 * 1024));
+      const body = this.requireRecord(await readJson(request, Math.min(this.config.maxBodyBytes, this.config.maxChatBodyBytes ?? this.config.maxBodyBytes)));
       if (Object.keys(body).some(key => !['title', 'pinned'].includes(key)) || (body.pinned !== undefined && typeof body.pinned !== 'boolean')) {
         sendJson(response, 400, { error: 'Only title and pinned can be changed. Saved evidence and source are server-owned.' }); return;
       }
@@ -755,8 +923,14 @@ export class WebServer {
 
     if (request.method === 'POST' && route === '/connections') {
       const body = this.requireRecord(await readJson(request, this.config.maxBodyBytes));
-      const connection = await this.accounts.createConnection(principal.id, this.parseConnection(body, principal));
-      sendJson(response, 201, { connection }, legacyCookie);
+      if (body.sqliteUploadId !== undefined && body.kind !== 'sqlite') throw new Error('SQLite uploads require a SQLite connection.');
+      const claimedUpload = await this.claimSqliteUpload(body, principal);
+      let saved = false;
+      try {
+        const connection = await this.accounts.createConnection(principal.id, this.parseConnection(body, principal));
+        saved = true;
+        sendJson(response, 201, { connection }, legacyCookie);
+      } finally { this.finishSqliteUpload(body, claimedUpload, saved); }
       return;
     }
 
@@ -774,10 +948,16 @@ export class WebServer {
     if (connectionMatch && request.method === 'PATCH') {
       const body = this.requireRecord(await readJson(request, this.config.maxBodyBytes));
       const previous = await this.connectionConfigForPrincipal(principal, connectionMatch[1]);
-      const patch = this.parseConnectionPatch(body, principal);
-      const connection = await this.accounts.updateConnection(principal.id, connectionMatch[1], patch);
-      if (previous && patch.sqliteObjectKey && previous.sqliteObjectKey !== patch.sqliteObjectKey) await this.removeSqliteConnection(principal.id, previous);
-      sendJson(response, 200, { connection }, legacyCookie);
+      if (body.sqliteUploadId !== undefined && (body.kind ?? previous?.kind) !== 'sqlite') throw new Error('SQLite uploads require a SQLite connection.');
+      const claimedUpload = await this.claimSqliteUpload(body, principal);
+      let saved = false;
+      try {
+        const patch = this.parseConnectionPatch(body, principal);
+        const connection = await this.accounts.updateConnection(principal.id, connectionMatch[1], patch);
+        saved = true;
+        if (previous && ((patch.sqliteObjectKey && previous.sqliteObjectKey !== patch.sqliteObjectKey) || (patch.databasePath && previous.databasePath !== patch.databasePath))) await this.removeSqliteConnection(principal.id, previous);
+        sendJson(response, 200, { connection }, legacyCookie);
+      } finally { this.finishSqliteUpload(body, claimedUpload, saved); }
       return;
     }
 
@@ -792,7 +972,7 @@ export class WebServer {
       return;
     }
 
-    if (/^\/connections\/[^/]+\/(?:test|schema|introspect)$/.test(route)
+    if (/^\/connections\/[^/]+\/(?:test|schema|introspect|suggestions)$/.test(route)
       && (!this.takeBudget('database:' + principal.id, 20, 60_000) || !this.takeBudget('database:global', 100, 60_000))) {
       sendJson(response, 429, { error: 'Too many database checks. Try again shortly.' }, legacyCookie);
       return;
@@ -850,20 +1030,35 @@ export class WebServer {
 
     const eventMatch = route.match(/^\/chat\/turns\/([^/]+)\/events$/);
     if (request.method === 'GET' && eventMatch) {
-      const turn = await this.findTurn(eventMatch[1], principal);
-      if (!turn) {
-        sendJson(response, 404, { error: 'Turn not found.' }, legacyCookie);
+      if (response.destroyed) return;
+      const release = this.reserveEventStream(principal.id, response);
+      if (!release) {
+        response.setHeader('Retry-After', '1');
+        sendJson(response, 429, { error: 'Too many open answer streams. Close another viewer and try again.' }, legacyCookie);
         return;
       }
-      const lastEventId = Number(request.headers['last-event-id'] ?? 0) || 0;
-      response.writeHead(200, {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no',
-        ...(legacyCookie ? { 'Set-Cookie': legacyCookie } : {})
-      });
-      this.sessions.subscribe(turn, response, lastEventId);
+      let subscribed = false;
+      try {
+        const turn = await this.findTurn(eventMatch[1], principal);
+        if (!turn) { sendJson(response, 404, { error: 'Turn not found.' }, legacyCookie); return; }
+        if (response.destroyed) return;
+        const lastEventId = Number(request.headers['last-event-id'] ?? 0) || 0;
+        response.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+          'X-Accel-Buffering': 'no',
+          ...(legacyCookie ? { 'Set-Cookie': legacyCookie } : {})
+        });
+        if (turn.chatId) this.sessions.subscribeDurable(principal.id, this.sessions.snapshot(turn), response, lastEventId,
+          async () => { this.worker.assertReady(); return await this.accounts.getTurn(principal.id, turn.id); });
+        else this.sessions.subscribe(turn, response, lastEventId);
+        this.eventStreamResponses.add(response);
+        subscribed = true;
+      } catch (error) {
+        if (response.headersSent) response.destroy();
+        throw error;
+      } finally { if (!subscribed) release(); }
       return;
     }
 
@@ -879,13 +1074,14 @@ export class WebServer {
     }
 
     if (request.method === 'POST' && route === '/chat/turns') {
+      this.worker.assertReady();
       const body = this.requireRecord(await readJson(request, this.config.maxBodyBytes));
       let messages: ModelChatMessage[];
       try {
         const question = typeof body.question === 'string' ? body.question : Array.isArray(body.messages) ? body.messages.at(-1)?.content : undefined;
         messages = body.chatId || body.question !== undefined ? this.parseMessages({ messages: [{ role: 'user', content: question }] }) : this.parseMessages(body);
       }
-      catch (error) { sendJson(response, 400, { error: safeClientError(error) }, legacyCookie); return; }
+      catch (error) { sendJson(response, error instanceof SavedDataReadLimitError ? 413 : error instanceof RetainedDataQuotaError || error instanceof SessionCapacityError ? 429 : 400, { error: safeClientError(error) }, legacyCookie); return; }
       if (typeof body.chatId === 'string' && typeof body.clientRequestId === 'string') {
         const prior = await this.accounts.getTurnByRequestId(principal.id, body.clientRequestId);
         if (prior) {
@@ -908,20 +1104,19 @@ export class WebServer {
         sendJson(response, 409, { error: 'This connection is unavailable. Manage it before asking a question.' }, legacyCookie);
         return;
       }
+      const inference = await this.effectiveInference(principal.id);
       if (this.sessions.activeTurnCount(principal.id) >= (this.config.maxActiveTurnsPerUser ?? 2)
         || this.sessions.activeTurnCount() >= (this.config.maxActiveTurns ?? 16)) {
         sendJson(response, 429, { error: 'Wait for an active answer to finish before starting another.' }, legacyCookie);
         return;
       }
       const chatId = stringField(body, 'chatId');
-      if (this.config.storageMode === 'supabase' && !chatId) {
+      if (this.config.authMode === 'app' && !chatId) {
         sendJson(response, 400, { error: 'Create a saved chat before asking a question.' }); return;
       }
       const turn = this.sessions.createTurn(principal, messages, selectedConnectionId);
       if (chatId) {
         try {
-          const chat = await this.accounts.getChat(principal.id, chatId);
-          if (!chat || chat.connectionId !== selectedConnectionId) throw new Error('Chat connection does not match.');
           const requestId = stringField(body, 'clientRequestId', true)!;
           const assistantId = stringField(body, 'assistantMessageId', true)!;
           const userId = stringField(body, 'userMessageId', true)!;
@@ -942,42 +1137,47 @@ export class WebServer {
             const artifactId = stringField(effectiveIntent, 'artifactId');
             const messageId = stringField(effectiveIntent, 'messageId');
             if (!artifactId && !messageId) throw new Error('Choose the answer or result for this action.');
-            if (artifactId && !chat.artifacts.some(artifact => artifact.queryId === artifactId)) throw new Error('Result not found in this chat.');
-            if (messageId && !chat.messages.some(message => message.id === messageId)) throw new Error('Message not found in this chat.');
+            if ([artifactId, messageId].some(id => id && id.length > 128)) throw new Error('Invalid evidence identifier.');
             turn.intent = { action: effectiveIntent.action as FollowUpIntent['action'], artifactId, messageId, text: stringField(effectiveIntent, 'text')?.slice(0, 4000) };
           }
+          const chat = await this.accounts.getChatContext(principal.id, chatId, turn.intent);
+          if (!chat || chat.connectionId !== selectedConnectionId) throw new Error('Chat connection does not match.');
+          if (turn.intent?.artifactId && !chat.artifacts.some(artifact => artifact.queryId === turn.intent!.artifactId)) throw new Error('Result not found in this chat.');
+          if (turn.intent?.messageId && !chat.messages.some(message => message.id === turn.intent!.messageId)) throw new Error('Message not found in this chat.');
           turn.messages = conversationContext(chat, latest.content, turn.intent);
           turn.referencedArtifacts = chat.artifacts;
 
-          const key = principal.id + ':' + requestId;
-          const prior = this.submittedTurns.get(key);
-          const claim = this.accounts.claimTurn
-            ? await this.accounts.claimTurn(principal.id, turn.id, chatId, requestId, userMessage, assistantId)
-            : { turnId: prior ?? turn.id, created: !prior };
+          const claim = await this.accounts.claimTurn(principal.id, turn.id, chatId, requestId, userMessage, assistantId, {
+            workerId: this.worker.id, accountActiveLimit: this.config.maxActiveTurnsPerUser ?? 2, globalActiveLimit: this.config.maxActiveTurns ?? 16,
+            managed: inference.credential.source === 'internal', accountDailyLimit: this.config.managedTurnsPerAccountPerDay ?? 100,
+            globalDailyLimit: this.config.managedTurnsPerDay ?? 1000, attemptOf: turn.attemptOf, intent: turn.intent
+          });
           if (!claim.created) {
             this.sessions.discard(turn);
             sendJson(response, 202, { turnId: claim.turnId }, legacyCookie); return;
           }
-          this.submittedTurns.set(key, turn.id);
-          await this.accounts.saveTurn(principal.id, this.sessions.snapshot(turn));
         } catch (error) {
           this.sessions.discard(turn);
-          sendJson(response, 400, { error: safeClientError(error, 'The question could not be saved.') }); return;
+          sendJson(response, error instanceof SavedDataReadLimitError ? 413 : error instanceof WorkerLeaseError ? 503 : error instanceof ManagedTurnQuotaError || error instanceof TurnCapacityError || error instanceof RetainedDataQuotaError ? 429 : 400, { error: safeClientError(error, 'The question could not be saved.') }); return;
         }
       }
       sendJson(response, 202, { turnId: turn.id }, legacyCookie);
-      void this.runTurn(turn);
+      if (this.draining) turn.abortController.abort();
+      const done = this.runTurn(turn, inference);
+      this.runningTurns.set(turn.id, { turn, done });
+      void done.finally(() => this.runningTurns.delete(turn.id));
       return;
     }
 
     const abortMatch = route.match(/^\/chat\/turns\/([^/]+)\/abort$/);
     if (request.method === 'POST' && abortMatch) {
       const turn = this.sessions.getTurnForPrincipal(abortMatch[1], principal);
-      if (!turn) {
+      const saved = await this.accounts.cancelTurn(principal.id, abortMatch[1]);
+      if (!turn && !saved) {
         sendJson(response, 404, { error: 'Turn not found.' }, legacyCookie);
         return;
       }
-      if (!turn.committing) turn.abortController.abort();
+      if (turn && !turn.committing) turn.abortController.abort();
       sendJson(response, 202, { ok: true }, legacyCookie);
       return;
     }
@@ -991,6 +1191,33 @@ export class WebServer {
     return pathname;
   }
 
+  private async drainAccount(owner: string): Promise<void> {
+    const abortTurns = () => {
+      for (const { turn } of this.runningTurns.values()) if (turn.principalId === owner && !turn.committing) turn.abortController.abort();
+    };
+    await this.accounts.cancelOwnerTurns(owner);
+    abortTurns();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const drained = (async () => {
+      // The owner gate prevents later handlers joining this set. Existing
+      // uploads must finish before removeOwner, or they can recreate orphan files.
+      await Promise.allSettled([...(this.ownerRequests.get(owner) ?? [])]);
+      if (timedOut) return;
+      abortTurns();
+      await Promise.allSettled([...this.runningTurns.values()].filter(task => task.turn.principalId === owner).map(task => task.done));
+      if (timedOut) return;
+      await this.exports.cancelOwner(owner);
+      while (!timedOut && await this.accounts.cancelOwnerTurns(owner) > 0) await new Promise(resolve => setTimeout(resolve, 100));
+      if (!timedOut) await this.accounts.recoverExpiredTurns();
+    })();
+    try {
+      await Promise.race([drained, new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(() => { timedOut = true; reject(new Error('Active account work has not finished.')); }, this.config.shutdownGraceMs ?? 25_000);
+      })]);
+    } finally { if (deadline) clearTimeout(deadline); }
+  }
+
   private takeBudget(key: string, maximum: number, windowMs: number): boolean {
     const now = Date.now();
     for (const [id, budget] of this.requestBudgets) if (budget.resetAt <= now) this.requestBudgets.delete(id);
@@ -1001,7 +1228,17 @@ export class WebServer {
   }
 
   private loginAttemptKey(request: IncomingMessage, email: string): string {
-    return (request.socket.remoteAddress || 'unknown') + ':' + email.trim().toLowerCase();
+    return this.clientAddress(request) + ':' + email.trim().toLowerCase();
+  }
+
+  private clientAddress(request: IncomingMessage): string {
+    const peer = request.socket.remoteAddress || 'unknown';
+    const hops = this.config.trustedProxyHops ?? 0;
+    if (!hops) return peer;
+    const header = request.headers['x-forwarded-for'];
+    const chain = (Array.isArray(header) ? header.join(',') : header ?? '').split(',').map(value => value.trim());
+    const address = chain[chain.length - hops];
+    return address && isIP(address) ? address : peer;
   }
 
   private loginRateLimited(key: string): boolean {
@@ -1182,7 +1419,7 @@ export class WebServer {
     });
   }
 
-  private startReportExport(principal: Principal, chatId: string, request: ReportRequest, artifacts: QueryResultArtifact[]): ExportSnapshot {
+  private async startReportExport(principal: Principal, chatId: string, request: ReportRequest, artifacts: QueryResultArtifact[]): Promise<ExportSnapshot> {
     const owned = request.resultIds.map(id => artifacts.find(artifact => artifact.queryId === id));
     if (!owned.length || owned.some(artifact => !artifact)) throw new ExportError('Report evidence is unavailable in this chat.');
     return this.exports.start(principal.id, chatId, { title: request.title, format: request.format, scope: 'report' }, async context => {
@@ -1197,23 +1434,105 @@ export class WebServer {
 
   private resolveSqliteUpload(principal: Principal, uploadId: string): Partial<ConnectionConfig> {
     const upload = this.sqliteUploads.get(uploadId);
-    if (!upload || upload.principalId !== principal.id) {
+    if (!upload || upload.principalId !== principal.id || upload.createdAt < Date.now() - 3600_000) {
       throw new Error('Choose a SQLite file again.');
     }
-    // Each uploaded asset belongs to one connection; prevent reuse and shared deletion.
-    this.sqliteUploads.delete(uploadId);
     return upload.objectKey ? { sqliteObjectKey: upload.objectKey, sqliteFileName: upload.fileName, databasePath: '' } : { databasePath: upload.filePath };
   }
 
+  private async claimSqliteUpload(body: Record<string, unknown>, principal: Principal): Promise<UploadedSqliteFile | undefined> {
+    if (body.sqliteUploadId === undefined) return undefined;
+    const uploadId = stringField(body, 'sqliteUploadId', true)!;
+    if (this.assets) {
+      const asset = await this.assets.resolveUpload(principal.id, uploadId);
+      // This cache only bridges the synchronous connection parser. Attachment is
+      // fenced in SQL, so two workers cannot attach the same upload.
+      this.sqliteUploads.set(uploadId, { principalId: principal.id, fileName: asset.fileName, objectKey: asset.objectKey, bytes: asset.bytes, createdAt: Date.now(), claimed: true });
+      return this.sqliteUploads.get(uploadId);
+    }
+    const upload = this.sqliteUploads.get(uploadId);
+    if (!upload || upload.principalId !== principal.id || upload.claimed || upload.createdAt < Date.now() - 3600_000) throw new Error('Choose a SQLite file again.');
+    upload.claimed = true;
+    try {
+      // The earlier save may have committed even when its HTTP response failed.
+      // Reusing that asset would let deletion of either connection break the other.
+      if (await this.sqliteUploadIsReferenced(upload)) {
+        this.sqliteUploads.delete(uploadId);
+        throw new Error('This SQLite file is already attached to a connection. Choose a file again.');
+      }
+      return upload;
+    } catch (error) { upload.claimed = false; throw error; }
+  }
+
+  private finishSqliteUpload(body: Record<string, unknown>, claimed: UploadedSqliteFile | undefined, saved: boolean): void {
+    if (typeof body.sqliteUploadId !== 'string') return;
+    const upload = this.sqliteUploads.get(body.sqliteUploadId);
+    if (!upload || upload !== claimed) return;
+    if (saved || this.assets) this.sqliteUploads.delete(body.sqliteUploadId);
+    else upload.claimed = false;
+  }
+
+  private startMaintenance(): void {
+    if (this.maintenance || this.draining) return;
+    this.maintenance = this.maintainUploadsAndUsage().catch(() => {
+      console.error('[dbchat:web] durable cleanup failed; it will retry');
+    }).finally(() => { this.maintenance = undefined; });
+  }
+
+  private async maintainUploadsAndUsage(shutdown = false): Promise<void> {
+    if (this.assets && this.sqliteStorage) {
+      const summary = await this.assets.reconcile(this.sqliteStorage, {
+        onAccountDeleting: async owner => {
+          for (const { turn } of this.runningTurns.values()) if (turn.principalId === owner && !turn.committing) turn.abortController.abort();
+          const active = await this.accounts.cancelOwnerTurns(owner);
+          await this.accounts.recoverExpiredTurns();
+          return active === 0 && !(this.ownerRequests.get(owner)?.size) && !this.activeUploads.has(owner);
+        },
+        cancelExports: async owner => { try { await this.exports.cancelOwner(owner); return true; } catch { return false; } },
+        deleteAuthUser: owner => deleteSupabaseAuthUser(this.config.supabase!, owner)
+      });
+      if (summary.failed) console.error('[dbchat:web] durable cleanup has retryable failures', { count: summary.failed });
+    }
+    if (Date.now() - this.lastUsagePrune >= 3600_000) {
+      await this.accounts.pruneUsage();
+      this.lastUsagePrune = Date.now();
+    }
+    for (const [id, upload] of this.sqliteUploads) {
+      if (this.assets && upload.objectKey) continue;
+      if (upload.claimed || (!shutdown && upload.createdAt > Date.now() - 3600_000)) continue;
+      // A failed HTTP persistence response can still have committed a connection.
+      // Check current references before removing an apparently abandoned file.
+      const referenced = await this.sqliteUploadIsReferenced(upload);
+      if (upload.claimed) continue;
+      upload.claimed = true;
+      try {
+        if (!referenced) {
+          if (upload.objectKey) await this.sqliteStorage?.remove(upload.principalId, upload.objectKey);
+          if (upload.filePath) await this.removeManagedSqliteFile(upload.filePath);
+        }
+        this.sqliteUploads.delete(id);
+      } catch (error) { upload.claimed = false; throw error; }
+    }
+  }
+
+  private async sqliteUploadIsReferenced(upload: UploadedSqliteFile): Promise<boolean> {
+    const connections = await this.accounts.listConnections(upload.principalId);
+    const configs = await Promise.all(connections.map(connection => this.accounts.getConnectionConfig(upload.principalId, connection.id)));
+    return configs.some(config => upload.objectKey ? config?.sqliteObjectKey === upload.objectKey : config?.databasePath === upload.filePath);
+  }
+
   private async withSqliteConnection<T>(owner: string, config: ConnectionConfig, run: (local: ConnectionConfig) => Promise<T>, signal?: AbortSignal): Promise<T> {
-    if (config.kind !== 'sqlite' || !config.sqliteObjectKey) return run(config);
-    if (!this.sqliteStorage) throw new Error('Cloud SQLite storage is not configured.');
-    return this.sqliteStorage.withConnection(owner, config, run, signal);
+    return this.databaseOperations.run(async () => {
+      if (config.kind !== 'sqlite' || !config.sqliteObjectKey) return run(config);
+      if (!this.sqliteStorage) throw new Error('Cloud SQLite storage is not configured.');
+      return this.sqliteStorage.withConnection(owner, config, run, signal);
+    }, signal);
   }
 
   private async removeSqliteConnection(owner: string, config: ConnectionConfig): Promise<void> {
     if (config.kind !== 'sqlite') return;
     if (config.sqliteObjectKey) {
+      if (this.assets) { this.startMaintenance(); return; }
       if (!this.sqliteStorage) throw new Error('Cloud SQLite storage is not configured.');
       await this.sqliteStorage.remove(owner, config.sqliteObjectKey);
     } else if (config.databasePath) await this.removeManagedSqliteFile(config.databasePath);
@@ -1236,17 +1555,11 @@ export class WebServer {
   }
 
   private async findTurn(id: string, principal: Principal): Promise<WebTurnRecord | undefined> {
-    const active = this.sessions.getTurnForPrincipal(id, principal);
-    if (active) return active;
-    const saved = await this.accounts.getTurn?.(principal.id, id);
+    const local = this.sessions.getTurnForPrincipal(id, principal);
+    if (local && !local.chatId) return local;
+    this.worker.assertReady();
+    const saved = await this.accounts.getTurn(principal.id, id);
     if (!saved) return undefined;
-    // This deployment runs one Node instance. An unfinalized persisted turn after
-    // process loss is interrupted, never silently executed for a second time.
-    if (saved.status === 'queued' || saved.status === 'running') {
-      saved.status = 'error'; saved.error = 'The server restarted before this answer finished. Please ask again.';
-      saved.events = [...saved.events, { id: saved.events.length + 1, turnId: id, type: 'error', timestamp: new Date().toISOString(), data: { message: saved.error } }];
-      await this.accounts.finalizeTurn?.(principal.id, saved);
-    }
     return { ...saved, principalId: principal.id, messages: [], eventBytes: 0,
       createdAt: saved.createdAt ?? new Date().toISOString(), updatedAt: new Date().toISOString(),
       abortController: new AbortController(), subscribers: new Set() };
@@ -1260,30 +1573,43 @@ export class WebServer {
     const data = status === 'complete' ? { message, artifacts, artifactIds: artifacts.map(a => a.queryId) } : { message: error ?? 'Turn cancelled.' };
     const snapshot = { ...this.sessions.snapshot(turn), status, message, artifacts, error,
       events: [...turn.events, { id: turn.events.length + 1, turnId: turn.id, type: status, timestamp: new Date().toISOString(), data }] };
-    if (this.accounts.finalizeTurn) await this.accounts.finalizeTurn(turn.principalId, snapshot, message, artifacts);
-    else if (turn.chatId) {
-      const chat = await this.accounts.getChat(turn.principalId, turn.chatId);
-      if (!chat) throw new Error('The chat is no longer available.');
-      await this.accounts.updateChat(turn.principalId, turn.chatId, {
-        messages: message ? [...chat.messages.filter(m => m.id !== message.id), message] : chat.messages,
-        artifacts: [...chat.artifacts, ...artifacts]
-      });
+    if (turn.chatId) {
+      const saved = await this.accounts.finalizeTurn(turn.principalId, snapshot, message, artifacts, this.worker.id);
+      this.sessions.acceptPersisted(turn, saved);
+    } else {
+      if (status === 'complete') this.sessions.complete(turn, { message: message!, artifacts, events: [], toolCalls: [] });
+      else if (status === 'aborted') this.sessions.abort(turn);
+      else this.sessions.fail(turn, error ?? 'The answer could not be completed.');
     }
   }
 
-  private async runTurn(turn: WebTurnRecord): Promise<void> {
+  private async runTurn(turn: WebTurnRecord, inference: Awaited<ReturnType<WebServer['effectiveInference']>>): Promise<void> {
     turn.executing = true;
     this.sessions.setStatus(turn, 'running');
     this.sessions.publish(turn, 'status', { message: 'Checking the schema' });
     const timeout = setTimeout(() => { if (turn.committing) return; turn.error = 'The answer timed out. Please try a smaller question.'; turn.abortController.abort(); }, this.config.turnTimeoutMs);
     timeout.unref?.();
+    let dirty = false;
+    let saving: Promise<void> | undefined;
+    let saveError: unknown;
+    const saveProgress = async () => {
+      if (!turn.chatId || !dirty || saveError) return;
+      if (saving) { await saving.catch(() => undefined); return; }
+      dirty = false;
+      const snapshot = structuredClone(this.sessions.snapshot(turn));
+      saving = Promise.resolve().then(() => this.accounts.saveTurn(turn.principalId, snapshot, this.worker.id));
+      try { await saving; } catch (error) { saveError = error; turn.abortController.abort(); } finally { saving = undefined; }
+    };
+    const progress = setInterval(() => { void saveProgress(); }, 500); progress.unref?.();
     try {
-      await this.accounts.saveTurn?.(turn.principalId, this.sessions.snapshot(turn));
+      this.worker.assertReady();
+      if (turn.chatId) await this.accounts.saveTurn(turn.principalId, this.sessions.snapshot(turn), this.worker.id);
+      turn.abortController.signal.throwIfAborted();
       const principal: Principal = { id: turn.principalId, roles: ['user'] };
       const connection = turn.connectionId ? await this.connectionConfigForPrincipal(principal, turn.connectionId) : this.config.database;
       if (!connection) throw new Error('The selected connection is no longer available.');
       await prepareConnectionDestination(connection, this.config.allowedDatabaseHosts);
-      const { credential: provider, settings } = await this.effectiveInference(turn.principalId);
+      const { credential: provider, settings } = inference;
       const knowledge = await this.accounts.getConnectionKnowledge(turn.principalId, connection.id);
       const source: SourceSnapshot = { connectionId: connection.id, label: connection.label, kind: connection.kind, capturedAt: new Date().toISOString() };
       const result = await this.withSqliteConnection(turn.principalId, connection, local => this.service.run(turn.messages, turn.id,
@@ -1295,12 +1621,7 @@ export class WebServer {
             event = { ...event, data: { ...event.data, artifact } };
           }
           this.sessions.publishAgentEvent(turn, event);
-          if (event.type === 'result') {
-            const snapshot = structuredClone(this.sessions.snapshot(turn));
-            turn.persistence = (turn.persistence ?? Promise.resolve()).then(async () => { await this.accounts.saveTurn(turn.principalId, snapshot); });
-            // A rejected save is reconciled by the awaited chain before finalization.
-            void turn.persistence.catch(() => undefined);
-          }
+          dirty = true;
         }, turn.abortController.signal,
         local, provider.apiKey, settings.model, settings.effortLevel, { referencedArtifacts: turn.referencedArtifacts ?? [], knowledge, source,
           requestExport: turn.chatId ? async request => {
@@ -1313,34 +1634,46 @@ export class WebServer {
           } : undefined,
           requestReport: turn.chatId ? async request => {
             turn.abortController.signal.throwIfAborted();
-            const job = this.startReportExport(principal, turn.chatId!, request, [...(turn.artifacts ?? []), ...(turn.referencedArtifacts ?? [])]);
+            const job = await this.startReportExport(principal, turn.chatId!, request, [...(turn.artifacts ?? []), ...(turn.referencedArtifacts ?? [])]);
             return { ...job, format: request.format };
           } : undefined,
           onSchema: async schema => { await this.refreshKnowledgeSchema(turn.principalId, connection.id, schema); } }, settings.provider), turn.abortController.signal);
       turn.metrics = result.metrics ?? result.message.metrics ?? turn.metrics;
-      await turn.persistence;
+      clearInterval(progress);
+      await saving;
+      await saveProgress();
+      if (saveError) throw saveError;
       if (turn.abortController.signal.aborted) throw new Error(turn.error ?? 'Turn cancelled.');
       if (turn.assistantMessageId) {
         result.message.id = turn.assistantMessageId;
         result.artifacts = result.artifacts.map(artifact => ({ ...artifact, messageId: turn.assistantMessageId, source, capturedAt: turn.artifacts?.find(observed => observed.queryId === artifact.queryId)?.capturedAt ?? new Date().toISOString() }));
       }
-      // Once the database commit begins, cancellation cannot undo that answer.
+      // SQL serializes completion against cancellation; the first lock holder wins.
       turn.committing = true;
       await this.persistTerminal(turn, 'complete', result.message, result.artifacts);
-      this.sessions.complete(turn, result);
+
     } catch (error) {
-      const cancelled = turn.abortController.signal.aborted && !turn.error;
+      clearInterval(progress);
+      await saving?.catch(() => undefined);
+      const cancelled = turn.abortController.signal.aborted && !turn.error && !saveError;
       const message = turn.error ?? safeClientError(error, 'The answer could not be generated.');
       try {
         await turn.persistence?.catch(() => undefined);
         await this.persistTerminal(turn, cancelled ? 'aborted' : 'error', undefined, turn.artifacts ?? [], message);
       }
-      catch { console.error('[dbchat:web] terminal persistence failed', { turnId: turn.id }); }
-      if (cancelled) this.sessions.abort(turn);
-      else this.sessions.fail(turn, message);
+      catch {
+        console.error('[dbchat:web] terminal persistence failed', { turnId: turn.id });
+        this.sessions.discard(turn);
+      }
     } finally {
       turn.executing = false;
+      clearInterval(progress);
       clearTimeout(timeout);
+      if (turn.chatId) {
+        await Promise.resolve().then(() => this.accounts.finishTurnExecution(turn.principalId, turn.id, this.worker.id)).catch(() => undefined);
+        // Saved turn reads and event replay use durable snapshots on every worker.
+        this.sessions.discard(turn);
+      }
     }
   }
 
@@ -1480,7 +1813,16 @@ export async function startWebServer(config = loadWebServerConfig()): Promise<We
 const currentFile = fileURLToPath(import.meta.url);
 const invokedFile = process.argv[1] ? path.resolve(process.argv[1]) : '';
 if (currentFile === invokedFile) {
-  startWebServer().catch((error) => {
+  startWebServer().then(server => {
+    const shutdown = () => {
+      // A provider/driver that ignores cancellation must not keep a terminating
+      // deployment alive indefinitely. Imported WebServer users are never exited.
+      setTimeout(() => { console.error('[dbchat:web] shutdown deadline exceeded'); process.exit(1); }, (server.config.shutdownGraceMs ?? 25_000) + 1000);
+      void server.close().then(() => process.exit(0), () => { console.error('[dbchat:web] shutdown failed'); process.exit(1); });
+    };
+    process.once('SIGTERM', shutdown);
+    process.once('SIGINT', shutdown);
+  }).catch((error) => {
     console.error('[dbchat:web] failed to start', error);
     process.exitCode = 1;
   });

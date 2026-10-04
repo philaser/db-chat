@@ -9,7 +9,13 @@ select public.dbchat_claim_turn('11111111-1111-4111-8111-111111111111','differen
 select public.dbchat_finalize_turn('11111111-1111-4111-8111-111111111111','{"id":"t1","status":"complete","events":[]}','{"id":"m2","role":"assistant","content":"Answer"}','[{"queryId":"q1"}]');
 select public.dbchat_finalize_turn('11111111-1111-4111-8111-111111111111','{"id":"t1","status":"complete","events":[]}','{"id":"m2","role":"assistant","content":"Answer"}','[{"queryId":"q1"}]');
 -- A browser's stale autosave cannot delete server-committed messages or results.
-select public.dbchat_update_chat('11111111-1111-4111-8111-111111111111','chat1','{"messages":[],"artifacts":[],"title":"Renamed"}');
+do $$ begin
+ begin
+  perform public.dbchat_update_chat('11111111-1111-4111-8111-111111111111','chat1','{"messages":[],"artifacts":[],"title":"Renamed"}');
+  raise exception 'Browser autosave was accepted';
+ exception when raise_exception then if sqlerrm='Browser autosave was accepted' then raise; end if; end;
+end $$;
+select public.dbchat_update_chat('11111111-1111-4111-8111-111111111111','chat1','{"title":"Renamed"}');
 do $$ begin
  if (select count(*) from public.dbchat_messages where chat_id='chat1')<>2 then raise exception 'Message count changed'; end if;
  if (select count(*) from public.dbchat_artifacts where chat_id='chat1')<>1 then raise exception 'Artifact count changed'; end if;

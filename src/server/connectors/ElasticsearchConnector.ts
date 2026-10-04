@@ -23,6 +23,7 @@ export class ElasticsearchConnector implements DatabaseConnector {
   private baseUrl: URL | null = null;
   private safetyLevel: SafetyLevel = 'standard';
   private maxRows = MAX_SAFE_SIZE;
+  private lifetime = new AbortController();
 
   setResultLimit(maxRows: number): void { this.maxRows = resultLimit(maxRows, MAX_SAFE_SIZE); }
 
@@ -36,6 +37,8 @@ export class ElasticsearchConnector implements DatabaseConnector {
       throw new Error('Elasticsearch host must use HTTP or HTTPS.');
     }
 
+    this.close();
+    this.lifetime = new AbortController();
     this.config = config;
     this.baseUrl = baseUrl;
     await this.request('_cluster/health?filter_path=cluster_name,status');
@@ -48,13 +51,14 @@ export class ElasticsearchConnector implements DatabaseConnector {
       .filter((index): index is string => Boolean(index && !index.startsWith('.')));
 
     const tables: TableInfo[] = [];
+    let schemaBytes = 0;
     for (const index of visibleIndices) {
       const mapping = await this.request<Record<string, { mappings?: ElasticsearchMapping }>>(`${encodeURIComponent(index)}/_mapping`);
       const properties = mapping[index]?.mappings?.properties ?? {};
-      tables.push({
-        name: index,
-        columns: flattenProperties(properties)
-      });
+      const table = { name: index, columns: flattenProperties(properties) };
+      schemaBytes += Buffer.byteLength(JSON.stringify(table));
+      if (schemaBytes > 8 * 1024 * 1024) throw new Error('Elasticsearch schema exceeded the size limit. Reduce the indices or fields visible to this account.');
+      tables.push(table);
     }
 
     return {
@@ -143,6 +147,7 @@ export class ElasticsearchConnector implements DatabaseConnector {
         signal
       }
     );
+    assertCompleteSearch(response, 'query');
     const elapsedMs = typeof response.took === 'number'
       ? response.took
       : Math.round(performance.now() - start);
@@ -214,6 +219,7 @@ export class ElasticsearchConnector implements DatabaseConnector {
   }
 
   close(): void {
+    this.lifetime.abort();
     this.config = null;
     this.baseUrl = null;
   }
@@ -224,7 +230,7 @@ export class ElasticsearchConnector implements DatabaseConnector {
     const initWithHeaders: RequestInit = {
       ...init,
       redirect: 'error',
-      signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(35_000)]) : AbortSignal.timeout(35_000),
+      signal: AbortSignal.any([this.lifetime.signal, ...(init.signal ? [init.signal] : []), AbortSignal.timeout(35_000)]),
       headers: {
         accept: 'application/json',
         ...(init.body ? { 'content-type': 'application/json' } : {}),
@@ -242,12 +248,13 @@ export class ElasticsearchConnector implements DatabaseConnector {
       throw new Error(`Could not reach Elasticsearch at ${url.origin}: ${networkErrorMessage(error)}`);
     }
 
+    const body = await boundedResponseText(response);
     if (!response.ok) {
-      const message = await response.text();
+      const message = body;
       throw new Error(`Elasticsearch request failed (${response.status}): ${message || response.statusText}`);
     }
 
-    return response.json() as Promise<T>;
+    return JSON.parse(body) as T;
   }
 
   private authHeaders(): Record<string, string> {
@@ -302,7 +309,9 @@ function requestWithoutCertificateVerification(url: URL, init: RequestInit, veri
   return new Promise((resolve, reject) => {
     const request = (url.protocol === 'https:' ? https.request : http.request)(url, {
       method: init.method ?? 'GET',
-      headers: init.headers as Record<string, string>,
+      // Node does not automatically frame DELETE bodies. Scroll cleanup needs
+      // a byte length so its JSON cannot become the next keep-alive request.
+      headers: { ...init.headers as Record<string, string>, ...(typeof init.body === 'string' ? { 'content-length': String(Buffer.byteLength(init.body)) } : {}) },
       rejectUnauthorized: verify,
       ...(address ? { lookup: pinnedLookup(address) } : {}),
       signal: init.signal ?? undefined
@@ -329,6 +338,23 @@ function requestWithoutCertificateVerification(url: URL, init: RequestInit, veri
     }
     request.end();
   });
+}
+
+async function boundedResponseText(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return '';
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > 8 * 1024 * 1024) throw new Error('Database response exceeded the size limit.');
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
 }
 
 function networkErrorMessage(error: unknown): string {
@@ -397,10 +423,14 @@ interface ElasticsearchSearchResponse {
   aggregations?: Record<string, unknown>;
 }
 
+function assertCompleteSearch(response: ElasticsearchSearchResponse, operation: 'query' | 'export'): void {
+  if (response.timed_out) throw new Error(`Elasticsearch ${operation} timed out; incomplete results were discarded.`);
+  if (response.terminated_early) throw new Error(`Elasticsearch ${operation} terminated early; incomplete results were discarded.`);
+  if ((response._shards?.failed ?? 0) > 0) throw new Error(`Elasticsearch ${operation} failed on ${response._shards!.failed} shard(s); incomplete results were discarded.`);
+}
+
 function assertCompleteSearchPage(response: ElasticsearchSearchResponse): void {
-  if (response.timed_out) throw new Error('Elasticsearch export timed out before all matching documents were returned.');
-  if (response.terminated_early) throw new Error('Elasticsearch export terminated early before all matching documents were returned.');
-  if ((response._shards?.failed ?? 0) > 0) throw new Error(`Elasticsearch export failed on ${response._shards!.failed} shard(s).`);
+  assertCompleteSearch(response, 'export');
   if ((response.hits?.hits?.length ?? 0) > 0 && !response._scroll_id) {
     throw new Error('Elasticsearch export did not receive a scroll cursor for the remaining matching documents.');
   }

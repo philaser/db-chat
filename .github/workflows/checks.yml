@@ -6,14 +6,36 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: npm run test:persistence
       - run: npm run typecheck
       - run: npm run build
+      - run: node scripts/evaluate-chat.mjs
+      - run: npm audit --omit=dev --audit-level=high
       - run: npm run desktop:build
+  databases:
+    runs-on: ubuntu-24.04
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Verify SQL, MongoDB, Elasticsearch, and account coordination
+        run: npm run test:databases -- postgres mysql mongodb elasticsearch accounts

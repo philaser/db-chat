@@ -26,6 +26,17 @@ function fixture(client: AgentModelClient) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('agent execution invariants', () => {
+  it('rejects oversized accumulated tool arguments before parsing or executing them', async () => {
+    const client: AgentModelClient = { async *streamChat() {
+      yield { toolCalls: [{ index: 0, id: 'oversized', function: { name: 'get_schema_info', arguments: '{"search":"' + 'x'.repeat(40_000) } }] };
+      yield { toolCalls: [{ index: 0, function: { arguments: 'x'.repeat(40_000) + '"}' } }] };
+    } };
+    const configured = fixture(client);
+    const execute = vi.spyOn(configured.toolRegistry, 'execute');
+    await expect(runAgentLoop([], 'oversized-call', undefined, configured)).rejects.toThrow(/input size limit/);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it.each([true, false])('repairs a failed query once without presenting an unperformed retry (repairs=%s)', async (repairs) => {
     let rounds = 0;
     let queries = 0;

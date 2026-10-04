@@ -15,6 +15,9 @@ const Database = require(input.databaseModule);
 let db;
 try {
   db = new Database(input.databasePath, { fileMustExist: true, readonly: input.readonly });
+  if (db.pragma('compile_options').some(row => row.compile_options === 'DEFAULT_MEMSTATUS=0')) throw new Error('SQLite requires the bounded-memory build. Run npm run prepare:sqlite.');
+  db.pragma('hard_heap_limit = 67108864');
+  db.pragma('trusted_schema = OFF');
   const statement = db.prepare(input.query);
   if (input.readonly && !statement.readonly) throw new Error('Safe mode requires a read-only SQLite statement.');
   const rows = [];
@@ -50,14 +53,22 @@ async function write(value) {
   let db;
   try {
     db = new Database(input.databasePath, { fileMustExist: true, readonly: true });
+    if (db.pragma('compile_options').some(row => row.compile_options === 'DEFAULT_MEMSTATUS=0')) throw new Error('SQLite requires the bounded-memory build. Run npm run prepare:sqlite.');
+    db.pragma('hard_heap_limit = 67108864');
+    db.pragma('trusted_schema = OFF');
     const statement = db.prepare(input.query);
     if (!statement.readonly || !statement.reader) throw new Error('Exports require one explicit read-only query.');
     const columns = statement.columns().map(column => column.name);
     await write({ type: 'header', columns });
     let rows = [];
+    let bytes = 0;
     for (const row of statement.iterate()) {
+      const rowBytes = Buffer.byteLength(JSON.stringify(row));
+      if (rowBytes > input.maxBytes) throw new Error('SQLite export row exceeded the size limit. Select fewer or smaller columns.');
+      if (rows.length && bytes + rowBytes > input.maxBytes) { await write({ type: 'batch', rows }); rows = []; bytes = 0; }
       rows.push(row);
-      if (rows.length === input.batchSize) { await write({ type: 'batch', rows }); rows = []; }
+      bytes += rowBytes;
+      if (rows.length === input.batchSize) { await write({ type: 'batch', rows }); rows = []; bytes = 0; }
     }
     if (rows.length) await write({ type: 'batch', rows });
   } catch (error) {
@@ -74,7 +85,7 @@ export class SQLiteExecution {
     return new Promise((resolve, reject) => {
       signal?.throwIfAborted();
       const start = performance.now();
-      const child = spawn(process.execPath, ['-e', childProgram], {
+      const child = spawn(process.execPath, ['--max-old-space-size=96', '-e', childProgram], {
         env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
@@ -122,7 +133,7 @@ export class SQLiteExecution {
   async *export(databasePath: string, query: string, batchSize: number, timeoutMs: number, signal?: AbortSignal): AsyncIterable<QueryResult> {
     signal?.throwIfAborted();
     const started = performance.now();
-    const child = spawn(process.execPath, ['-e', exportChildProgram], {
+    const child = spawn(process.execPath, ['--max-old-space-size=96', '-e', exportChildProgram], {
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
@@ -148,7 +159,7 @@ export class SQLiteExecution {
       child.on('close', (code, exitSignal) => { exited = true; this.active.delete(child); resolve({ code, signal: exitSignal }); });
     });
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-    child.stdin.end(JSON.stringify({ databaseModule, databasePath, query, batchSize }));
+    child.stdin.end(JSON.stringify({ databaseModule, databasePath, query, batchSize, maxBytes: MAX_OUTPUT_BYTES }));
     try {
       for await (const line of lines) {
         const message = JSON.parse(line) as { type: 'header' | 'batch' | 'error'; columns?: string[]; rows?: Record<string, unknown>[]; error?: string };

@@ -446,11 +446,13 @@ async function streamModelResponse(
       }
 
       if (chunk.content) content += chunk.content;
+      if (content.length + reasoning.length > 512 * 1024) throw new Error('The model response exceeded the text size limit.');
       if (chunk.finishReason) finishReason = chunk.finishReason;
       if (chunk.usage) usage = chunk.usage;
 
       if (chunk.toolCalls) {
         for (const tc of chunk.toolCalls) {
+          if (!Number.isInteger(tc.index) || tc.index < 0 || tc.index >= 32) throw new Error('The model requested too many or invalid tool calls.');
           if (!toolCallMap.has(tc.index)) {
             toolCallMap.set(tc.index, {
               id: tc.id ?? '',
@@ -466,6 +468,8 @@ async function streamModelResponse(
             if (tc.function?.name) existing.function.name += tc.function.name;
             if (tc.function?.arguments) existing.function.arguments += tc.function.arguments;
           }
+          const assembled = toolCallMap.get(tc.index)!;
+          if (assembled.function.arguments.length > 64 * 1024 || assembled.function.name.length > 128 || assembled.id.length > 256) throw new Error('The model tool call exceeded the input size limit.');
         }
       }
     }

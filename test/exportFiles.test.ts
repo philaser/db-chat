@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { QueryResult } from '../src/shared/types.js';
 import { writeDataExport } from '../src/server/exports/dataExport.js';
 import { buildReportDownload } from '../src/server/exports/reportExport.js';
@@ -39,6 +39,62 @@ async function* batches(): AsyncIterable<QueryResult> {
 }
 
 describe('export file generation', () => {
+  it('drains an account\'s running and queued exports and removes only its files', async () => {
+    const jobs = new ExportJobs({ maxRows: 10, maxBytes: 1024, timeoutMs: 10_000, ttlMs: 10_000 });
+    const details = { title: 'Rows', format: 'csv' as const, scope: 'all' as const };
+    let release!: () => void;
+    let started = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const active = jobs.start('owner-a', 'chat', details, async () => { started = true; await gate; });
+    let queuedRan = false;
+    jobs.start('owner-a', 'chat', details, async () => { queuedRan = true; });
+    const other = jobs.start('owner-b', 'other-chat', details, async context => { await writeFile(context.filename, 'owned by B'); });
+    try {
+      await vi.waitFor(() => { expect(started).toBe(true); expect(jobs.get('owner-b', other.id)?.status).toBe('ready'); });
+      let drained = false;
+      const draining = jobs.cancelOwner('owner-a').then(() => { drained = true; });
+      await Promise.resolve();
+      expect(drained).toBe(false);
+      expect(jobs.get('owner-a', active.id)?.status).toBe('cancelled');
+      release(); await draining;
+      expect(queuedRan).toBe(false);
+      expect(jobs.list('owner-a', 'chat')).toEqual([]);
+      expect(await readFile(jobs.file('owner-b', other.id)!, 'utf8')).toBe('owned by B');
+    } finally { release(); await jobs.close(); }
+  });
+
+  it('retains concurrency slots while cancelled database work is still cleaning up', async () => {
+    const jobs = new ExportJobs({ maxRows: 10, maxBytes: 1024, timeoutMs: 10_000, ttlMs: 10_000 });
+    const releases: Array<() => void> = [];
+    let started = 0;
+    const run = async () => {
+      started++;
+      await new Promise<void>(resolve => releases.push(resolve));
+    };
+    const details = { title: 'Rows', format: 'csv' as const, scope: 'all' as const };
+    const first = jobs.start('owner-a', 'chat-a', details, run);
+    jobs.start('owner-b', 'chat-b', details, run);
+    await vi.waitFor(() => expect(started).toBe(2));
+    const cancelling = jobs.cancel('owner-a', first.id);
+    const sameOwner = jobs.start('owner-a', 'chat-a', details, run);
+    const anotherOwner = jobs.start('owner-c', 'chat-c', details, run);
+    try {
+      expect(jobs.get('owner-a', first.id)?.status).toBe('cancelled');
+      expect(jobs.get('owner-a', sameOwner.id)?.status).toBe('queued');
+      expect(jobs.get('owner-c', anotherOwner.id)?.status).toBe('queued');
+      expect(started).toBe(2);
+      releases[0]();
+      await cancelling;
+      await vi.waitFor(() => expect(started).toBe(3));
+      expect(jobs.get('owner-a', sameOwner.id)?.status).toBe('running');
+      expect(jobs.get('owner-c', anotherOwner.id)?.status).toBe('queued');
+    } finally {
+      const closing = jobs.close();
+      releases.forEach(release => release());
+      await closing;
+    }
+  });
+
   it('limits jobs to one per owner, lists only owned chat jobs, and cancels queued work without running it', async () => {
     const jobs = new ExportJobs({ maxRows: 10, maxBytes: 1024, timeoutMs: 10_000, ttlMs: 10_000 });
     let releaseFirst!: () => void;

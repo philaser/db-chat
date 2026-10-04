@@ -33,6 +33,12 @@ export interface WebServerConfig {
   allowedDatabaseHosts?: string[];
   maxActiveTurnsPerUser?: number;
   maxActiveTurns?: number;
+  maxDatabaseOperations?: number;
+  maxConcurrentRequests?: number;
+  managedTurnsPerAccountPerDay?: number;
+  managedTurnsPerDay?: number;
+  trustedProxyHops?: number;
+  shutdownGraceMs?: number;
   maxHistoryMessages: number;
   maxMessageChars: number;
   maxResultRows: number;
@@ -41,6 +47,11 @@ export interface WebServerConfig {
   exportMaxBytes?: number;
   exportTimeoutMs?: number;
   maxSqliteUploadBytes?: number;
+  sqliteUploadsPerAccountPerDay?: number;
+  sqliteUploadsPerDay?: number;
+  sqliteUploadBytesPerAccountPerDay?: number;
+  sqliteUploadBytesPerDay?: number;
+  maxConcurrentUploads?: number;
   sqliteUploadDir?: string;
   userKeyUiEnabled?: boolean;
   secretKey?: string;
@@ -49,6 +60,12 @@ export interface WebServerConfig {
 function numberFromEnv(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function quotaFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number, maximum = 2147483647): number {
+  const value = env[name] === undefined ? fallback : Number(env[name]);
+  if (!Number.isInteger(value) || value < 1 || value > maximum) throw new Error(name + ' must be an integer from 1 to ' + maximum + '.');
+  return value;
 }
 
 function decode(value: string | undefined): string | undefined {
@@ -155,6 +172,8 @@ export function loadWebServerConfig(env: NodeJS.ProcessEnv = process.env): WebSe
     if (origin.origin !== allowedOrigin || (env.NODE_ENV === 'production' && origin.protocol !== 'https:')) throw new Error('Set the public app origin to its HTTPS origin without a path.');
   }
   const dataDirectory = path.resolve(env.DBCHAT_WEB_DATA_DIR ?? path.join(os.homedir(), '.dbchat'));
+  const trustedProxyHops = Number(env.DBCHAT_WEB_TRUSTED_PROXY_HOPS ?? 0);
+  if (!Number.isInteger(trustedProxyHops) || trustedProxyHops < 0 || trustedProxyHops > 10) throw new Error('DBCHAT_WEB_TRUSTED_PROXY_HOPS must be an integer from 0 to 10.');
 
   return {
     storageMode: storageMode as 'local' | 'supabase',
@@ -174,8 +193,14 @@ export function loadWebServerConfig(env: NodeJS.ProcessEnv = process.env): WebSe
     openRouterApiKey: env.DBCHAT_WEB_OPENROUTER_API_KEY,
     model: env.DBCHAT_WEB_MODEL ?? DEFAULT_WEB_MODEL,
     allowedDatabaseHosts: (env.DBCHAT_WEB_ALLOWED_DATABASE_HOSTS ?? '').split(',').map((host) => host.trim()).filter(Boolean),
-    maxActiveTurnsPerUser: numberFromEnv(env.DBCHAT_WEB_MAX_ACTIVE_TURNS_PER_USER, 2),
-    maxActiveTurns: numberFromEnv(env.DBCHAT_WEB_MAX_ACTIVE_TURNS, 16),
+    maxActiveTurnsPerUser: quotaFromEnv(env, 'DBCHAT_WEB_MAX_ACTIVE_TURNS_PER_USER', 2),
+    maxActiveTurns: quotaFromEnv(env, 'DBCHAT_WEB_MAX_ACTIVE_TURNS', 16),
+    maxDatabaseOperations: quotaFromEnv(env, 'DBCHAT_WEB_MAX_DATABASE_OPERATIONS', 2),
+    maxConcurrentRequests: quotaFromEnv(env, 'DBCHAT_WEB_MAX_CONCURRENT_REQUESTS', 8, 128),
+    managedTurnsPerAccountPerDay: quotaFromEnv(env, 'DBCHAT_WEB_MANAGED_TURNS_PER_ACCOUNT_PER_DAY', 100),
+    managedTurnsPerDay: quotaFromEnv(env, 'DBCHAT_WEB_MANAGED_TURNS_PER_DAY', 1000),
+    trustedProxyHops,
+    shutdownGraceMs: numberFromEnv(env.DBCHAT_WEB_SHUTDOWN_GRACE_MS, 25_000),
     maxChatBodyBytes: numberFromEnv(env.DBCHAT_WEB_MAX_CHAT_BODY_BYTES, 16 * 1024 * 1024),
     maxBodyBytes: numberFromEnv(env.DBCHAT_WEB_MAX_BODY_BYTES, 256 * 1024),
     maxHistoryMessages: numberFromEnv(env.DBCHAT_WEB_MAX_HISTORY_MESSAGES, 40),
@@ -186,6 +211,11 @@ export function loadWebServerConfig(env: NodeJS.ProcessEnv = process.env): WebSe
     exportMaxBytes: Math.floor(numberFromEnv(env.DBCHAT_EXPORT_MAX_BYTES, 100 * 1024 * 1024)),
     exportTimeoutMs: numberFromEnv(env.DBCHAT_EXPORT_TIMEOUT_MS, 300_000),
     maxSqliteUploadBytes: numberFromEnv(env.DBCHAT_WEB_MAX_SQLITE_UPLOAD_BYTES, 50 * 1024 * 1024),
+    sqliteUploadsPerAccountPerDay: quotaFromEnv(env, 'DBCHAT_WEB_SQLITE_UPLOADS_PER_ACCOUNT_PER_DAY', 10),
+    sqliteUploadsPerDay: quotaFromEnv(env, 'DBCHAT_WEB_SQLITE_UPLOADS_PER_DAY', 100),
+    sqliteUploadBytesPerAccountPerDay: quotaFromEnv(env, 'DBCHAT_WEB_SQLITE_UPLOAD_BYTES_PER_ACCOUNT_PER_DAY', 250 * 1024 * 1024),
+    sqliteUploadBytesPerDay: quotaFromEnv(env, 'DBCHAT_WEB_SQLITE_UPLOAD_BYTES_PER_DAY', 1024 * 1024 * 1024),
+    maxConcurrentUploads: quotaFromEnv(env, 'DBCHAT_WEB_MAX_CONCURRENT_UPLOADS', 2),
     sqliteUploadDir: path.resolve(env.DBCHAT_WEB_SQLITE_UPLOAD_DIR ?? path.join(dataDirectory, 'sqlite')),
     userKeyUiEnabled: env.DBCHAT_WEB_USER_KEY_UI_ENABLED === 'true',
     secretKey: env.DBCHAT_WEB_SECRET_KEY

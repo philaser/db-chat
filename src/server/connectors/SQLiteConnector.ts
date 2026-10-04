@@ -31,29 +31,26 @@ export class SQLiteConnector implements DatabaseConnector {
   }
 
   async introspect(): Promise<DatabaseSchema> {
-    const db = this.requireDb();
-    const tableRows = db
-      .prepare("select name from sqlite_master where type in ('table', 'view') and name not like 'sqlite_%' order by name")
-      .all() as Array<{ name: string }>;
-
-    const tables: TableInfo[] = tableRows.map((table) => {
-      const columns = db.prepare(`pragma table_info('${table.name.replace(/'/g, "''")}')`).all() as Array<{
-        name: string;
-        type: string;
-        notnull: number;
-        pk: number;
-      }>;
-
-      return {
-        name: table.name,
-        columns: columns.map((column) => ({
-          name: column.name,
-          type: column.type || 'unknown',
-          nullable: column.notnull === 0,
-          primaryKey: column.pk > 0
-        }))
-      };
-    });
+    this.requireDb();
+    const metadata = await this.execution.execute(this.config!.databasePath!, `
+      SELECT m.name AS table_name, p.name AS column_name, p.type AS column_type,
+             p.[notnull] AS is_not_null, p.pk AS primary_key
+      FROM sqlite_master m LEFT JOIN pragma_table_info(m.name) p
+      WHERE m.type IN ('table', 'view') AND m.name NOT LIKE 'sqlite_%'
+      ORDER BY m.name, p.cid
+    `, true, 20_000, this.queryTimeoutMs);
+    if (metadata.rows.length > 20_000) throw new Error('SQLite schema is too large. Use a database with fewer visible columns.');
+    const byTable = new Map<string, TableInfo>();
+    for (const row of metadata.rows) {
+      const name = String(row.table_name);
+      const table = byTable.get(name) ?? { name, columns: [] };
+      if (row.column_name !== null) table.columns.push({
+        name: String(row.column_name), type: String(row.column_type || 'unknown'),
+        nullable: row.is_not_null === 0, primaryKey: Number(row.primary_key) > 0
+      });
+      byTable.set(name, table);
+    }
+    const tables = [...byTable.values()];
 
     return {
       kind: 'sqlite',

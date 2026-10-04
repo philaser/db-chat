@@ -143,6 +143,15 @@ describe('web content blocks', () => {
     expect(fetcher).toHaveBeenLastCalledWith('/api/v1/exports/export%2Fid', { method: 'DELETE', credentials: 'same-origin' });
   });
 
+  it('shows a failed removal while keeping the ready download available', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => new Response(JSON.stringify(init?.method === 'DELETE' ? { error: 'Unavailable' } : { export: { status: 'ready' } }), { status: init?.method === 'DELETE' ? 503 : 200, headers: { 'Content-Type': 'application/json' } })));
+    render(<StructuredContent blocks={[{ type: 'download', exportId: 'job-remove', title: 'Saved rows', format: 'csv' }]} />);
+    await screen.findByRole('link', { name: 'Download' });
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Saved rows download' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The download could not be removed.');
+    expect(screen.getByRole('link', { name: 'Download' })).toBeInTheDocument();
+  });
+
   it('cancels a preparing chat download and reports network failures', async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ export: { status: 'running', rowCount: 12 } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))

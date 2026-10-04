@@ -1,3 +1,5 @@
+import { guardedPostgresStream, WireResponseBudget } from './wireLimits.js';
+import type { Duplex } from 'node:stream';
 import { boundResult, resultLimit } from './resultLimits.js';
 import { classifyQuery, QueryValidator, type SafetyLevel } from './QueryValidator.js';
 import type {
@@ -13,6 +15,7 @@ export class PostgresConnector implements DatabaseConnector {
   private config: ConnectionConfig | null = null;
   private safetyLevel: SafetyLevel = 'standard';
   private maxRows = 1000;
+  private readonly wireBudget = new WireResponseBudget();
 
   setResultLimit(maxRows: number): void { this.maxRows = resultLimit(maxRows); }
 
@@ -43,13 +46,31 @@ export class PostgresConnector implements DatabaseConnector {
         this.config = null;
       }
     });
-    await client.connect();
+    // pg installs its parser here for both TCP and the decrypted TLS stream.
+    // Fail closed when a driver upgrade changes this integration seam.
+    const connection = (client as unknown as { connection: { attachListeners: (stream: Duplex) => void } }).connection;
+    if (!connection || typeof connection.attachListeners !== 'function') {
+      await client.end().catch(() => undefined);
+      throw new Error('This PostgreSQL driver cannot enforce database transport limits.');
+    }
+    const attachListeners = connection.attachListeners.bind(connection);
+    connection.attachListeners = (stream: Duplex) => {
+      const guarded = guardedPostgresStream(this.wireBudget);
+      guarded.on('error', error => stream.destroy(error));
+      stream.on('close', () => guarded.destroy());
+      attachListeners(guarded);
+      stream.pipe(guarded);
+    };
+    this.wireBudget.reset();
+    try { await client.connect(); }
+    catch (error) { await client.end().catch(() => undefined); throw error; }
     this.client = client;
     this.config = config;
   }
 
   async introspect(): Promise<DatabaseSchema> {
     const client = this.requireClient();
+    this.wireBudget.reset();
     const [columnResult, relationshipResult] = await Promise.all([
       client.query(`
         select t.table_schema, t.table_name, c.column_name, c.data_type,
@@ -151,10 +172,11 @@ export class PostgresConnector implements DatabaseConnector {
     const signal = options?.signal;
     if (signal?.aborted) throw abortError(signal);
 
+    this.wireBudget.reset();
     const start = performance.now();
     let result;
     if (this.safetyLevel === 'safe') {
-      await client.query('BEGIN READ ONLY');
+      await queryWithSignal(client, 'BEGIN READ ONLY', signal, () => this.clearAndClose(client));
       try { result = await queryWithSignal(client, effectiveQuery, signal, () => this.clearAndClose(client)); }
       finally { await client.query('ROLLBACK').catch(() => undefined); }
     } else result = await queryWithSignal(client, effectiveQuery, signal, () => this.clearAndClose(client));
@@ -192,10 +214,12 @@ export class PostgresConnector implements DatabaseConnector {
     const started = performance.now();
     let began = false;
     try {
+      this.wireBudget.reset();
       await queryWithSignal(client, 'BEGIN READ ONLY', signal, () => this.clearAndClose(client));
       began = true;
       await queryWithSignal(client, `DECLARE ${cursor} NO SCROLL CURSOR FOR ${query}`, signal, () => this.clearAndClose(client));
       for (;;) {
+        this.wireBudget.reset();
         const result = await queryWithSignal(client, `FETCH FORWARD ${batchSize} FROM ${cursor}`, signal, () => this.clearAndClose(client));
         const rows = result.rows as Record<string, unknown>[];
         const columns = result.fields.map(field => field.name);

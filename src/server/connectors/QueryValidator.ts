@@ -69,7 +69,7 @@ function sqlStatement(query: string): { sql: string; words: string[] } | null {
 }
 
 export function classifyQuery(query: string): QueryOperation {
-  if (typeof query !== 'string' || !query.trim()) return 'unknown';
+  if (typeof query !== 'string' || query.length > 64 * 1024 || !query.trim()) return 'unknown';
   if (query.trim().startsWith('{')) {
     try {
       const value = JSON.parse(query);
